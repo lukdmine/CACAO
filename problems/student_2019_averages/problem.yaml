@@ -1,0 +1,47 @@
+name: Averages Calculation 2019
+description: 'Compute per-student and per-question averages from a results matrix
+  of integer scores (0-100). Two separate reductions: row-wise (avg per student) and
+  column-wise (avg per question). Both dimensions always divisible by 32. Tolerance:
+  0.000001%.
+
+  '
+gpu:
+  index: 0
+kernel:
+  file: kernel.cu
+  function: kernel
+reference:
+  type: cpu_c
+  function: averages_reference
+  file: ref_cpu.c
+scalars:
+- name: STUDENTS
+  dtype: int
+  value: 4096
+- name: QUESTIONS
+  dtype: int
+  value: 1024
+grid:
+  x: STUDENTS
+  y: QUESTIONS
+vectors:
+- name: results
+  dtype: int
+  size: STUDENTS * QUESTIONS
+  access: read
+  init: random
+  validate: false
+- name: avg_stud
+  dtype: float
+  size: STUDENTS
+  access: write
+  init: zeros
+  validate: true
+- name: avg_que
+  dtype: float
+  size: QUESTIONS
+  access: write
+  init: zeros
+  validate: true
+validation:
+  tolerance: 1.0e-06

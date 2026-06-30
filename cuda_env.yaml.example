@@ -1,0 +1,17 @@
+# CUDA Environment Configuration
+# Copy to cuda_env.yaml and uncomment/edit paths as needed.
+# All fields are optional — auto-discovery is used for any missing field.
+# Generated automatically by: ./setup.sh
+
+# Path to CUDA Toolkit root (contains bin/, include/, lib64/)
+# cuda_path: /usr/local/cuda
+
+# Explicit tool paths (override auto-discovery)
+# nvcc: /usr/local/cuda/bin/nvcc
+# ncu: /usr/local/cuda/bin/ncu
+# nvidia_smi: /usr/bin/nvidia-smi
+# gcc: /usr/bin/gcc
+# gpp (g++): /usr/bin/g++
+
+# CUDA include directory (for NVRTC compiler options)
+# cuda_include: /usr/local/cuda/include

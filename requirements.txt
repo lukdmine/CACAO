@@ -1,0 +1,22 @@
+# CUDA Agentic Optimizer Requirements
+# Python 3.10 required for pyktt compatibility
+
+numpy>=1.24.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# Pydantic for structured output
+pydantic>=2.0.0
+
+# LangChain (LLM abstraction layer)
+langchain-core>=0.2.0
+
+# LLM provider wrappers (provider SDKs are pulled in transitively)
+langchain-openai>=0.1.0
+langchain-anthropic>=0.1.0
+langchain-google-genai>=1.0.0
+
+# API server
+fastapi>=0.104.0
+uvicorn>=0.24.0
+watchfiles>=1.0.0  # Required for uvicorn --reload exclude support

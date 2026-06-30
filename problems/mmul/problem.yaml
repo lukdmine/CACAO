@@ -1,0 +1,49 @@
+name: GEMM
+description: 'General Matrix-Matrix Multiplication: C = A * B'
+gpu:
+  index: 0
+kernel:
+  file: kernel.cu
+  function: kernel
+reference:
+  type: cuda
+  function: gemm_reference
+  file: ref_kernel.cu
+  block_x: 8
+  block_y: 8
+scalars:
+- name: M
+  dtype: int
+  value: 2048
+- name: N
+  dtype: int
+  value: 2048
+- name: K
+  dtype: int
+  value: 2048
+grid:
+  x: M
+  y: N
+vectors:
+- name: mat_a
+  dtype: float
+  size: M * K
+  access: read
+  init: random
+  validate: false
+- name: mat_b
+  dtype: float
+  size: N * K
+  access: read
+  init: random
+  validate: false
+- name: mat_c
+  dtype: float
+  size: M * N
+  access: write
+  init: random
+  validate: true
+validation:
+  tolerance: 1.0
+tuning:
+  duration_s: 300

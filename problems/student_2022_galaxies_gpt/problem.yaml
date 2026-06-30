@@ -1,0 +1,66 @@
+name: Difference of Galaxies 2022
+description: 'Compute similarity of two galaxies by comparing pairwise Euclidean distances
+  of stars. Formula: diff = sqrt(1/(N*(N-1)) * sum_{i<j} (d_A_ij - d_B_ij)^2), where
+  d_A_ij is the distance between stars i and j in galaxy A. Each galaxy defined by
+  Cartesian coordinates (x, y, z). O(N^2) pairwise computation.'
+gpu:
+  index: 0
+kernel:
+  file: kernel.cu
+  function: kernel
+reference:
+  type: cpu_c
+  function: galaxies_reference
+  file: ref_cpu.c
+scalars:
+- name: N
+  dtype: int
+  value: 50000
+grid:
+  x: N
+  y: '1'
+vectors:
+- name: Ax
+  dtype: float
+  size: N
+  access: read
+  init: random
+  validate: false
+- name: Ay
+  dtype: float
+  size: N
+  access: read
+  init: random
+  validate: false
+- name: Az
+  dtype: float
+  size: N
+  access: read
+  init: random
+  validate: false
+- name: Bx
+  dtype: float
+  size: N
+  access: read
+  init: random
+  validate: false
+- name: By
+  dtype: float
+  size: N
+  access: read
+  init: random
+  validate: false
+- name: Bz
+  dtype: float
+  size: N
+  access: read
+  init: random
+  validate: false
+- name: result
+  dtype: float
+  size: '1'
+  access: write
+  init: zeros
+  validate: true
+validation:
+  tolerance: 0.05

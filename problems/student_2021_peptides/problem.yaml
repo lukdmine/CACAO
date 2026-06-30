@@ -1,0 +1,59 @@
+name: Optimization of Peptides 2021
+description: 'Evaluate peptide chains for antibiotic affinity scoring. Input is n+17
+  amino acids (integers 0-19) encoding n overlapping chains of length 18 via stride-1
+  sliding window. Two precomputed 20x18 score tables. Salt-bridge invalidation (K-D,
+  K-E, R-D, R-E at positions +/-2, +/-3, +/-5 cyclically) zeros both scores. Chain
+  count divisible by 1024. Target: 1000 mchains/s at 268M chains.
+
+  '
+gpu:
+  index: 0
+kernel:
+  file: kernel.cu
+  function: kernel
+reference:
+  type: cpu_c
+  function: peptides_reference
+  file: ref_cpu.c
+scalars:
+- name: N
+  dtype: int
+  value: 1048576
+grid:
+  x: N
+  y: '1'
+vectors:
+- name: tableA
+  dtype: float
+  size: 20 * 18
+  access: read
+  init: random
+  validate: false
+- name: tableB
+  dtype: float
+  size: 20 * 18
+  access: read
+  init: random
+  validate: false
+- name: chains
+  dtype: int
+  size: N + 17
+  access: read
+  init: random
+  init_min: 0
+  init_max: 19
+  validate: false
+- name: primaryScore
+  dtype: float
+  size: N
+  access: write
+  init: zeros
+  validate: true
+- name: secondaryScore
+  dtype: float
+  size: N
+  access: write
+  init: zeros
+  validate: true
+validation:
+  tolerance: 0.001

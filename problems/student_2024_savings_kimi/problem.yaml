@@ -1,0 +1,45 @@
+name: Savings Accounting 2024
+description: 'Account savings for c customers over p periods. Input is a 2D array
+  (periods x clients) of deposits. Step 1: column-wise prefix sum to compute cumulative
+  account balance. Step 2: row-wise reduction to compute total money per period. Both
+  dimensions divisible by 128. All integer arithmetic, exact match required.'
+gpu:
+  index: 1
+kernel:
+  file: kernel.cu
+  function: kernel
+reference:
+  type: cpu_c
+  function: savings_reference
+  file: ref_cpu.c
+scalars:
+- name: CLIENTS
+  dtype: int
+  value: 8192
+- name: PERIODS
+  dtype: int
+  value: 8192
+grid:
+  x: CLIENTS
+  y: PERIODS
+vectors:
+- name: changes
+  dtype: int
+  size: CLIENTS * PERIODS
+  access: read
+  init: random
+  validate: false
+- name: account
+  dtype: int
+  size: CLIENTS * PERIODS
+  access: write
+  init: zeros
+  validate: true
+- name: sum
+  dtype: int
+  size: PERIODS
+  access: write
+  init: zeros
+  validate: true
+validation:
+  tolerance: 0.05

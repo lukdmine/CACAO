@@ -1,0 +1,66 @@
+# Problem Definition for CUDA Kernel Optimization
+# This file defines the kernel interface - what the agent must implement
+
+name: "GEMM"
+description: "General Matrix-Matrix Multiplication: C = A * B"
+
+# Target GPU hardware (helps agent make optimization decisions)
+gpu:
+  model: "NVIDIA RTX 3090"      # GPU model name
+  compute_capability: "8.6"     # SM version
+  sm_count: 82                  # Number of streaming multiprocessors
+  max_threads_per_block: 1024   # Hardware limit
+  shared_memory_per_block: 49152  # 48KB in bytes
+  registers_per_block: 65536    # Total registers per block
+  memory_bandwidth_gb: 936      # GB/s
+
+# Kernel to be optimized (agent writes this)
+kernel:
+  file: "kernel.cu"
+  function: "kernel"
+
+# Reference kernel for validation
+reference:
+  file: "ref_kernel.cu"
+  function: "gemm_reference"
+  block_x: 8
+  block_y: 8
+
+# Scalar constants (injected as compiler defines)
+scalars:
+  - name: "M"
+    dtype: "int"
+    value: 2048
+  - name: "N"
+    dtype: "int"
+    value: 2048
+  - name: "K"
+    dtype: "int"
+    value: 2048
+
+# Base grid dimensions (references scalars above)
+grid:
+  x: "M"
+  y: "N"
+
+# Vector arguments (input/output matrices)
+vectors:
+  - name: "mat_a"
+    dtype: "float"
+    size: "M * K"
+    access: "read"
+    init: "random"
+  - name: "mat_b"
+    dtype: "float"
+    size: "N * K"
+    access: "read"
+    init: "random"
+  - name: "mat_c"
+    dtype: "float"
+    size: "M * N"
+    access: "write"
+    validate: true
+
+# Validation settings
+validation:
+  tolerance: 0.05

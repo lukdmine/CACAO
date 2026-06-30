@@ -1,0 +1,39 @@
+name: Moving Average
+description: '1D Moving Average with boundary clamping: out[i] = mean of 2R neighbours
+  of in[i] (N elements, half-window R)'
+gpu:
+  index: 0
+kernel:
+  file: kernel.cu
+  function: kernel
+reference:
+  type: cuda
+  function: moving_average_reference
+  file: ref_kernel.cu
+  block_x: 256
+  block_y: 1
+scalars:
+- name: N
+  dtype: int
+  value: 33554432
+- name: R
+  dtype: int
+  value: 256
+grid:
+  x: N
+  y: '1'
+vectors:
+- name: input
+  dtype: float
+  size: N
+  access: read
+  init: random
+  validate: false
+- name: average
+  dtype: float
+  size: N
+  access: write
+  init: zeros
+  validate: true
+validation:
+  tolerance: 0.001
