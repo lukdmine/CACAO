@@ -1,6 +1,6 @@
 # CACAO — CUDA Agentic Coding Autotuning Optimizer
 
-CACAO is an LLM-driven agent that searches for fast CUDA kernel implementations across multiple strategy branches in parallel. Given a problem specification (`problem.yaml`) and a reference implementation (a CUDA kernel or a sequential C/C++ function), the agent iteratively writes a CUDA kernel and a tuning parameter space, lets the [KTT](https://github.com/HiPerCoRe/KTT) autotuner search that space, profiles the best configuration with NVIDIA NCU, and uses the timings + profiler counters to propose the next iteration.
+CACAO is an LLM-driven system that searches for fast CUDA kernel implementations across multiple strategy branches in parallel. Given a problem specification (`problem.yaml`) and a reference implementation (a CUDA kernel or a sequential C/C++ function), the agent iteratively writes a CUDA kernel and a tuning parameter space, lets the [KTT](https://github.com/HiPerCoRe/KTT) autotuner search that space, profiles the best configuration with NVIDIA NCU, and uses the timings + profiler counters to propose the next iteration.
 
 ## Quick Start
 
