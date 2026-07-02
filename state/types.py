@@ -95,6 +95,7 @@ class IterState(BaseModel):
     plan: str = ""
     kernel_code: str = ""
     params_json: str = "{}"
+    framework_cpp: str = ""  # assembled framework.cpp driver (framework-file mode)
     run_output: str = ""
     ncu_metrics: Optional[dict] = None
     decision: Optional[dict] = None
