@@ -521,7 +521,12 @@ stays pure metadata. `api/problems.py` create/update handle `inputs.hpp` +
   skeleton wires reference/validation off `in.boundary`/`in.validated`).
   Regenerated `mmul`, compiled, tuned 139 configs, `results.json` parsed by
   `utils/results.py` unchanged.
-- **Phase 2 — engine.** Compile step + structured error capture into `run.py`.
+- **Phase 2 — compile module. ✅ (core).** `utils/build.py`:
+  `compile_framework()` (Phase-0 flags, structured g++ error capture) +
+  `driver_command()`. Tested: compiles + runs `mmul` end-to-end, and a broken
+  driver yields `ok=False` with captured diagnostics. `run.py` wiring lands with
+  Phase 3 (once `configure.py` emits `framework.cpp` per iteration; the current
+  `params.json` path stays live until then).
 - **Phase 3 — LLM regions.** Rework `configure.py` + prompts to emit the three
   region bodies against this spec; update `implement.py` for multi-kernel.
 - **Phase 4 — validation & feedback.** Reference wiring; host-compile-error loop.
