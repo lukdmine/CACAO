@@ -3,7 +3,7 @@
 import re
 from pathlib import Path
 
-from config import get_output_dir
+from config import get_output_dir, get_problem_dir
 from utils.files import save_output, create_iter_dir
 from utils.log import log
 from state.types import WorkingState
@@ -56,6 +56,11 @@ async def implement_node(state: WorkingState) -> WorkingState:
             {"name": "proposal", "limit": 1},
         ],
     )
+
+    # Framework mode: show the I/O boundary so the kernel signature matches it.
+    inputs_src = get_problem_dir() / "inputs.hpp"
+    if inputs_src.exists():
+        ctx["inputs_hpp"] = inputs_src.read_text()
 
     # Add node-specific follow-up/retry context
     if is_followup:
@@ -111,10 +116,10 @@ async def implement_node(state: WorkingState) -> WorkingState:
             "WARN",
         )
 
-    save_output(iter_dir, kernel_code, "kernel.cu")
+    save_output(iter_dir, kernel_code, "kernels.cu")
     state.kernel_code = kernel_code
     state.iter_num = iteration
     state.status = "configuring"
     log(f"Kernel implemented ({len(kernel_code)} chars)", "SUCCESS")
-    log(f"Saved to: {iter_dir / 'kernel.cu'}")
+    log(f"Saved to: {iter_dir / 'kernels.cu'}")
     return state

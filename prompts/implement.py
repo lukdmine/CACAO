@@ -23,7 +23,9 @@ You will receive:
 
 Write the **fastest possible CUDA kernel** that:
 1. Implements the algorithm correctly
-    - as a **single kernel**, not a multi-kernel pipeline
+    - as **one or more** `extern "C" __global__` kernels — a single kernel, or a
+      multi-kernel pipeline when the strategy calls for it (you wire the launch
+      order and buffers in the next configure step)
 2. Follows the optimization plan carefully
     — unless past iterations intentionally changed part of the approach; in that case, follow the most recent validated decisions rather than the original plan verbatim.
 3. Uses tunable parameters (they are preprocessor defines from KTT)
@@ -37,7 +39,7 @@ Output ONLY the CUDA kernel code. No markdown, no explanation.
 
 ## Example Structure
 
-**IMPORTANT**: Document tunable parameters in a comment block at the top. KTT passes them as compiler defines (`-DBLOCK_X=16`), so they're already compile-time constants you can use directly. Problem scalars from `problem.yaml` (like `M`, `N`, `K`) are also injected as compiler defines (`-DM=2048`) — do NOT include them in the function signature.
+**IMPORTANT**: Document tunable parameters in a comment block at the top. Tuning parameters become KTT compiler defines (`-DBLOCK_X=16`) — compile-time constants you use directly (you declare them in the next configure step). Each kernel's arguments are bound (in that step) to the problem's input/output buffers from `inputs.hpp` and any scratch buffers you introduce, **in the order you write them** — so the signature is your design, not fixed by problem.yaml. A problem scalar may be a compile-time `-D` macro (default: use it directly, keep it OUT of the signature) or a runtime argument (then it IS a parameter).
 
 ```cuda
 // =============================================================================
@@ -72,10 +74,10 @@ extern "C" __global__ void kernel(
 
 ## Critical Requirements
 
-1. **extern "C"** - Required for KTT to find the kernel by name
-    - Keep the solution as a single externally visible kernel unless the reference interface itself requires otherwise
-2. **Parameter names** - Must match exactly what will be in params.json
-3. **Function signature** - Only vector (pointer) arguments, in `vectors:` order from problem.yaml. Scalars are compiler defines, NOT function parameters.
+1. **extern "C"** on every `__global__` - Required for KTT to find each kernel by name
+    - One kernel, or several for a pipeline; each is bound and launched in the next configure step
+2. **Parameter names** - Tuning-parameter macros must match the names you declare in the configure step (PARAMS region)
+3. **Function signature** - Your design. Each kernel's parameters get bound, in the order you write them, to input/output buffers (from `inputs.hpp`), scratch buffers, and any runtime scalar arguments. Compile-time `-D` macro scalars are NOT function parameters.
 4. **Bounds checking** - Handle edge cases when dimensions don't divide evenly
     - Never allow out-of-bounds writes; reject unsafe assumptions unless constraints guarantee them
 5. **Shared memory** - Use **STATIC** only (`__shared__ float tile[SIZE]`)
@@ -157,6 +159,12 @@ __device__ __forceinline__ void load_tile(...) {
     parts = []
     if ctx.get("problem_yaml"):
         parts.append(f"## Problem Definition:\n```yaml\n{ctx['problem_yaml']}\n```")
+    if ctx.get("inputs_hpp"):
+        parts.append(
+            "## Inputs (inputs.hpp) — the input/output buffers your kernels consume/produce "
+            "(you'll bind kernel args to these by name next):\n```cpp\n"
+            f"{ctx['inputs_hpp']}\n```"
+        )
     if ctx.get("ref_kernel"):
         parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
     if ctx.get("plan"):
@@ -190,8 +198,8 @@ __device__ __forceinline__ void load_tile(...) {
         "Dynamic shared memory crashes every config.\n"
         "2. NO host headers — `#include <stdint.h>`, `<cuda.h>`, `<cuda_runtime.h>`, `<stdio.h>` "
         "are forbidden. Use built-in types.\n"
-        "3. Function signature: vector pointers ONLY. Scalars (M, N, K, etc.) are `#define` "
-        "constants, NOT function parameters.\n"
+        "3. Function signature is YOUR design — each kernel's params get bound (next step) to "
+        "inputs.hpp buffers + scratch, in order. `-D` macro scalars are NOT parameters; runtime-scalar args are.\n"
         '4. `extern "C"` required on the kernel.\n'
         "5. Every global and shared memory access must be provably in-bounds."
     )
