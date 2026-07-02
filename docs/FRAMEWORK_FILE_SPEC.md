@@ -489,7 +489,7 @@ profiling → proposing → deciding`).
 | `implement.py` | May emit **multiple** `__global__`s in one `kernels.cu`; drops "single kernel only". Interface rules §12. |
 | `configure.py` | **No `params.json`.** Emits the **three region bodies**; `utils/framework.py` assembles `framework.cpp` = skeleton (from `problem.yaml` metadata) + regions. |
 | `run.py` | Adds a **compile step** (§14) before executing; feeds host-compile errors back. Result parsing unchanged. |
-| `profile.py` | NCU on the pipeline binary; per-stage via `SetProfiledDefinitions`. |
+| `profile.py` | ✅ Runs the compiled driver in **profile mode** (LoadResults → fastest valid config → single `Run`) under NCU; validation skipped so only agent kernels launch. `parse_ncu_csv` returns per-kernel metrics (prefixed keys for pipelines). |
 | `propose.py`/`decide.py` | Unchanged; also react to host-compile errors. |
 
 **Removed:** `tuner.py`, `params.json`, `models/params.py`, the scalars/vectors/grid
