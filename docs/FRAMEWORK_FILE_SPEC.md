@@ -527,8 +527,13 @@ stays pure metadata. `api/problems.py` create/update handle `inputs.hpp` +
   driver yields `ok=False` with captured diagnostics. `run.py` wiring lands with
   Phase 3 (once `configure.py` emits `framework.cpp` per iteration; the current
   `params.json` path stays live until then).
-- **Phase 3 — LLM regions.** Rework `configure.py` + prompts to emit the three
-  region bodies against this spec; update `implement.py` for multi-kernel.
+- **Phase 3 — LLM regions. ✅ DONE.** `configure.py` emits the three region bodies
+  (structured `FrameworkRegions`) → assembles `framework.cpp` (3a); `run.py`
+  compiles + runs the driver, routing compile errors to propose (3b);
+  `implement.py` allows multi-kernel + LLM-designed signatures, sees `inputs.hpp`
+  (3c). **Validated live (3d):** a real LLM ran implement→configure→run on `mmul`
+  framework mode — compilable kernel, correct `in.*` boundary binding + runtime
+  scalars, 41/41 configs validated on GPU.
 - **Phase 4 — validation & feedback.** Reference wiring; host-compile-error loop.
 - **Phase 5 — pipeline problem.** Add a 2-stage problem (transpose→GEMM, or
   gather/map→reduce) to exercise composite kernels + scratch.
