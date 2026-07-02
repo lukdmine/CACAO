@@ -1,0 +1,22 @@
+# Framework-mode problem definition (Phase 1, Shape B) — PURE METADATA.
+# The I/O boundary (scalars, inputs, which buffer is validated) lives entirely
+# in inputs.hpp. This file carries only run/validation/reference metadata.
+name: GEMM
+gpu:
+  index: 0
+tuning:
+  duration_s: 20
+validation:
+  tolerance: 1.0
+
+# OpenCL global-size semantics: `grid` is total work-items (KTT divides by the
+# per-config local size). `cuda` => grid is number of blocks.
+global_size_type: opencl
+grid:
+  x: kSizeM          # expression over scalars defined in inputs.hpp
+  y: kSizeN
+
+reference:
+  function: gemm_reference
+  file: ref_kernel.cu
+  block: { x: 8, y: 8 }
