@@ -287,7 +287,6 @@ def build_prompt_context(
         "plan": getattr(state, "plan", "") if iter_num <= 1 else "",
         "strategy": getattr(state, "strategy", None),
         "kernel_code": getattr(state, "kernel_code", "") or "",
-        "params_json": getattr(state, "params_json", "") or "",
         "framework_cpp": getattr(state, "framework_cpp", "") or "",
         "proposal": getattr(state, "proposal", "") or "",
         "parent_context": format_parent_context(branch_path)

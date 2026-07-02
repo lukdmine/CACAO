@@ -235,7 +235,7 @@ def main():
     sections.append("  status: string;")
     sections.append("  plan: string;")
     sections.append("  kernel_code: string;")
-    sections.append("  params_json: string;")
+    sections.append("  framework_cpp: string;")
     sections.append("  run_output: string;")
     sections.append("  ncu_metrics: Record<string, unknown> | null;")
     sections.append("  proposal?: string;")

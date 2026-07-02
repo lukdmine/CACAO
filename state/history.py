@@ -18,7 +18,7 @@ from utils.results import get_results_summary, load_reference_time
 _ALL_HISTORY_FIELDS: Set[str] = {
     "plan",
     "kernel_code",
-    "params_json",
+    "framework_cpp",
     "run_output",
     "ncu_metrics",
     "decision",
@@ -132,7 +132,7 @@ def _fmt_decision(d: dict) -> str:
 _FIELD_FORMATTERS = {
     "plan": lambda v: f"**Plan:**\n{_preview(v, 5)}",
     "kernel_code": lambda v: f"**Kernel Code:**\n```cuda\n{v}\n```",
-    "params_json": lambda v: f"**Tuning Parameters:**\n```json\n{v}\n```",
+    "framework_cpp": lambda v: f"**Framework Driver:**\n```cpp\n{v}\n```",
     "run_output": lambda v: (
         f"**Run Output (last 30 lines):**\n```\n{_tail(v, 30)}\n```"
     ),
@@ -289,11 +289,11 @@ def format_best_so_far(
         return age < depth
 
     kernel_visible = _field_visible_in_history("kernel_code")
-    params_visible = _field_visible_in_history("params_json")
+    framework_visible = _field_visible_in_history("framework_cpp")
 
-    if kernel_visible and params_visible:
+    if kernel_visible and framework_visible:
         parts.append(
-            f"*(See iteration {iter_num} in the history above for kernel code and params.)*"
+            f"*(See iteration {iter_num} in the history above for kernel code and framework driver.)*"
         )
     else:
         if kernel_visible:
@@ -303,13 +303,13 @@ def format_best_so_far(
         elif best_snap.get("kernel_code"):
             parts.append(f"**Kernel Code:**\n```cuda\n{best_snap['kernel_code']}\n```")
 
-        if params_visible:
+        if framework_visible:
             parts.append(
-                f"*(Tuning params for this iteration are shown in iteration {iter_num} above.)*"
+                f"*(Framework driver for this iteration is shown in iteration {iter_num} above.)*"
             )
-        elif best_snap.get("params_json") and best_snap["params_json"] != "{}":
+        elif best_snap.get("framework_cpp"):
             parts.append(
-                f"**Tuning Parameters:**\n```json\n{best_snap['params_json']}\n```"
+                f"**Framework Driver:**\n```cpp\n{best_snap['framework_cpp']}\n```"
             )
 
     return "\n\n".join(parts)

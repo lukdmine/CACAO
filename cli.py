@@ -141,20 +141,13 @@ def check_prerequisites(problem_dir: Path):
         return False
     log(f"Reference source found: {ref_file}", "SUCCESS")
 
-    # Check tuner.py
-    tuner_path = SCRIPT_DIR / "tuner.py"
-    if not tuner_path.exists():
-        log(f"tuner.py not found at {tuner_path}", "ERROR")
+    # Check libktt.so (the framework driver links against it)
+    libktt_path = SCRIPT_DIR / "libktt.so"
+    if not libktt_path.exists():
+        log(f"libktt.so not found at {libktt_path}", "ERROR")
+        log("Framework driver cannot link — ensure libktt.so is symlinked", "ERROR")
         return False
-    log("tuner.py found", "SUCCESS")
-
-    # Check pyktt.so
-    pyktt_path = SCRIPT_DIR / "pyktt.so"
-    if not pyktt_path.exists():
-        log(f"pyktt.so not found at {pyktt_path}", "WARN")
-        log("Tuner may fail - ensure pyktt.so is symlinked", "WARN")
-    else:
-        log("pyktt.so found", "SUCCESS")
+    log("libktt.so found", "SUCCESS")
 
     # Check CUDA environment
     from utils.cuda_env import get_env, format_summary

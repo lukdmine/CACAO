@@ -97,7 +97,7 @@ export interface IterState {
   next_status?: string | null;
   plan: string;
   kernel_code: string;
-  params_json: string;
+  framework_cpp: string;
   run_output: string;
   ncu_metrics?: Record<string, unknown> | null;
   decision?: Record<string, unknown> | null;
@@ -167,7 +167,7 @@ export interface IterationSnapshot {
   status: string;
   plan: string;
   kernel_code: string;
-  params_json: string;
+  framework_cpp: string;
   run_output: string;
   ncu_metrics: Record<string, unknown> | null;
   proposal?: string;
