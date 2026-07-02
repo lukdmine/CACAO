@@ -18,6 +18,8 @@ int main(int argc, char** argv)
     const std::string  output     = (argc > 5) ? argv[5] : "results";
     const std::string  kernelFile = (argc > 6) ? argv[6] : "kernels.cu";
     const std::string  refFile    = (argc > 7) ? argv[7] : "ref_kernel.cu";
+    // argv[8] (optional): profile mode — path to a results.json to run the best config from.
+    const std::string  profileResults = (argc > 8) ? argv[8] : "";
 
     // ---- tuner ----
     ktt::Tuner tuner(platform, device, ktt::ComputeApi::CUDA);
@@ -82,7 +84,26 @@ int main(int argc, char** argv)
     // LAUNCHER region (LLM): single kernel uses default launch
     // ===================== END CACAO:LAUNCHER ===============================
 
-    // ---- validation + search + run (engine-owned) ----
+    // ---- profile mode: run the best found config ONCE (NCU wraps the process) ----
+    // KTT-native: load the tuning results, pick the fastest valid one, Run it.
+    if (!profileResults.empty())
+    {
+        const auto loaded = tuner.LoadResults(profileResults, ktt::OutputFormat::JSON);
+        const ktt::KernelResult* best = nullptr;
+        for (const auto& r : loaded)
+            if (r.IsValid() && (best == nullptr || r.GetKernelDuration() < best->GetKernelDuration()))
+                best = &r;
+        if (best == nullptr)
+        {
+            std::cerr << "No valid configuration in " << profileResults << "\n";
+            return 1;
+        }
+        tuner.Run(kernel, best->GetConfiguration(), {});
+        std::cout << "Profile run complete (best of " << loaded.size() << " configs)\n";
+        return 0;
+    }
+
+    // ---- validation + search + tune (engine-owned) ----
     tuner.SetValidationMethod(ktt::ValidationMethod::SideBySideComparison, tolerance);
     tuner.SetReferenceKernel(in.validated, refKernel, ktt::KernelConfiguration());
     tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
