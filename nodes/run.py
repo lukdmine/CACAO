@@ -1,9 +1,10 @@
 """
-Run node — runs the KTT tuner as a subprocess with GPU locking.
+Run node — compiles the framework driver, then runs it as a subprocess with GPU locking.
 
-KTT enforces the wall-clock budget via TuningDuration; this node passes
-the resolved budget through and keeps a watchdog in case the subprocess
-hangs without honoring the stop condition.
+Framework-file mode: host-compiles framework.cpp -> driver (kernels stay
+NVRTC-compiled inside KTT at tune time), then executes the driver. A host-compile
+failure is routed to propose/fix. KTT enforces the wall-clock budget via
+TuningDuration; a watchdog covers subprocess hangs.
 """
 
 import asyncio
@@ -15,6 +16,7 @@ from pathlib import Path
 
 import config as _cfg
 from config import SCRIPT_DIR, get_problem_dir
+from utils.build import compile_framework, driver_command
 from utils.files import save_output
 from utils.gpu_lock import acquire_gpu_lock
 from utils.log import log
@@ -133,19 +135,21 @@ async def run_node(state: WorkingState) -> WorkingState:
 
     log(f"Executing tuner in: {iter_dir}")
 
-    # Build command — always read problem.yaml from source so edits propagate
-    tuner_script = SCRIPT_DIR / "tuner.py"
-    problem_yaml_path = get_problem_dir() / "problem.yaml"
+    # Read problem.yaml from source so edits propagate.
+    problem_dir = get_problem_dir()
+    problem_yaml_path = problem_dir / "problem.yaml"
 
     gpu_index = 0
+    tolerance = 1e-4
+    ref_file = "ref_kernel.cu"
     try:
         with open(problem_yaml_path) as f:
-            config_yaml = yaml.safe_load(f)
+            config_yaml = yaml.safe_load(f) or {}
         gpu_index = config_yaml.get("gpu", {}).get("index", 0)
+        tolerance = (config_yaml.get("validation") or {}).get("tolerance", tolerance)
+        ref_file = (config_yaml.get("reference") or {}).get("file", ref_file)
     except Exception as e:
-        log(
-            f"Failed to parse gpu_index from problem.yaml, defaulting to 0: {e}", "WARN"
-        )
+        log(f"Failed to parse problem.yaml, using defaults: {e}", "WARN")
 
     budget_s, budget_source = _resolve_tuning_budget(problem_yaml_path)
     watchdog_s = budget_s + max(_WATCHDOG_MARGIN_S, budget_s * _WATCHDOG_MARGIN_FRAC)
@@ -153,22 +157,32 @@ async def run_node(state: WorkingState) -> WorkingState:
         f"Tuning budget: {budget_s:.0f}s ({budget_source}); watchdog at {watchdog_s:.0f}s"
     )
 
-    cmd = [
-        sys.executable,
-        str(tuner_script),
-        "--working-dir",
-        str(iter_dir),
-        "--problem",
-        str(problem_yaml_path),
-        "--params",
-        "params.json",
-        "--platform",
-        "0",
-        "--device",
-        str(gpu_index),
-        "--tuning-duration",
-        str(budget_s),
-    ]
+    # --- Compile the framework driver (host compile; kernels stay NVRTC) ---
+    log("Compiling framework driver (framework.cpp -> driver)...")
+    build_result = compile_framework(iter_dir)
+    if not build_result.ok:
+        output = (
+            "[COMPILE ERROR] Host compilation of framework.cpp failed.\n\n"
+            f"{build_result.stderr}"
+        )
+        log("Framework compile failed — routing error to propose", "ERROR")
+        save_output(iter_dir, output, "tuner_output.txt")
+        state.run_output = output
+        state.results_summary = get_results_summary(iter_dir / "results.json", None)
+        state.status = "proposing"
+        return state
+    log("Framework driver compiled", "SUCCESS")
+
+    cmd = driver_command(
+        build_result.binary,
+        platform=0,
+        device=gpu_index,
+        duration=budget_s,
+        tolerance=tolerance,
+        output_base="results",
+        kernel_file=iter_dir / "kernels.cu",
+        ref_file=problem_dir / ref_file,
+    )
 
     output_lines = []
     watchdog_tripped = False
@@ -188,7 +202,7 @@ async def run_node(state: WorkingState) -> WorkingState:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=str(SCRIPT_DIR),
+                cwd=str(iter_dir),
                 env=get_subprocess_env(),
             )
 
