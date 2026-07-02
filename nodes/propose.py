@@ -36,7 +36,7 @@ async def propose_node(state: WorkingState) -> WorkingState:
         state,
         iteration_history_fields=[
             {"name": "kernel_code", "limit": 1},
-            {"name": "params_json", "limit": 1},
+            {"name": "framework_cpp", "limit": 1},
             {"name": "results_summary"},
             {"name": "decision"},
             {"name": "feedback", "limit": 1},

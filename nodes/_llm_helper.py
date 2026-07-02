@@ -244,8 +244,8 @@ def _format_current_iter(state, summary, tuner_tail) -> str:
         return ""
     return (
         f"## Current Iteration ({state.iter_num}):\n\n"
-        f"### Kernel Code:\n```cuda\n{state.kernel_code}\n```\n\n"
-        f"### Tuning Parameters:\n```json\n{state.params_json}\n```\n\n"
+        f"### Kernel Code (kernels.cu):\n```cuda\n{state.kernel_code}\n```\n\n"
+        f"### Framework Driver (framework.cpp — your regions are between the CACAO:* markers):\n```cpp\n{state.framework_cpp}\n```\n\n"
         f"### Results Summary:\n{format_results_summary(summary)}\n\n"
         f"### Tuner Output (last 50 lines):\n```\n{tuner_tail or 'No output'}\n```\n"
         f"{format_ncu_context(state.ncu_metrics)}"
@@ -288,6 +288,7 @@ def build_prompt_context(
         "strategy": getattr(state, "strategy", None),
         "kernel_code": getattr(state, "kernel_code", "") or "",
         "params_json": getattr(state, "params_json", "") or "",
+        "framework_cpp": getattr(state, "framework_cpp", "") or "",
         "proposal": getattr(state, "proposal", "") or "",
         "parent_context": format_parent_context(branch_path)
         if iter_num <= 1

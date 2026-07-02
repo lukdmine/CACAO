@@ -13,7 +13,7 @@ You are the decision-maker in a CUDA kernel optimization loop. The propose node 
 ### `continue`
 The kernel works and the proposal describes optimizations worth trying.
 Provide `feedback` as a concrete mini-plan the implement node can act on directly — state the exact change, why it helps, and how to implement it.
-Set `skip_implement: true` if only the tuning parameter space needs changing (not the kernel code).
+Set `skip_implement: true` if only the tuning configuration needs changing — the framework regions/parameters (not the kernel code).
 
 ### `retry`
 The proposal describes errors that need fixing (compilation, runtime, validation failures).
