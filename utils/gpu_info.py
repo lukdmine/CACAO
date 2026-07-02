@@ -13,7 +13,7 @@ import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from utils.cuda_env import get_env
+from utils.cuda_env import get_env, get_ncu_tmpdir
 from utils.log import log
 
 DUMMY_KERNEL_CODE = """
@@ -193,6 +193,9 @@ def get_gpu_details(device_index: int = 0) -> Optional[Dict[str, Any]]:
         # Make the executable run on the selected device
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(device_index)
+        # Per-user TMPDIR so NCU's /tmp/nsight-compute-lock doesn't clash between
+        # users on a shared machine (see cuda_env.get_ncu_tmpdir).
+        env["TMPDIR"] = str(get_ncu_tmpdir())
 
         try:
             # Note: NCU might require sudo for tracing depending on system config,
@@ -218,7 +221,9 @@ def get_gpu_details(device_index: int = 0) -> Optional[Dict[str, Any]]:
                         f"NCU failed during GPU detection (exit {result.returncode})",
                         "WARN",
                     )
-                    log(f"stderr: {result.stderr.strip()}", "WARN")
+                    # NCU writes its ==ERROR== diagnostics to stdout, not stderr.
+                    detail = result.stderr.strip() or result.stdout.strip()
+                    log(f"ncu output: {detail}", "WARN")
                 else:
                     log(
                         "NCU completed but did not return expected device metrics.",

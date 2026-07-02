@@ -12,6 +12,7 @@ Resolves paths to CUDA tools (nvcc, ncu, nvidia-smi, gcc/g++) via:
 import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -299,6 +300,29 @@ def detect(project_root: Optional[Path] = None) -> CudaEnv:
     return env
 
 
+def get_ncu_tmpdir() -> Path:
+    """Return a stable, per-user temp directory for NCU (created if missing).
+
+    NVIDIA Nsight Compute serializes profiling through a single fixed lock file
+    at ``$TMPDIR/nsight-compute-lock`` (``/tmp/nsight-compute-lock`` by default).
+    On a shared machine the first user to profile creates that file, and the
+    kernel's ``fs.protected_regular`` hardening then blocks every *other* user
+    from opening it in the world-writable sticky ``/tmp`` — even at mode 666 —
+    so their ncu run dies with ``InterprocessLockFailed`` and exit code 9.
+
+    Giving each user their own TMPDIR gives each their own lock file (and keeps
+    NCU's within-user serialization intact), which avoids the cross-user clash.
+    """
+    # tempfile.gettempdir() honors an already-set TMPDIR, else falls back to /tmp.
+    try:
+        uid = os.getuid()
+    except AttributeError:  # non-POSIX (e.g. Windows)
+        uid = os.environ.get("USER", "default")
+    tmpdir = Path(tempfile.gettempdir()) / f"ncu-{uid}"
+    tmpdir.mkdir(mode=0o700, exist_ok=True)
+    return tmpdir
+
+
 def get_subprocess_env(env: Optional[CudaEnv] = None) -> dict:
     """Build an environment dict for subprocesses with LD_LIBRARY_PATH set correctly."""
     if env is None:
@@ -319,6 +343,9 @@ def get_subprocess_env(env: Optional[CudaEnv] = None) -> dict:
     # Force POSIX numeric locale so tools like NCU always use '.' as the
     # decimal separator, regardless of the host machine's regional settings.
     sub_env["LC_NUMERIC"] = "C"
+    # Redirect NCU's fixed-path lock file to a per-user dir so profiling doesn't
+    # collide between users sharing this machine (see get_ncu_tmpdir).
+    sub_env["TMPDIR"] = str(get_ncu_tmpdir())
     return sub_env
 
 
