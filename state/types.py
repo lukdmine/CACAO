@@ -153,7 +153,7 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "planning": {"implementing", "deciding"},
     "implementing": {"configuring", "deciding"},
     "configuring": {"running", "deciding"},
-    "running": {"profiling", "deciding"},
+    "running": {"profiling", "proposing", "deciding"},
     "profiling": {"proposing", "deciding"},
     "proposing": {"deciding"},
     "deciding": {"decided", "success", "failed", "branching"},

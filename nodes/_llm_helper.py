@@ -255,7 +255,12 @@ def _format_current_iter(state, summary, tuner_tail) -> str:
 def get_tuner_tail(run_output: str, max_lines: int = 50) -> str:
     if not run_output:
         return "No output"
-    return "\n".join(run_output.split("\n")[-max_lines:])
+    lines = run_output.split("\n")
+    # g++ diagnostics are front-loaded — the errors come first, then pages of template
+    # "note:" spam. Tailing them drops the header and can leave only notes.
+    if run_output.startswith("[COMPILE ERROR]"):
+        return "\n".join(lines[:max_lines])
+    return "\n".join(lines[-max_lines:])
 
 
 def build_prompt_context(
