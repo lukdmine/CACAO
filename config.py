@@ -470,7 +470,7 @@ MODELS = {
         "available": ["gemini-3-pro", "gemini-3-flash"],
     },
     "cerit": {
-        "default": "kimi-k2.6",
+        "default": "glm-5.2",
         "available": [
             "qwen3.5",
             "qwen3.5-122b",
@@ -478,6 +478,7 @@ MODELS = {
             "kimi-k2.6",
             "glm-5",
             "glm-5.1",
+            "glm-5.2",
             "deepseek-v3.2",
             "deepseek-v3.2-thinking",
             "gpt-oss-120b",
