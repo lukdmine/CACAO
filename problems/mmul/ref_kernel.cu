@@ -27,25 +27,25 @@
 
 // Reference implementation of the matrix-matrix multiplication example. Note: this kernel assumes
 // that matrix B is pre-transposed.
-extern "C" __global__ void gemm_reference(
-    const  float* mat_a,
-    const  float* mat_b,
-     float* mat_c) {
+extern "C" __global__ void gemm_reference(const int kSizeM, const int kSizeN, const int kSizeK,
+                             const  float* mat_a,
+                             const  float* mat_b,
+                              float* mat_c) {
 
-// Thread identifiers
-const int row = blockDim.x*blockIdx.x + threadIdx.x; // From 0 to M-1
-const int col = blockDim.y*blockIdx.y + threadIdx.y; // From 0 to N-1
+  // Thread identifiers
+  const int row = blockDim.x*blockIdx.x + threadIdx.x; // From 0 to kSizeM-1
+  const int col = blockDim.y*blockIdx.y + threadIdx.y; // From 0 to kSizeN-1
 
-// Computes a single value
-float result = 0.0f;
-for (int k=0; k<K; k++) {
-float mat_a_val = mat_a[k*M + row];
-float mat_b_val = mat_b[k*N + col];
-result += mat_a_val * mat_b_val;
-}
+  // Computes a single value
+  float result = 0.0f;
+  for (int k=0; k<kSizeK; k++) {
+    float mat_a_val = mat_a[k*kSizeM + row];
+    float mat_b_val = mat_b[k*kSizeN + col];
+    result += mat_a_val * mat_b_val;
+  }
 
-// Stores the result
-mat_c[col*M + row] = result;
+  // Stores the result
+  mat_c[col*kSizeM + row] = result;
 }
 
 // =================================================================================================
