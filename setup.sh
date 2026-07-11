@@ -254,61 +254,13 @@ else
         success "KTT cloned (pinned to $KTT_COMMIT)"
     fi
 
-    # Auto-detect Python headers and lib
-    PYTHON_HEADERS=$(python3 -c "import sysconfig; print(sysconfig.get_path('include'))")
-    PYTHON_LIBDIR=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
-    PYTHON_LDLIB=$(python3 -c "import sysconfig; v=sysconfig.get_config_var('LDLIBRARY'); print(v if v else '')")
-
-    if [ -z "$PYTHON_LDLIB" ]; then
-        # Fallback: look for libpython3.X.so in LIBDIR
-        PYTHON_LDLIB="libpython${PYTHON_VERSION}.so"
-    fi
-    PYTHON_LIB="$PYTHON_LIBDIR/$PYTHON_LDLIB"
-
-    # If the reported lib doesn't exist (e.g. conda gave us .a), search for .so
-    if [ ! -f "$PYTHON_LIB" ]; then
-        # Try common alternative locations
-        SEARCH_DIRS=("$PYTHON_LIBDIR" "${CONDA_PREFIX:-/nonexistent}/lib")
-        for SDIR in "${SEARCH_DIRS[@]}"; do
-            for CANDIDATE_LIB in "$SDIR/libpython${PYTHON_VERSION}.so" "$SDIR/libpython${PYTHON_VERSION}m.so"; do
-                if [ -f "$CANDIDATE_LIB" ]; then
-                    PYTHON_LIB="$CANDIDATE_LIB"
-                    break 2
-                fi
-            done
-        done
-    fi
-
-    info "Python headers: $PYTHON_HEADERS"
-    info "Python lib:     $PYTHON_LIB"
-
-    if [ ! -f "$PYTHON_LIB" ]; then
-        warn "Python shared library (.so) not found at $PYTHON_LIB"
-        echo ""
-        if [ -n "${CONDA_PREFIX:-}" ]; then
-            echo "  For conda, reinstall Python with the shared library enabled:"
-            echo "    conda install -c conda-forge python=${PYTHON_VERSION} --force-reinstall"
-            echo ""
-            echo "  This installs the .so shared library needed by KTT's Python bindings."
-            echo "  (The default conda python may only include the static .a library.)"
-        else
-            echo "  Install the Python dev package:"
-            echo "    sudo apt install python${PYTHON_VERSION}-dev"
-        fi
-        echo ""
-        error "Cannot build KTT without Python shared library. Fix the above and re-run."
-        exit 1
-    fi
-
     # Build
-    info "Building KTT with Python support..."
+    info "Building KTT (C++ library only)..."
     cd KTT
 
     # KTT's build system needs CUDA_PATH to find libraries.
     # For system-installed CUDA (no dedicated root), /usr works.
     export CUDA_PATH="${CUDA_DIR:-/usr}"
-    export PYTHON_HEADERS
-    export PYTHON_LIB
 
     PREMAKE_VERSION="5.0.0-beta8"
 
@@ -442,48 +394,61 @@ else
         fi
     fi
 
-    ./premake5 gmake --python
+    # No --python: the framework driver is a pure C++ KTT client. Building with
+    # the bindings compiles them into libktt.so itself (premake5.lua copies the
+    # same .so to pyktt.so), leaving a NEEDED entry for libpython that ld cannot
+    # resolve — every driver link then fails with undefined Py* references.
+    ./premake5 gmake
     cd Build
     make config=release_x86_64 Ktt -j"$(nproc)"
     cd "$SCRIPT_DIR"
 
     # Verify build
-    if [ -f "KTT/Build/x86_64_Release/pyktt.so" ] && [ -f "KTT/Build/x86_64_Release/libktt.so" ]; then
+    if [ -f "KTT/Build/x86_64_Release/libktt.so" ]; then
         success "KTT built successfully"
     else
-        error "KTT build did not produce expected .so files"
+        error "KTT build did not produce libktt.so"
         echo "  Check KTT/Build/ for build output"
         exit 1
     fi
 
-    # Create symlinks
-    info "Creating symlinks..."
-    ln -sf KTT/Build/x86_64_Release/pyktt.so pyktt.so
+    # Create symlink
+    info "Creating symlink..."
     ln -sf KTT/Build/x86_64_Release/libktt.so libktt.so
-    success "Symlinks created: pyktt.so, libktt.so"
+    success "Symlink created: libktt.so"
 fi
 
-# ── Step 6: Verify pyktt import ─────────────────────────────────────
-info "Step 6: Verifying pyktt import..."
+# ── Step 6: Verify a C++ driver links against libktt.so ─────────────
+# This is what the optimizer actually does every iteration (utils/build.py):
+# host-compile a KTT client and link it. It catches a libktt.so built with the
+# Python bindings, whose unresolved libpython dependency breaks every link.
+info "Step 6: Verifying KTT C++ driver links..."
 
-if [ -n "$CUDA_DIR" ]; then
-    export LD_LIBRARY_PATH="${CUDA_DIR}/lib64:$(pwd):${LD_LIBRARY_PATH:-}"
-else
-    export LD_LIBRARY_PATH="$(pwd):${LD_LIBRARY_PATH:-}"
-fi
+LINK_TEST=$(mktemp -d)
+cat > "$LINK_TEST/link_test.cpp" <<'EOF'
+#include <Ktt.h>
+int main() { return 0; }
+EOF
 
-if python3 -c "import pyktt; print('pyktt loaded successfully')" 2>/dev/null; then
-    success "pyktt import OK"
+if g++ -std=c++17 -m64 -I"$(pwd)/KTT/Source" "$LINK_TEST/link_test.cpp" \
+       "$(pwd)/libktt.so" -Wl,-rpath,"$(pwd)" -o "$LINK_TEST/link_test" 2>"$LINK_TEST/err"; then
+    success "KTT C++ driver links OK"
+    rm -rf "$LINK_TEST"
 else
-    error "Failed to import pyktt"
+    error "Failed to link a C++ driver against libktt.so"
     echo ""
-    echo "  This might be a Python version issue. KTT's pybind11 bindings"
-    echo "  are known to work best with Python 3.10."
+    if grep -q "undefined reference to \`Py" "$LINK_TEST/err"; then
+        echo "  libktt.so carries unresolved Python symbols — it was built with the"
+        echo "  KTT Python bindings (--python). The framework driver is pure C++ and"
+        echo "  does not need them. Rebuild without the flag:"
+        echo ""
+        echo "    cd KTT && CUDA_PATH=\"${CUDA_DIR:-/usr}\" ./premake5 gmake"
+        echo "    cd Build && rm -rf x86_64_Release/obj && make config=release_x86_64 Ktt -j\$(nproc)"
+    else
+        sed 's/^/  /' "$LINK_TEST/err" | head -15
+    fi
     echo ""
-    echo "  Current Python: $PYTHON_VERSION"
-    echo ""
-    echo "  Try: conda create -n ktt python=3.10 -y && conda activate ktt"
-    echo "  Then re-run: ./setup.sh --skip-ktt"
+    rm -rf "$LINK_TEST"
     exit 1
 fi
 

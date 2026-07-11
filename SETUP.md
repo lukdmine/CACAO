@@ -35,30 +35,37 @@ conda activate ktt
 pip install -r requirements.txt
 ```
 
-### Step 2: Build KTT with Python Support
+### Step 2: Build KTT (C++ library only)
 
-If `pyktt.so` and `libktt.so` are not already built:
+If `libktt.so` is not already built:
 
 ```bash
 cd KTT
 
-export CUDA_PATH=/usr/local/cuda
-export PYTHON_HEADERS=/path/to/miniconda3/envs/ktt/include/python3.10
-export PYTHON_LIB=/path/to/miniconda3/envs/ktt/lib/libpython3.10.so
+# For a system-installed CUDA (nvcc in /usr/bin, headers in /usr/include), use /usr.
+# For a dedicated install, use its root, e.g. /usr/local/cuda.
+export CUDA_PATH=/usr
 
-./premake5 gmake --python
+./premake5 gmake
 cd Build
 make config=release_x86_64 Ktt -j$(nproc)
 
-ls x86_64_Release/*.so   # should show pyktt.so and libktt.so
+ls x86_64_Release/*.so   # should show libktt.so
 ```
 
-### Step 3: Create Symlinks
+> **Do not pass `--python`.** The framework driver is a pure C++ KTT client and
+> does not use the Python bindings. Building with them compiles pybind11 into
+> `libktt.so` itself, which leaves an unresolvable `libpython` dependency —
+> every driver link then fails with ~155 `undefined reference to 'Py*'` errors.
+> If you have an existing build made with `--python`, you must delete the stale
+> objects (`rm -rf Build/x86_64_Release/obj`) before rebuilding; regenerating
+> the makefile alone will silently relink the old Python objects.
+
+### Step 3: Create Symlink
 
 From the project root:
 
 ```bash
-ln -sf KTT/Build/x86_64_Release/pyktt.so pyktt.so
 ln -sf KTT/Build/x86_64_Release/libktt.so libktt.so
 ```
 
@@ -93,9 +100,13 @@ The provider is auto-detected from which key is set.
 
 ```bash
 conda activate ktt
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$(pwd):$LD_LIBRARY_PATH
 
-python -c "import pyktt; print('pyktt OK')"
+# The check that matters: a C++ KTT driver must link. This is what the optimizer
+# does every iteration (utils/build.py). It fails if libktt.so was built with --python.
+printf '#include <Ktt.h>\nint main() { return 0; }\n' > /tmp/link_test.cpp
+g++ -std=c++17 -I"$(pwd)/KTT/Source" /tmp/link_test.cpp "$(pwd)/libktt.so" \
+    -Wl,-rpath,"$(pwd)" -o /tmp/link_test && echo "KTT C++ link OK"
+
 python -c "from state import *; print('State module OK')"
 python -c "from config import OptimizerConfig; print('Config OK')"
 ```
@@ -134,19 +145,35 @@ npm run dev                         # http://localhost:5003
 
 The frontend polls `http://localhost:8003`. Override ports via `PORT` / `FRONTEND_PORT` / `VITE_API_BASE` env vars (see `.env.example`). Multiple problems can run concurrently on different GPUs.
 
-## Running the Tuner Standalone
+## Running a Framework Driver Standalone
+
+Each iteration compiles `framework.cpp` into a `driver` binary and runs it. To do
+that by hand for a generated iteration:
 
 ```bash
-python tuner.py --working-dir ./problems/mmul/output/branches/my_branch/iter1
+ITER=./problems/mmul/output/branches/my_branch/iter_1
+
+g++ -std=c++17 -m64 -O3 -I"$(pwd)/KTT/Source" \
+    "$ITER/framework.cpp" "$(pwd)/libktt.so" -Wl,-rpath,"$(pwd)" -o "$ITER/driver"
+
+# driver <platform> <device> <duration_s> <tolerance> <output_base> <kernels.cu> <ref_kernel.cu>
+cd "$ITER" && ./driver 0 0 20 1.0 results kernels.cu ../../../../ref_kernel.cu
 ```
 
-Or with all options:
-
-```bash
-python tuner.py --platform 0 --device 0 --problem ./problem.yaml --params ./params.json --output ./results
-```
+KTT writes `results.json` (it appends the extension), parsed by `utils/results.py`.
 
 ## Troubleshooting
+
+### undefined reference to `Py...` when linking the driver
+`libktt.so` was built with the Python bindings (`--python`). The framework driver
+is pure C++ and does not need them. Rebuild without the flag — and delete the
+stale objects first, or make will silently relink the old Python ones:
+
+```bash
+cd KTT && CUDA_PATH=/usr ./premake5 gmake
+cd Build && rm -rf x86_64_Release/obj
+make config=release_x86_64 Ktt -j$(nproc)
+```
 
 ### ImportError: libnvrtc.so not found
 ```bash
@@ -162,12 +189,6 @@ export LD_LIBRARY_PATH=$(pwd):$LD_LIBRARY_PATH
 Use Python 3.10 (not 3.11+):
 ```bash
 conda create -n ktt python=3.10 -y
-```
-
-### ModuleNotFoundError: No module named 'pyktt'
-Ensure symlinks exist in the project root:
-```bash
-ls -la pyktt.so libktt.so
 ```
 
 ## Environment Variables Summary
