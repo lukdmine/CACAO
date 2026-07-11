@@ -308,7 +308,7 @@ tuner.AddThreadModifier(kernel, {defB}, ktt::ModifierType::Local,
 ```cpp
 tuner.SetLauncher(kernel, [defA, defB](ktt::ComputeInterface& ci) {
     const auto& cfg = ci.GetCurrentConfiguration();
-    const uint64_t tile = ktt::ParameterPair::GetParameterValue(cfg.GetPairs(), "TILE");
+    const uint64_t tile = ktt::ParameterPair::GetParameterValue<uint64_t>(cfg.GetPairs(), "TILE");
     ci.RunKernel(defA, ktt::DimensionVector((N + tile - 1) / tile), ktt::DimensionVector(tile));
     ci.RunKernel(defB);                                     // synchronous; runs after A
 });
@@ -444,7 +444,7 @@ Anchored to `KTT/Source/Api/ComputeInterface.h` and `KTT/Source/Python/PythonTun
 
 **`ktt::ComputeInterface`** (in launcher): `RunKernel(def[,global,local])` (sync); `RunKernelAsync(def,queue[,g,l])→ComputeActionId` + `WaitForComputeAction(id)`; `GetDefaultQueue()`,`GetAllQueues()`,`SynchronizeQueue(q)`,`SynchronizeQueues()`; `GetCurrentConfiguration()` (`.GetPairs()`→`ParameterPair`); `GetCurrentGlobalSize(def)`/`GetCurrentLocalSize(def)`; `SwapArguments`,`ChangeArguments`,`UpdateScalarArgument`,`UpdateLocalArgument`,`ResizeBuffer`,`ClearBuffer`.
 
-**Helpers/enums:** `ktt::DimensionVector(x[,y[,z]])`; `ktt::ParameterPair::GetParameterValue(pairs,"NAME")`; `ktt::ArgumentAccessType{ReadOnly,WriteOnly,ReadWrite}`.
+**Helpers/enums:** `ktt::DimensionVector(x[,y[,z]])`; `ktt::ParameterPair::GetParameterValue<uint64_t>(pairs,"NAME")` — the explicit `<uint64_t>` is **required** (`T` is only in the return type, so it cannot be deduced); `ktt::ArgumentAccessType{ReadOnly,WriteOnly,ReadWrite}`.
 
 **⚠️ C++ vs pyktt (verified Phase 0):** the engine-emitted skeleton uses
 `std::unique_ptr` where pyktt takes values — `SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>())`

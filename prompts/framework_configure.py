@@ -57,11 +57,14 @@ Add constraints that guarantee legal, in-bounds configs (divisibility, shared me
 ```cpp
 tuner.SetLauncher(kernel, [defA, defB](ktt::ComputeInterface& ci) {
     const auto& cfg = ci.GetCurrentConfiguration();
-    const uint64_t tile = ktt::ParameterPair::GetParameterValue(cfg.GetPairs(), "TILE");
+    const uint64_t tile = ktt::ParameterPair::GetParameterValue<uint64_t>(cfg.GetPairs(), "TILE");
     ci.RunKernel(defA, ktt::DimensionVector(/*grid*/), ktt::DimensionVector(/*block*/));
     ci.RunKernel(defB);                        // runs after A (synchronous)
 });
 ```
+`GetParameterValue` is a template whose type appears only in the return type, so the
+`<uint64_t>` is REQUIRED — omitting it does not compile ("couldn't deduce template
+parameter 'T'").
 For data-dependent iteration, use runtime scalar args + `ci.UpdateScalarArgument(id, &v)`
 and `ci.SwapArguments(def, a, b)` between launches. The FINAL write must land in the
 validated output buffer (`in.<validated>`), or validation fails.
@@ -84,7 +87,7 @@ Multiply,Divide,DivideCeil}); AddArgumentVector(vec,AccessType); AddArgumentScal
 AddArgumentLocal<T>(size); SetArguments(def,{ids}).
 `ci` (launcher): RunKernel(def[,g,l]); RunKernelAsync(def,queue)+WaitForComputeAction(id);
 GetAllQueues(); SynchronizeQueue(q); GetCurrentConfiguration().GetPairs();
-ktt::ParameterPair::GetParameterValue(pairs,"NAME"); SwapArguments; UpdateScalarArgument(id,&v);
+ktt::ParameterPair::GetParameterValue<uint64_t>(pairs,"NAME"); SwapArguments; UpdateScalarArgument(id,&v);
 ResizeBuffer. `ktt::DimensionVector(x[,y[,z]])`.
 
 Return the three region bodies. Emit only C++ statements for each — no code fences,
