@@ -427,12 +427,12 @@ export function DetailPanel() {
                                                         </AccordionItem>
                                                     )}
 
-                                                    {iter.params_json && iter.params_json !== '{}' && (
-                                                        <AccordionItem value={`iter-${iter.iter_num}-params`}>
-                                                            <AccordionTrigger className="py-1.5 text-xs">Parameters</AccordionTrigger>
+                                                    {iter.framework_cpp && (
+                                                        <AccordionItem value={`iter-${iter.iter_num}-framework`}>
+                                                            <AccordionTrigger className="py-1.5 text-xs">Framework Driver</AccordionTrigger>
                                                             <AccordionContent>
                                                                 <div className="border-l border-primary/20 pl-3">
-                                                                    <pre className="mt-1 p-2 bg-muted rounded text-[11px] whitespace-pre-wrap overflow-x-auto font-mono">{iter.params_json}</pre>
+                                                                    <pre className="mt-1 p-2 bg-zinc-900 rounded text-[11px] text-green-300 whitespace-pre-wrap overflow-x-auto font-mono">{iter.framework_cpp}</pre>
                                                                 </div>
                                                             </AccordionContent>
                                                         </AccordionItem>
