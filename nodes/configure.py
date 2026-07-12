@@ -13,7 +13,7 @@ import yaml
 from config import get_problem_dir
 from models.regions import FrameworkRegions
 from utils.files import save_output, get_iter_dir
-from utils.framework import assemble_framework_cpp
+from utils.framework import assemble_framework_cpp, resolve_cuda_include
 from utils.log import log
 from state.types import WorkingState
 from nodes._llm_helper import execute_llm_node, build_prompt_context
@@ -81,7 +81,11 @@ async def configure_node(state: WorkingState) -> WorkingState:
             "launcher": result.launcher,
         }
         framework_cpp = assemble_framework_cpp(meta, regions)
-        log("Framework regions configured; framework.cpp assembled", "SUCCESS")
+        log(
+            f"Framework regions configured; framework.cpp assembled "
+            f"(NVRTC include: {resolve_cuda_include()})",
+            "SUCCESS",
+        )
         return framework_cpp
 
     state, framework_cpp = await execute_llm_node(

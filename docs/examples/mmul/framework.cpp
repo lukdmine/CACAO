@@ -25,7 +25,10 @@ int main(int argc, char** argv)
     ktt::Tuner tuner(platform, device, ktt::ComputeApi::CUDA);
     tuner.SetGlobalSizeType(ktt::GlobalSizeType::OpenCL);
     tuner.SetTimeUnit(ktt::TimeUnit::Microseconds);
-    tuner.SetCompilerOptions("-I/usr/local/cuda/include");
+    // Substituted per-machine from the include dir utils/cuda_env.py detects: a system
+    // CUDA install resolves to /usr/include, a toolkit install to /usr/local/cuda/include.
+    // NVRTC cannot open <mma.h> if this is wrong, so never hardcode it.
+    tuner.SetCompilerOptions("-I{cuda_include}");
 
     const ktt::DimensionVector ndRange(kSizeM, kSizeN);
 

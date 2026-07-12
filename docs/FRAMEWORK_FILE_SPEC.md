@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
     ktt::Tuner tuner(platform, device, ktt::ComputeApi::CUDA);
     tuner.SetGlobalSizeType(ktt::GlobalSizeType::OpenCL);   // from problem.yaml global_size_type
     tuner.SetTimeUnit(ktt::TimeUnit::Microseconds);
-    tuner.SetCompilerOptions("-I/usr/local/cuda/include");
+    tuner.SetCompilerOptions("-I{cuda_include}");           // per-machine, from utils/cuda_env.py
 
     const ktt::DimensionVector ndRange(kSizeM, kSizeN);     // from problem.yaml grid
 
