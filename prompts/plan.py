@@ -1,6 +1,7 @@
 """Plan prompt — creates strategy-specific optimization plan."""
 
 from nodes._llm_helper import format_strategy
+from prompts._system_overview import SYSTEM_OVERVIEW
 from prompts._tensor_core_reference import TENSOR_CORE_REFERENCE
 
 
@@ -10,17 +11,25 @@ def build(ctx: dict) -> tuple[str, str]:
 
 You are a CUDA optimization expert. Your goal is to create a detailed implementation plan for a **specific optimization strategy**.
 
+"""
+        + SYSTEM_OVERVIEW
+        + """
 ## Input
 
 You will receive:
 1. The problem definition (problem.yaml)
-2. The kernel analysis (bottlenecks, memory patterns, opportunities)
-3. The reference kernel implementation
-4. **The assigned strategy** to implement
+2. The I/O boundary (inputs.hpp)
+3. The kernel analysis (bottlenecks, memory patterns, opportunities)
+4. The reference kernel implementation
+5. **The assigned strategy** to implement
 
 ## Task
 
 Create a detailed, actionable optimization plan specifically for the assigned strategy. This plan will guide the kernel implementation in the next step.
+
+Plan against the execution model above. In particular: validation only sees the designated
+output buffer, so any normalization/finalization the reference performs must land there —
+inside a kernel, or as the last pipeline stage.
 
 ## Output Format
 
@@ -72,14 +81,6 @@ Write your plan as a markdown document:
 - [Edge case to handle]
 ```
 
-## Important: No Host-Side Code
-
-The kernel runs standalone — there is NO host-side driver code. The tuner launches the kernel and directly compares the output buffer against the reference. There is no opportunity for host-side post-processing (no cudaMemcpy-normalize-cudaMemcpy pattern). Any normalization, scaling, or finalization that the reference performs must happen **inside the kernel itself**. Plan accordingly: if the algorithm requires a final reduction or normalization step, include it as a kernel-side operation (e.g., have the last block apply it using an atomic counter).
-
-## Important: No Cooperative Launches
-
-KTT invokes kernels via standard `cudaLaunchKernel`, not `cudaLaunchCooperativeKernel`. Grid-wide synchronization — `grid.sync()`, cooperative groups that span the grid, `<cooperative_groups.h>` — does NOT work and will fail at runtime. Confine all cross-thread coordination to a single thread block (`__syncthreads`). If the algorithm naturally requires grid-wide coordination, express it via atomic counters in global memory or a persistent-thread pattern, not cooperative groups.
-
 """
         + TENSOR_CORE_REFERENCE
     )
@@ -87,6 +88,8 @@ KTT invokes kernels via standard `cudaLaunchKernel`, not `cudaLaunchCooperativeK
     parts = []
     if ctx.get("problem_yaml"):
         parts.append(f"## Problem Definition:\n```yaml\n{ctx['problem_yaml']}\n```")
+    if ctx.get("inputs_hpp"):
+        parts.append(f"## I/O Boundary (inputs.hpp):\n```cpp\n{ctx['inputs_hpp']}\n```")
     if ctx.get("ref_kernel"):
         parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
     if ctx.get("analysis"):

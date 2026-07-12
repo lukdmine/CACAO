@@ -36,16 +36,25 @@ const ktt::KernelDefinitionId def = tuner.AddKernelDefinitionFromFile(
 ktt::KernelId kernel = tuner.CreateSimpleKernel("Gemm", def);
 tuner.SetArguments(def, {in.kSizeM_, in.kSizeN_, in.kSizeK_, in.mat_a, in.mat_b, in.mat_c});
 ```
+The 4th argument is the BASE block size. `ktt::DimensionVector()` = **(1,1,1)**, NOT "auto" —
+either pass the literal block size, or scale the base with `ModifierType::Local` modifiers in
+every dimension the block uses (else the kernel launches with 1 thread per block).
 
 # Region 2 — CACAO:PARAMS
-Tuning parameters become `-D` compile-time macros in the kernel (KTT recompiles per
-config). Add them, plus constraints and thread modifiers.
+Tuning parameters become compile-time macros in the kernel — KTT prepends `#define NAME value`
+lines per config and recompiles. Never `#define` a parameter name inside the kernel source.
 ```cpp
 tuner.AddParameter(kernel, "TILE", std::vector<uint64_t>{16, 32, 64});
 tuner.AddConstraint(kernel, {"TILE", "THREADS"},
     [](const std::vector<uint64_t>& v){ return v[0] % v[1] == 0; });
+// ONE parameter → name + action:
 tuner.AddThreadModifier(kernel, {def}, ktt::ModifierType::Local,
     ktt::ModifierDimension::X, "TILE", ktt::ModifierAction::Multiply);
+// SEVERAL parameters → vector of names + lambda. There is NO {names}+action overload:
+// a braced name-list with a ModifierAction compiles but corrupts the parameter name.
+tuner.AddThreadModifier(kernel, {def}, ktt::ModifierType::Global, ktt::ModifierDimension::X,
+    std::vector<std::string>{"BM", "BN"},
+    [](const uint64_t base, const std::vector<uint64_t>& v){ return base * v[0] / v[1]; });
 ```
 Every macro your kernel uses via `#ifdef`/as a constant must be declared here.
 Add constraints that guarantee legal, in-bounds configs (divisibility, shared mem).
@@ -53,42 +62,50 @@ Add constraints that guarantee legal, in-bounds configs (divisibility, shared me
 # Region 3 — CACAO:LAUNCHER
 - **Single kernel using thread modifiers: leave EMPTY** (KTT's default launcher runs it).
 - Multi-kernel pipeline or custom/iterative launch: set a launcher whose `RunKernel`
-  sequence IS the schedule (topological order; blocking calls satisfy dependencies):
+  sequence IS the schedule (every call blocks; one compute queue — no multi-stream overlap):
 ```cpp
 tuner.SetLauncher(kernel, [defA, defB](ktt::ComputeInterface& ci) {
     const auto& cfg = ci.GetCurrentConfiguration();
     const uint64_t tile = ktt::ParameterPair::GetParameterValue<uint64_t>(cfg.GetPairs(), "TILE");
-    ci.RunKernel(defA, ktt::DimensionVector(/*grid*/), ktt::DimensionVector(/*block*/));
+    ci.RunKernel(defA, ktt::DimensionVector(/*global*/), ktt::DimensionVector(/*block*/));
     ci.RunKernel(defB);                        // runs after A (synchronous)
 });
 ```
 `GetParameterValue` is a template whose type appears only in the return type, so the
-`<uint64_t>` is REQUIRED — omitting it does not compile ("couldn't deduce template
-parameter 'T'").
+`<uint64_t>` is REQUIRED — omitting it does not compile.
+**Global size meaning depends on `global_size_type` in problem.yaml**: `opencl` → TOTAL
+thread count, KTT computes grid = global/block (passing a block count → grid of 1 or 0 =
+broken launch); `cuda` → grid in blocks. `ndRange` follows the same convention.
+`ci.RunKernel(def)` uses the base sizes scaled by your thread modifiers;
+`ci.RunKernel(def, g, l)` REPLACES both and IGNORES every modifier for that launch —
+per definition, pick one mechanism.
 For data-dependent iteration, use runtime scalar args + `ci.UpdateScalarArgument(id, &v)`
 and `ci.SwapArguments(def, a, b)` between launches. The FINAL write must land in the
 validated output buffer (`in.<validated>`), or validation fails.
 
 # Hard requirements
 1. CACAO:KERNELS must define `ktt::KernelId kernel`.
-2. Every launched definition needs `SetArguments` matching its `__global__` order.
+2. Every launched definition needs `SetArguments` matching its `__global__` order
+   (`AddArgumentLocal` ids are dynamic shared memory, not parameters — they go LAST).
 3. A composite kernel (>1 def) MUST have a launcher; there is no auto-launch.
-4. Any `RunKernelAsync` must be joined (`WaitForComputeAction`/`SynchronizeQueue`) before the launcher returns.
-5. Do NOT emit validation, `Tune`, `SaveResults`, includes, or `main()`.
-6. Parameter names become `-D` macros on ALL definitions of the kernel — namespace
+4. Do NOT emit validation, `Tune`, `SaveResults`, includes, or `main()`.
+5. Parameter names become macros on ALL definitions of the kernel — namespace
    names that mean different things in different kernels (e.g. `A_TILE`, `B_TILE`).
 
 # KTT C++ API you may use
 `tuner`: AddKernelDefinitionFromFile(name,file,global,local); CreateSimpleKernel(name,def);
 CreateCompositeKernel(name,{defs}); SetLauncher(kernel,lambda); AddParameter(kernel,name,
-std::vector<uint64_t>{...}); AddConstraint(kernel,{names},fn); AddThreadModifier(kernel,{defs},
-ModifierType{Global,Local},ModifierDimension{X,Y,Z},name(s),ModifierAction{Add,Subtract,
-Multiply,Divide,DivideCeil}); AddArgumentVector(vec,AccessType); AddArgumentScalar(v);
-AddArgumentLocal<T>(size); SetArguments(def,{ids}).
-`ci` (launcher): RunKernel(def[,g,l]); RunKernelAsync(def,queue)+WaitForComputeAction(id);
-GetAllQueues(); SynchronizeQueue(q); GetCurrentConfiguration().GetPairs();
-ktt::ParameterPair::GetParameterValue<uint64_t>(pairs,"NAME"); SwapArguments; UpdateScalarArgument(id,&v);
-ResizeBuffer. `ktt::DimensionVector(x[,y[,z]])`.
+std::vector<uint64_t>{...}) — spell the vector type; only uint64_t params may drive
+constraints/modifiers; AddConstraint(kernel,{names},fn) with fn=bool(const std::vector<uint64_t>&);
+AddThreadModifier(kernel,{defs},ModifierType{Global,Local},ModifierDimension{X,Y,Z}, then
+"NAME",ModifierAction{Add,Subtract,Multiply,Divide,DivideCeil} — or for several params
+std::vector<std::string>{names},lambda(uint64_t base, const std::vector<uint64_t>& vals)→uint64_t;
+AddArgumentVector(vec,ktt::ArgumentAccessType::{ReadOnly,WriteOnly,ReadWrite}); AddArgumentScalar(v);
+AddArgumentLocal<T>(bytes) = dynamic shared memory (id LAST in SetArguments; kernel reads it
+via `extern __shared__`); SetArguments(def,{ids}).
+`ci` (launcher): RunKernel(def) / RunKernel(def,global,local); GetCurrentConfiguration().GetPairs();
+ktt::ParameterPair::GetParameterValue<uint64_t>(pairs,"NAME"); SwapArguments(def,a,b);
+UpdateScalarArgument(id,&v); ResizeBuffer(id,bytes,preserveData). `ktt::DimensionVector(x[,y[,z]])`.
 
 Return the three region bodies. Emit only C++ statements for each — no code fences,
 no `main()`, no includes."""

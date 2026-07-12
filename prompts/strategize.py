@@ -1,29 +1,29 @@
 """Strategize prompt — identifies optimization strategies from analysis."""
 
 from config import MAX_STRATEGIES
+from prompts._system_overview import SYSTEM_OVERVIEW
 
 
 def build(ctx: dict) -> tuple[str, str]:
-    system = f"""# Identify Optimization Strategies
+    system = (
+        f"""# Identify Optimization Strategies
 
 You are a CUDA optimization expert. Your task is to identify discrete, independent optimization strategies based on the kernel analysis.
 
+"""
+        + SYSTEM_OVERVIEW
+        + f"""
 ## Input
 
 You will receive:
-1. The problem definition (problem.yaml) with kernel interface and GPU specs
-2. The kernel analysis (bottlenecks, memory patterns, opportunities)
-3. The reference kernel implementation
+1. The problem definition (problem.yaml) with GPU specs and run metadata
+2. The I/O boundary (inputs.hpp) with the buffers and scalars
+3. The kernel analysis (bottlenecks, memory patterns, opportunities)
+4. The reference kernel implementation
 
 ## Task
 
 Based on the analysis, identify **1-{MAX_STRATEGIES} distinct high-level optimization strategies** that could be explored in parallel and could lead to an optimal implementation. Each strategy represents a fundamentally different approach that warrants its own development branch with its own detailed plan.
-
-Important constraints for every strategy:
-- The solution must remain a **single CUDA kernel**
-- Do not propose decomposing the work into multiple kernels or extra pipeline stages
-- Assume **static shared memory only**; do not rely on `extern __shared__` / dynamic shared memory
-- **No cooperative launches**: KTT invokes kernels via standard `cudaLaunchKernel`, so grid-wide synchronization (`grid.sync()`, `<cooperative_groups.h>`) is unavailable. All cross-thread coordination must fit inside a single block, or use atomic counters in global memory for cross-block handoff
 
 ## Strategy Guidelines
 
@@ -31,7 +31,7 @@ Important constraints for every strategy:
 - **Distinct approach**: Uses fundamentally different techniques
 - **Self-contained**: Can be implemented independently without depending on other strategies
 - **Addresses bottlenecks**: Targets the specific bottlenecks identified in the analysis
-- **Feasible**: Actually implementable given the GPU hardware specs and the single-kernel constraint
+- **Feasible**: Actually implementable given the GPU hardware specs and launch constraints
 - **Algorithmic diversity**: If the analysis identifies reducible work complexity (e.g. O(R) → O(1) via scan or recurrence), at least one strategy MUST exploit that reduction. Do not generate multiple strategies that all share the same per-element work complexity.
 
 ### What is NOT a separate strategy?
@@ -69,7 +69,7 @@ These all do O(R) work per output — only the data movement differs. If the ker
 
 You must output a JSON object with:
 - `strategies`: List of 1-{MAX_STRATEGIES} strategies, each with:
-  - `name`: Short identifier (lowercase, underscores, e.g., "shared_mem_tiling")
+  - `name`: Short identifier (lowercase, underscores, max 50 chars, e.g., "shared_mem_tiling")
   - `description`: What this optimization approach does (1-2 sentences)
   - `hypothesis`: Why this might improve performance based on the analysis
   - `key_parameters`: List of main tuning parameters this approach would introduce
@@ -81,10 +81,13 @@ You must output a JSON object with:
 - Don't artificially split - quality over quantity
 - Each strategy will get its own detailed implementation plan in the next step
 """
+    )
 
     parts = []
     if ctx.get("problem_yaml"):
         parts.append(f"## Problem Definition:\n```yaml\n{ctx['problem_yaml']}\n```")
+    if ctx.get("inputs_hpp"):
+        parts.append(f"## I/O Boundary (inputs.hpp):\n```cpp\n{ctx['inputs_hpp']}\n```")
     if ctx.get("ref_kernel"):
         parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
     if ctx.get("analysis"):

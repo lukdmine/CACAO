@@ -88,8 +88,8 @@ cli.py
        ├─ nodes/strategize.py  # LLM: generate N parallel optimization strategies
        └─ engine/worker.py     # Phase 2: per-branch loop (4 parallel async coroutines)
             ├─ nodes/plan.py         # LLM: detailed implementation plan
-            ├─ nodes/implement.py    # LLM: write kernel.cu
-            ├─ nodes/configure.py    # LLM: write params.json for KTT tuner
+            ├─ nodes/implement.py    # LLM: write kernels.cu
+            ├─ nodes/configure.py    # LLM: fill framework.cpp regions (KTT C++ driver)
             ├─ nodes/run.py          # subprocess: run pyktt tuner, get timing
             ├─ nodes/profile.py      # subprocess: run ncu profiler
             ├─ nodes/propose.py      # LLM: analyze results, propose next changes
@@ -114,8 +114,8 @@ Each iteration progresses through these statuses in order:
 `planning → implementing → configuring → running → profiling → proposing → deciding → decided`
 
 After `deciding`, `next_status` on the manifest drives the branch-level outcome:
-- `continue` → increment `current_iter`, start `planning` again
-- `retry` → restart current iter at `implementing`
+- `continue` → increment `current_iter`, new iteration starts at `implementing` (planning runs once per branch); `configuring` if `skip_implement`
+- `retry` → increment `current_iter`, new iteration starts at `implementing` with the previous decision/feedback/run_output carried over (fix_errors prompt); `configuring` if `skip_implement`
 - `branch` → master spawns sub-strategies (up to `MAX_BRANCH_DEPTH`)
 - `stop/success/failed` → terminal
 
@@ -134,11 +134,13 @@ problems/<name>/output/
 └── branches/
     └── <strategy_name>/
         ├── branch.json            # BranchManifest
-        ├── iter_1/
+        ├── iter1/
         │   ├── state.json         # IterState
-        │   ├── kernel.cu          # generated kernel
-        │   ├── params.json        # KTT tuner config
+        │   ├── kernels.cu         # generated kernel(s)
+        │   ├── framework.cpp      # assembled KTT C++ driver (engine skeleton + LLM regions)
+        │   ├── driver             # compiled driver binary
         │   ├── results.json       # timing results
+        │   ├── tuner_output.txt   # KTT stdout/stderr
         │   └── ncu_profile.csv    # NCU metrics (if profiled)
         └── branches/              # sub-branches (recursive)
 ```

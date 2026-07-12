@@ -1,19 +1,25 @@
 """Fix errors prompt — fixes compilation or validation errors in CUDA kernel."""
 
 from nodes._llm_helper import format_strategy
+from prompts._system_overview import SYSTEM_OVERVIEW, NVRTC_RULES
+from prompts._tensor_core_reference import TENSOR_CORE_REFERENCE
 
 
 def build(ctx: dict) -> tuple[str, str]:
-    system = """# Fix Kernel Errors
+    system = (
+        """# Fix Kernel Errors
 
 You are debugging a CUDA kernel. Your goal is to fix the error while maintaining **maximum performance**. Do not throw away the optimization strategy unless the error proves that strategy is invalid.
 
 The kernel either failed to compile or produced incorrect results.
 
+"""
+        + SYSTEM_OVERVIEW
+        + """
 ## Input
 
 You will receive:
-1. The current kernel implementation (kernel.cu)
+1. The current kernel implementation (kernels.cu)
 2. The error message or validation failure details
 3. The reference kernel for comparison (ref_kernel.cu)
 
@@ -47,13 +53,11 @@ error: no matching function for call to 'make_float4'
 ```
 Fix: Check argument types match the function signature.
 
-**Cooperative groups / grid sync:**
+**Unsupported wmma shape:**
 ```
-catastrophic error: cannot open source file "cooperative_groups.h"
-# or: identifier "grid_group" / "this_grid" is undefined
-# or: silent runtime failure with grid-wide sync
+error: incomplete type is not allowed
 ```
-Fix: Remove `#include <cooperative_groups.h>` and any `grid.sync()` / cooperative-grid calls. KTT uses standard `cudaLaunchKernel`, so grid-wide coordination is unavailable. Restrict synchronization to a single block (`__syncthreads`), or use atomic counters in global memory for cross-block handoff.
+On a `wmma::fragment<>` declaration this means the (M,N,K)/dtype combo is not specialized — see the tensor-core table below.
 
 ### Validation Errors
 
@@ -73,7 +77,7 @@ CUDA_ERROR_ILLEGAL_ADDRESS in function cuEventCreate
 ```
 Two common causes:
 1. **Out-of-bounds array access** — add bounds checking (`if (i < N)`).
-2. **`extern __shared__` with no size** — the tuner always launches with 0 bytes of dynamic shared memory. Fix: replace `extern __shared__ float smem[]` with a static declaration: `__shared__ float smem[COMPILE_TIME_SIZE]`.
+2. **`extern __shared__` without a binding** — the launch gets 0 dynamic bytes unless the configure step registered an `AddArgumentLocal` argument for this kernel. Fix: replace with a static declaration `__shared__ float smem[COMPILE_TIME_SIZE]` (or note that configure must add the binding).
 
 Treat illegal memory access as a top-priority correctness failure. A single out-of-bounds write can invalidate the whole tuning iteration.
 
@@ -85,6 +89,12 @@ CUDA error: too many resources requested for launch
 ```
 Fix: Reduce shared memory or register usage, or use smaller block size.
 
+**Grid-wide sync (cooperative groups):**
+```
+unspecified launch failure   # at runtime — the kernel COMPILED fine
+```
+`cg::this_grid().sync()` compiles under NVRTC but KTT launches with plain `cuLaunchKernel`, so grid sync fails at runtime. Block/warp-scope cooperative groups (`cg::tiled_partition<32>`, `cg::reduce`) are fine. Fix: keep synchronization inside a block (`__syncthreads`), use atomic counters in global memory, or split into pipeline stages (each kernel launch is a grid-wide barrier).
+
 ## Output Format
 
 Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
@@ -93,9 +103,8 @@ Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
 
 1. **No illegal memory accesses** — every global and shared-memory read/write must be provably in-bounds.
 2. **Keep parameter usage consistent** — use only parameter names declared in the CACAO:PARAMS region (AddParameter), and preserve relationships implied by launch geometry and constraints.
-3. **Use static shared memory only** — never introduce `extern __shared__`.
-4. **Preserve single-kernel structure and interface** — keep `extern "C"`, kernel name, and function signature (vector pointer arguments only; scalars are compiler defines). Do not add scalar parameters to the function signature.
-5. **Prefer targeted fixes over rewrites** — only restructure aggressively if the current design cannot be repaired safely.
+3. **Preserve structure where the error allows** — keep `extern "C"` on every `__global__` and the kernel names/pipeline shape unless the error proves them invalid. Signatures MAY change when the fix requires it (runtime scalar args are legal parameters): the configure step re-binds arguments after this fix — but avoid gratuitous signature churn.
+4. **Prefer targeted fixes over rewrites** — only restructure aggressively if the current design cannot be repaired safely.
 
 ## Debugging Checklist
 
@@ -107,7 +116,11 @@ Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
 6. **Parameter usage**: Are all parameters used as intended?
 7. **Launch assumptions**: Do block/tile/work mappings still match the tuning constraints?
 8. **Memory safety**: Can any thread write outside the valid output or shared-memory region for any tested configuration?
+
 """
+        + NVRTC_RULES
+        + TENSOR_CORE_REFERENCE
+    )
 
     parts = []
     if ctx.get("problem_yaml"):
@@ -136,14 +149,10 @@ Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
     parts.append(
         "Fix the kernel errors. Output ONLY the corrected kernel code, no markdown.\n\n"
         "CRITICAL REMINDERS — verify before writing code:\n"
-        "1. NO `extern __shared__` — use ONLY static: `__shared__ float arr[COMPILE_TIME_SIZE]`. "
-        "Dynamic shared memory crashes every config.\n"
-        "2. NO host headers — `#include <stdint.h>`, `<cuda.h>`, `<cuda_runtime.h>`, `<stdio.h>` "
-        "are forbidden. Use built-in types.\n"
-        "3. Function signature: vector pointers ONLY. Scalars (M, N, K, etc.) are `#define` "
-        "constants, NOT function parameters.\n"
-        '4. `extern "C"` required on the kernel.\n'
-        "5. Every global and shared memory access must be provably in-bounds."
+        "1. Static `__shared__ arr[MACRO_SIZE]` unless configure binds AddArgumentLocal.\n"
+        "2. No glibc-reaching headers (`<stdint.h>`, `<cstdint>`, `<cuda.h>`, `<stdio.h>`).\n"
+        '3. `extern "C"` on every kernel; no gratuitous signature changes.\n'
+        "4. Every global and shared memory access must be provably in-bounds."
     )
 
     return system, "\n\n".join(parts)

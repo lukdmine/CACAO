@@ -18,6 +18,8 @@ Set `skip_implement: true` if only the tuning configuration needs changing — t
 ### `retry`
 The proposal describes errors that need fixing (compilation, runtime, validation failures).
 Provide `error_analysis` with `error_type`, `root_cause`, and `suggested_fix`.
+Set `skip_implement: true` when the fix lies in the framework regions (parameters,
+constraints, launcher) rather than the kernel code.
 
 ### `branch`
 `branch` ENDS this branch (no more iterations) and spawns the sub-strategies as independent child branches — it's a pivot, not something you do alongside `continue`.
@@ -31,7 +33,8 @@ No further improvements possible after trying. Do not stop just because the curr
 **If branching is NOT AVAILABLE (see Branching Status) and no kernel has yet compiled AND validated**, do NOT pick `stop` — pick `retry` with concrete `error_analysis` instead. With no further branching budget, this branch is the last chance for this path; persist on debug fixes rather than ending it as a failure.
 
 ## Constraints
-- The solution must remain a **single CUDA kernel**.
+- The solution is one or more kernels under the KTT driver — multi-kernel pipelines are
+  legal; judge approaches on results, not kernel count.
 - Your `feedback` must be actionable — not a restatement of the proposal.
 
 ## Stagnation Rules
@@ -56,7 +59,7 @@ JSON object with:
 - `feedback`: Instructions for the next iteration
 - `error_analysis`: (retry only) object with `error_type`, `root_cause`, `suggested_fix`
 - `sub_strategies`: (branch only) list of sub-strategy objects
-- `skip_implement`: (optional, continue only) true to skip kernel rewrite
+- `skip_implement`: (optional, continue or retry) true to skip the kernel rewrite and go straight to reconfiguring the framework regions
 - `iteration_summary`: One-line summary of this iteration (see above)
 """
 
@@ -69,6 +72,8 @@ JSON object with:
         parts.append(f"## Previous Iteration's Request:\n{ctx['prev_feedback']}")
     if ctx.get("results_summary_text"):
         parts.append(ctx["results_summary_text"])
+    if ctx.get("run_output_text"):
+        parts.append(ctx["run_output_text"])
     if ctx.get("proposal"):
         parts.append(f"## Optimization Proposal:\n{ctx['proposal']}")
     if ctx.get("existing_branches"):

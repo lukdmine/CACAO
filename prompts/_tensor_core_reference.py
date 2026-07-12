@@ -6,7 +6,7 @@ the shape tables don't drift.
 
 TENSOR_CORE_REFERENCE = """## Tensor Cores (Ampere sm_80 / sm_86)
 
-**`nvcuda::wmma` fragment API (`<mma.h>`) — only these shapes are specialized.** Any other `(M, N, K)` does NOT fail to compile; the kernel silently no-ops (tuner log: `kernel duration was 0us` + `Results differ`). That signature = unsupported wmma shape.
+**`nvcuda::wmma` fragment API (`<mma.h>`) — only these shapes are specialized.** Any other `(M, N, K)`/dtype combo is a **hard NVRTC compile error**: `error: incomplete type is not allowed` on the `wmma::fragment<>` declaration, usually followed by `no instance of function template "nvcuda::wmma::fill_fragment"`. Seeing that = pick a row from this table or drop to inline-PTX `mma.sync`. (The tuner-log pair `kernel duration was 0us` + `Results differ` is a DIFFERENT failure: the kernel launched but wrote nothing — dead bounds guard, zero-sized grid, or wrong argument binding.)
 
 | Input dtype (template arg)   | Supported `(M, N, K)`                |
 |------------------------------|--------------------------------------|
@@ -28,7 +28,7 @@ wmma::fragment<wmma::matrix_a, 16, 16, 8, wmma::precision::tf32, wmma::row_major
 wmma::fragment<wmma::accumulator, 16, 16, 8, float> c;
 ```
 
-For any shape NOT in this table (e.g. fp16 `m16n8k8`, tf32 `m16n8k4`), use inline-PTX `mma.sync` instead — Ampere supports fp16/bf16 `m16n8k{8,16}`, tf32 `m16n8k{4,8}`, int8 `m16n8k{16,32}`. Pair with `ldmatrix.sync.aligned` and `cp.async` (no `<cuda/pipeline>` needed). **Never pass an unsupported shape or dtype to `wmma::fragment<>`.**
+For any shape NOT in this table (e.g. fp16 `m16n8k8`, tf32 `m16n8k4`), use inline-PTX `mma.sync` instead — Ampere supports fp16/bf16 `m16n8k{8,16}`, tf32 `m16n8k{4,8}`, int8 `m16n8k{16,32}`. Pair with `ldmatrix.sync.aligned`. For async global→shared copies, `<cuda_pipeline.h>` (`__pipeline_memcpy_async`/`__pipeline_commit`/`__pipeline_wait_prior`) works under NVRTC and emits `cp.async` with no inline PTX; `<cuda/pipeline>` + `<cuda/barrier>` also compile. **Never pass an unsupported shape or dtype to `wmma::fragment<>`.**
 
-Unavailable: Hopper `wgmma`/`tcgen05`/TMA (sm_90+); `<cuda/pipeline>`, `<cuda/barrier>`, `<cooperative_groups.h>` (not validated here).
+Unavailable: Hopper `wgmma`/`tcgen05`/TMA (sm_90+); grid-wide sync — `cg::this_grid().sync()` COMPILES but KTT launches via `cuLaunchKernel` (not the cooperative API), so it is invalid at runtime. `<cooperative_groups.h>` itself works at block/warp scope (`cg::tiled_partition<32>`, `cg::reduce`, `cg::memcpy_async`).
 """
