@@ -1,0 +1,49 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: kSizeM
+  dtype: int
+  value: 1024
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kSizeN
+  dtype: int
+  value: 1024
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kSizeK
+  dtype: int
+  value: 1024
+  placements:
+  - host
+  - runtime
+- kind: buffer
+  name: mat_a
+  dtype: float
+  size: kSizeM * kSizeK
+  access: read
+  init: random
+  min: -2.0
+  max: 2.0
+  validate: false
+- kind: buffer
+  name: mat_b
+  dtype: float
+  size: kSizeN * kSizeK
+  access: read
+  init: random
+  min: -2.0
+  max: 2.0
+  validate: false
+- kind: buffer
+  name: mat_c
+  dtype: float
+  size: kSizeM * kSizeN
+  access: write
+  init: zeros
+  validate: true
