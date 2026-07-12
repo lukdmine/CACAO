@@ -1,36 +1,9 @@
 """Pydantic request/response schemas for the API."""
 
 from typing import Optional, Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
-
-class ScalarArg(BaseModel):
-    name: str
-    dtype: str = "int"
-    value: int | float
-
-    @field_validator("name")
-    @classmethod
-    def name_must_be_uppercase(cls, v: str) -> str:
-        if v != v.upper():
-            raise ValueError(
-                f"Scalar name '{v}' must be UPPERCASE (e.g. '{v.upper()}'). "
-                "Lowercase names conflict with NVRTC built-in headers."
-            )
-        return v
-
-
-class VectorArg(BaseModel):
-    model_config = {"populate_by_name": True}
-
-    name: str
-    dtype: str = "float"
-    size: str  # expression like "M * K"
-    access: str = "read"
-    init: str = "random"
-    init_min: Optional[int | float] = None
-    init_max: Optional[int | float] = None
-    validate_output: bool = Field(False, alias="validate")
+from models.inputs import InputsSpec
 
 
 class GpuConfig(BaseModel):
@@ -49,19 +22,26 @@ class CreateProblemRequest(BaseModel):
     description: str
     gpu: Optional[GpuConfig] = None
     tuning: Optional[TuningConfig] = None
-    reference_type: Literal["cuda", "cpu_c"] = "cuda"
     ref_function: str = "reference"
     ref_block_x: int = 256
     ref_block_y: int = 1
     ref_block_z: int = 1
     ref_kernel_code: str = ""
-    ref_cpu_code: str = ""
-    scalars: list[ScalarArg] = []
-    vectors: list[VectorArg] = []
+    # The I/O boundary. Canonical: persisted to inputs.yaml, and inputs.hpp is generated
+    # from it. Never parsed back out of the generated C++.
+    inputs: InputsSpec = Field(default_factory=InputsSpec)
+    # OpenCL: grid is total work-items (KTT divides by the per-config local size).
+    # CUDA:   grid is the number of blocks. Getting this wrong launches a GEMM with
+    #         2048x2048 blocks instead of work-items, so it must be explicit.
+    global_size_type: Literal["cuda", "opencl"] = "cuda"
     grid_x: str = "N"
     grid_y: str = "1"
     grid_z: str = "1"
     tolerance: float = 0.05
+
+
+class PreviewInputsRequest(BaseModel):
+    inputs: InputsSpec
 
 
 class RunConfig(BaseModel):

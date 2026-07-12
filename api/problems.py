@@ -13,66 +13,103 @@ from api.helpers import (
     terminate_run,
     is_problem_running,
 )
-from api.schemas import CreateProblemRequest, CloneProblemRequest
+from api.schemas import (
+    CreateProblemRequest,
+    CloneProblemRequest,
+    PreviewInputsRequest,
+)
+from utils.inputs import generate_inputs_hpp, load_inputs_spec, write_inputs
 
 router = APIRouter()
 
 
-def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
-    """Validate reference config and build problem.yaml dict."""
-    ref_type = req.reference_type
-    if ref_type == "cuda" and (not req.ref_function or not req.ref_kernel_code.strip()):
-        raise HTTPException(
-            status_code=400,
-            detail="CUDA reference requires ref_function and ref_kernel_code",
-        )
-    if ref_type == "cpu_c" and (not req.ref_function or not req.ref_cpu_code.strip()):
-        raise HTTPException(
-            status_code=400,
-            detail="CPU C reference requires ref_function and ref_cpu_code",
-        )
+_REF_SIGNATURE = re.compile(
+    r'extern\s+"C"\s+__global__\s+void\s+(\w+)\s*\(([^)]*)\)', re.S
+)
 
-    reference = {"type": ref_type, "function": req.ref_function}
-    if ref_type == "cuda":
-        reference.update(
-            {
-                "file": "ref_kernel.cu",
-                "block_x": req.ref_block_x,
-                "block_y": req.ref_block_y,
-                "block_z": req.ref_block_z,
-            }
+
+def _signature_warnings(req: CreateProblemRequest) -> list[str]:
+    """Compare the declared boundary against the reference kernel's signature.
+
+    A boundary in the wrong order is the nastiest failure in this design: KTT binds
+    SetArguments by position, so the reference silently computes from shuffled inputs and
+    validation compares against garbage. Nothing errors.
+
+    Reported, never blocking (design I6): this regex cannot parse every legal declaration,
+    and a false rejection would be worse than a banner.
+    """
+    match = _REF_SIGNATURE.search(req.ref_kernel_code or "")
+    if not match:
+        return []
+
+    func, params = match.group(1), match.group(2)
+    if func != req.ref_function:
+        return [
+            f"problem.yaml names reference function '{req.ref_function}', but "
+            f"ref_kernel.cu declares '{func}'."
+        ]
+
+    declared = [p for p in (p.strip() for p in params.split(",")) if p]
+    boundary = req.inputs.boundary
+    if len(declared) != len(boundary):
+        return [
+            f"Reference kernel '{func}' takes {len(declared)} arguments, but the boundary "
+            f"passes {len(boundary)} ({', '.join(a.name for a in boundary) or 'none'}). "
+            "They are bound by position, so a mismatch validates against garbage."
+        ]
+
+    mismatched = [
+        f"#{i + 1}: boundary '{arg.name}' vs reference '{decl}'"
+        for i, (arg, decl) in enumerate(zip(boundary, declared))
+        if not re.search(rf"\b{re.escape(arg.name)}\b", decl)
+    ]
+    if mismatched:
+        return [
+            f"Boundary order may not match reference kernel '{func}' — "
+            + "; ".join(mismatched)
+            + ". Arguments bind by position, not by name."
+        ]
+    return []
+
+
+def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
+    """Build the pure-metadata problem.yaml dict (the I/O boundary lives in inputs.yaml)."""
+    if not req.ref_function or not req.ref_kernel_code.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="A CUDA reference kernel requires ref_function and ref_kernel_code",
         )
-    else:
-        reference.update({"file": "ref_cpu.c"})
 
     data = {
         "name": req.name,
         "description": req.description,
         "gpu": {"index": gpu_index},
-        "kernel": {"file": "kernel.cu", "function": "kernel"},
-        "reference": reference,
-        "scalars": [s.model_dump() for s in req.scalars],
+        "global_size_type": req.global_size_type,
         "grid": {"x": req.grid_x, "y": req.grid_y, "z": req.grid_z},
-        "vectors": [
-            v.model_dump(by_alias=True, exclude_none=True) for v in req.vectors
-        ],
+        "reference": {
+            "function": req.ref_function,
+            "file": "ref_kernel.cu",
+            # Nested, not flat block_x/block_y: utils/framework.py reads
+            # ref["block"] and falls back to a 1x1 block when it is absent.
+            "block": {
+                "x": req.ref_block_x,
+                "y": req.ref_block_y,
+                "z": req.ref_block_z,
+            },
+        },
         "validation": {"tolerance": req.tolerance},
     }
     if req.tuning is not None:
         data["tuning"] = req.tuning.model_dump()
-    return data, ref_type
+    return data
 
 
-def _write_problem_files(problem_dir, problem_data, req, ref_type):
-    """Write problem.yaml and reference source files."""
+def _write_problem_files(problem_dir, problem_data, req: CreateProblemRequest):
+    """Write problem.yaml, ref_kernel.cu, and the inputs.yaml/inputs.hpp pair."""
     with (problem_dir / "problem.yaml").open("w") as f:
         yaml.dump(problem_data, f, default_flow_style=False, sort_keys=False)
-    if ref_type == "cuda":
-        (problem_dir / "ref_kernel.cu").write_text(req.ref_kernel_code)
-        (problem_dir / "ref_cpu.c").unlink(missing_ok=True)
-    else:
-        (problem_dir / "ref_cpu.c").write_text(req.ref_cpu_code)
-        (problem_dir / "ref_kernel.cu").unlink(missing_ok=True)
+    (problem_dir / "ref_kernel.cu").write_text(req.ref_kernel_code)
+    write_inputs(problem_dir, req.inputs)
 
 
 @router.get("/api/problems")
@@ -126,10 +163,25 @@ def create_problem(req: CreateProblemRequest):
             status_code=409, detail=f"Problem '{req.slug}' already exists"
         )
 
-    problem_data, ref_type = _build_problem_data(req, req.gpu.index if req.gpu else 0)
+    problem_data = _build_problem_data(req, req.gpu.index if req.gpu else 0)
     problem_dir.mkdir(parents=True)
-    _write_problem_files(problem_dir, problem_data, req, ref_type)
-    return {"status": "created", "name": req.slug, "path": str(problem_dir)}
+    _write_problem_files(problem_dir, problem_data, req)
+    return {
+        "status": "created",
+        "name": req.slug,
+        "path": str(problem_dir),
+        "warnings": _signature_warnings(req),
+    }
+
+
+@router.post("/api/problems/preview-inputs")
+def preview_inputs(req: PreviewInputsRequest):
+    """Render inputs.hpp for a spec without saving.
+
+    Lets the form show the generated C++ live while keeping a single generator — the
+    frontend never builds the header itself.
+    """
+    return {"inputs_hpp": generate_inputs_hpp(req.inputs)}
 
 
 @router.post("/api/problems/{name}/clone")
@@ -175,9 +227,14 @@ def update_problem(name: str, req: CreateProblemRequest):
             status_code=400, detail="Renaming slug via update is not supported"
         )
 
-    problem_data, ref_type = _build_problem_data(req, req.gpu.index if req.gpu else 0)
-    _write_problem_files(problem_dir, problem_data, req, ref_type)
-    return {"status": "updated", "name": name, "path": str(problem_dir)}
+    problem_data = _build_problem_data(req, req.gpu.index if req.gpu else 0)
+    _write_problem_files(problem_dir, problem_data, req)
+    return {
+        "status": "updated",
+        "name": name,
+        "path": str(problem_dir),
+        "warnings": _signature_warnings(req),
+    }
 
 
 @router.delete("/api/problems/{name}")
@@ -222,15 +279,17 @@ def get_problem(name: str):
     if ref_kernel_path.exists():
         ref_kernel = ref_kernel_path.read_text()
 
-    ref_cpu = ""
-    ref_cpu_path = problem_dir / "ref_cpu.c"
-    if ref_cpu_path.exists():
-        ref_cpu = ref_cpu_path.read_text()
+    # The structured boundary, not the generated C++. Reloading the spec is what makes
+    # Edit lossless: the form never has to reconstruct its state from inputs.hpp.
+    inputs = None
+    inputs_yaml = problem_dir / "inputs.yaml"
+    if inputs_yaml.exists():
+        inputs = load_inputs_spec(inputs_yaml).model_dump(by_alias=True)
 
     return {
         "name": name,
         "config": config,
         "ref_kernel": ref_kernel,
-        "ref_cpu": ref_cpu,
+        "inputs": inputs,
         "has_output": (problem_dir / "output").is_dir(),
     }
