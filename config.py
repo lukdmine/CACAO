@@ -205,6 +205,17 @@ def get_tracker_stats():
     }
 
 
+# Appended to the conversation when a response dies with finish_reason=length and
+# empty content: the model reasoned past the token cap without answering. Changing
+# the prompt (not just re-rolling) is what makes the retry meaningfully different.
+TRUNCATION_RETRY_NUDGE = (
+    "Your previous attempt consumed the entire token budget on internal reasoning "
+    "and produced no output. This time, keep deliberation brief: pick a "
+    "straightforward approach, commit to it, and emit the final answer directly. "
+    "A complete simple answer beats an unfinished sophisticated one."
+)
+
+
 class TrackedLLM:
     def __init__(self, llm):
         self._llm = llm
@@ -265,12 +276,33 @@ class TrackedLLM:
                     )
 
                     if finish_reason == "length":
+                        # Thinking models (e.g. glm-5.2 behind a ~48k server cap that
+                        # overrides max_tokens) can spend the whole budget on reasoning
+                        # and emit zero content. Retrying the identical prompt re-runs
+                        # the same risk, so append an explicit brevity instruction —
+                        # the retry prompt differs, steering the model to answer.
                         log(
-                            "Aborting retries: response truncated by max_tokens (finish_reason=length). "
-                            "Increase max_tokens in MODEL_CONFIGS for this model.",
-                            "ERROR",
+                            "Response hit the token cap with no usable content "
+                            "(reasoning consumed the budget). Retrying with a "
+                            "brevity instruction appended.",
+                            "WARN",
                         )
-                        return response
+                        if (
+                            args
+                            and isinstance(args[0], list)
+                            and (
+                                not args[0]
+                                or getattr(args[0][-1], "content", None)
+                                != TRUNCATION_RETRY_NUDGE
+                            )
+                        ):
+                            from langchain_core.messages import HumanMessage
+
+                            args = (
+                                list(args[0])
+                                + [HumanMessage(content=TRUNCATION_RETRY_NUDGE)],
+                                *args[1:],
+                            )
 
                     retries += 1
                     if retries > max_retries:

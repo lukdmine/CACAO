@@ -169,7 +169,14 @@ def format_branching_status(branch_depth: int, max_depth: int) -> str:
 def format_ncu_context(ncu_metrics: Optional[dict]) -> str:
     """Format NCU metrics into a markdown section (shared by propose + decide)."""
     if not ncu_metrics:
-        return ""
+        # Absent exactly when the iteration failed (nothing valid to profile) or
+        # NCU is unavailable — say so, or the LLM reasons from phantom numbers.
+        return (
+            "\n## NCU Metrics:\n"
+            "_Not collected — profiling was skipped (no valid configuration to "
+            "profile, or NCU unavailable). Do not reason from profiler numbers "
+            "this iteration._\n"
+        )
     lines = ["\n## NCU Metrics:"]
     for key, value in ncu_metrics.items():
         lines.append(
@@ -285,7 +292,21 @@ def build_prompt_context(
     history_fields = iteration_history_fields or []
     field_depths = _parse_field_depths(history_fields, HISTORY_ITERS)
 
+    # inputs.hpp IS the I/O boundary (buffers, scalars, validated output) —
+    # problem.yaml is pure metadata. Every prompt that reasons about the kernel
+    # interface needs this, not just implement/configure.
+    inputs_hpp = ""
+    try:
+        from config import get_problem_dir
+
+        inputs_src = get_problem_dir() / "inputs.hpp"
+        if inputs_src.exists():
+            inputs_hpp = inputs_src.read_text()
+    except Exception:
+        pass
+
     ctx = {
+        "inputs_hpp": inputs_hpp,
         "problem_yaml": getattr(state, "problem_yaml", "") or "",
         "ref_kernel": getattr(state, "ref_kernel", "") or "",
         "analysis": getattr(state, "analysis", "") or "",

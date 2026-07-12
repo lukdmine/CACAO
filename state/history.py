@@ -119,13 +119,13 @@ def _fmt_decision(d: dict) -> str:
     lines = [f"- Action: {d.get('action', '?')}"]
     if d.get("reasoning"):
         lines.append(f"- Reasoning: {d['reasoning']}")
-    if d.get("performance_assessment"):
-        lines.append(f"- Performance: {d['performance_assessment']}")
     if d.get("error_analysis"):
         ea = d["error_analysis"]
         lines.append(
             f"- Error: {ea.get('error_type', '?')} — {ea.get('root_cause', '')}"
         )
+        if ea.get("suggested_fix"):
+            lines.append(f"- Suggested fix: {ea['suggested_fix']}")
     return "**Decision:**\n" + "\n".join(lines)
 
 
@@ -396,6 +396,37 @@ def format_existing_branches(output_dir: str) -> str:
         return ""
 
     return "## Existing Branches:\n" + "\n".join(lines)
+
+
+def existing_branch_names(output_dir: str) -> set:
+    """
+    Collect every existing branch name (strategy names and directory names,
+    recursively). Used by the decide node to drop duplicate sub-strategies
+    before they spawn a second identical branch.
+    """
+    names: set = set()
+    if not output_dir:
+        return names
+
+    def _scan(bdir: Path):
+        if not bdir.is_dir():
+            return
+        for d in sorted(bdir.iterdir()):
+            if not d.is_dir() or not (d / "branch.json").exists():
+                continue
+            names.add(d.name)
+            try:
+                with (d / "branch.json").open() as f:
+                    bm = json.load(f)
+                strategy_name = (bm.get("strategy") or {}).get("name")
+                if strategy_name:
+                    names.add(strategy_name)
+            except (json.JSONDecodeError, OSError):
+                pass
+            _scan(d / "branches")
+
+    _scan(Path(output_dir) / "branches")
+    return names
 
 
 def format_parent_context(branch_path: Optional[str]) -> str:

@@ -93,22 +93,23 @@ def create_initial_iter_state(
     iter_num: int, prev_state: Optional[IterState] = None
 ) -> IterState:
     """Create a fresh iteration state for a new iteration, carrying over state from previous if provided."""
-    if prev_state:
-        status = prev_state.next_status if prev_state.next_status else "implementing"
-        plan = prev_state.plan
-        # Only carry kernel_code if skipping implement (reconfigure-only)
-        decision = prev_state.decision or {}
-        kernel_code = prev_state.kernel_code if decision.get("skip_implement") else ""
-    else:
-        status = "planning"
-        plan = ""
-        kernel_code = ""
+    if prev_state is None:
+        return IterState(iter_num=iter_num, status="planning")
 
+    # Carry the decision context forward. implement/configure select retry vs
+    # follow-up mode from `decision`/`feedback`, and `run_output` is the evidence
+    # of what went wrong — without these, every retry silently degrades to a
+    # from-scratch reattempt and the fix_errors prompt is unreachable.
+    # kernel_code carries as "the previous implementation": implement overwrites
+    # it on success, and the configuring path (skip_implement) requires it.
     return IterState(
         iter_num=iter_num,
-        status=status,
-        plan=plan,
-        kernel_code=kernel_code,
+        status=prev_state.next_status if prev_state.next_status else "implementing",
+        plan=prev_state.plan,
+        kernel_code=prev_state.kernel_code,
+        decision=prev_state.decision,
+        feedback=prev_state.feedback,
+        run_output=prev_state.run_output,
     )
 
 

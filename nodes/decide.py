@@ -15,11 +15,13 @@ from state import (
     format_iteration_summaries,
     format_existing_branches,
 )
+from state.history import existing_branch_names
 from state.persistence import load_iter_state_if_exists
 from nodes._llm_helper import (
     execute_llm_node,
     normalize_sub_strategies,
     format_branching_status,
+    get_tuner_tail,
 )
 import prompts.decide
 
@@ -78,6 +80,14 @@ async def decide_node(state: WorkingState) -> WorkingState:
             f"- Strategy: {branch_name}"
         ),
         "results_summary_text": f"## Results Summary:\n{format_results_summary(summary)}",
+        # The raw run/tuner output is the primary evidence when a step failed
+        # before producing results (e.g. implement returned nothing, compile
+        # error) — without it the LLM invents phantom diagnoses from "0 configs".
+        "run_output_text": (
+            f"## Run Output (tail):\n```\n{get_tuner_tail(state.run_output)}\n```"
+            if state.run_output
+            else ""
+        ),
         "proposal": getattr(state, "proposal", "") or "",
         "prev_feedback": prev_feedback,
         "iteration_summaries": iteration_summaries,
@@ -147,11 +157,30 @@ async def decide_node(state: WorkingState) -> WorkingState:
             status = "implementing"
     elif action == "branch":
         if branch_depth > 1 and decision_obj.sub_strategies:
-            status = "branching"
             sub_strategies = normalize_sub_strategies(
                 decision_obj.sub_strategies, strategy
             )
-            log(f"Branch action: prepared {len(sub_strategies)} sub-strategies")
+            existing = existing_branch_names(str(get_output_dir()))
+            duplicates = [s for s in sub_strategies if s.get("name") in existing]
+            if duplicates:
+                sub_strategies = [
+                    s for s in sub_strategies if s.get("name") not in existing
+                ]
+                log(
+                    f"Dropped {len(duplicates)} sub-strategies duplicating existing "
+                    f"branches: {', '.join(s.get('name', '?') for s in duplicates)}",
+                    "WARN",
+                )
+            if sub_strategies:
+                status = "branching"
+                log(f"Branch action: prepared {len(sub_strategies)} sub-strategies")
+            else:
+                log(
+                    "All proposed sub-strategies duplicate existing branches — continuing instead",
+                    "WARN",
+                )
+                status = "implementing"
+                sub_strategies = None
         else:
             log(
                 "Branch requested but no depth remaining or no sub-strategies — continuing instead",
