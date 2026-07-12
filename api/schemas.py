@@ -22,11 +22,17 @@ class CreateProblemRequest(BaseModel):
     description: str
     gpu: Optional[GpuConfig] = None
     tuning: Optional[TuningConfig] = None
+    # cpu_c is accepted and persisted, but the framework skeleton only wires
+    # SetReferenceKernel (a CUDA kernel) — spec D6 defers the CPU path. Such a problem
+    # round-trips through the form and keeps its ref_cpu.c, but cannot be run until
+    # SetReferenceComputation support lands. The save response says so.
+    reference_type: Literal["cuda", "cpu_c"] = "cuda"
     ref_function: str = "reference"
     ref_block_x: int = 256
     ref_block_y: int = 1
     ref_block_z: int = 1
     ref_kernel_code: str = ""
+    ref_cpu_code: str = ""
     # The I/O boundary. Canonical: persisted to inputs.yaml, and inputs.hpp is generated
     # from it. Never parsed back out of the generated C++.
     inputs: InputsSpec = Field(default_factory=InputsSpec)

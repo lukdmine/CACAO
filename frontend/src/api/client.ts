@@ -40,6 +40,9 @@ export interface ProblemDetailResponse {
     config: Record<string, unknown>;
     ref_kernel: string;
     ref_cpu: string;
+    // The structured boundary spec, not the generated inputs.hpp. Edit reloads this;
+    // it never reconstructs form state from C++. Null for a problem with no inputs.yaml.
+    inputs: InputsSpec | null;
     has_output: boolean;
 }
 
@@ -72,6 +75,42 @@ export async function fetchTree(problemName: string): Promise<TreeResponse> {
 // Create Problem
 // =============================================================================
 
+// host    -> inline constexpr in inputs.hpp (sizes the generators)
+// define  -> -D macro for NVRTC (compile-time constant inside the kernels; UPPERCASE name)
+// runtime -> AddArgumentScalar, and the scalar joins the reference-signature boundary
+export type Placement = 'host' | 'define' | 'runtime';
+
+export interface ScalarSpec {
+    kind: 'scalar';
+    name: string;
+    dtype: 'int' | 'float';
+    value: number;
+    placements: Placement[];
+}
+
+export interface BufferSpec {
+    kind: 'buffer';
+    name: string;
+    dtype: 'int' | 'float';
+    size: string;                      // C++ expression over host-const scalars
+    access: 'read' | 'write' | 'readwrite';
+    init: 'random' | 'zeros' | 'custom';
+    min?: number | null;               // random only
+    max?: number | null;               // random only
+    body?: string | null;              // custom only: verbatim C++ returning std::vector<dtype>
+    validate: boolean;                 // exactly one buffer, checked against the reference
+}
+
+export type ArgSpec = ScalarSpec | BufferSpec;
+
+// `args` is ORDERED: its order is the reference kernel's signature. Buffers, plus
+// scalars carrying the `runtime` placement, form the boundary passed to the reference.
+export interface InputsSpec {
+    headers: string[];
+    shared_setup: string;
+    args: ArgSpec[];
+}
+
 export interface CreateProblemData {
     slug: string;
     name: string;
@@ -82,6 +121,8 @@ export interface CreateProblemData {
     tuning?: {
         duration_s: number;
     };
+    // cpu_c round-trips and is persisted, but framework mode cannot yet run it — the
+    // skeleton only wires SetReferenceKernel. Saving one returns a warning.
     reference_type: 'cuda' | 'cpu_c';
     ref_function: string;
     ref_block_x: number;
@@ -89,25 +130,43 @@ export interface CreateProblemData {
     ref_block_z: number;
     ref_kernel_code: string;
     ref_cpu_code: string;
-    scalars: { name: string; dtype: string; value: number }[];
-    vectors: { name: string; dtype: string; size: string; access: string; init: string; init_min?: number | null; init_max?: number | null; validate: boolean }[];
+    inputs: InputsSpec;
+    // OpenCL: grid is total work-items. CUDA: grid is the number of blocks.
+    global_size_type: 'cuda' | 'opencl';
     grid_x: string;
     grid_y: string;
     grid_z: string;
     tolerance: number;
 }
 
+interface SaveProblemResponse {
+    status: string;
+    name: string;
+    path: string;
+    // Boundary/reference-signature mismatches. Reported, never blocking — arguments bind
+    // by position, so a wrong order silently validates against garbage.
+    warnings: string[];
+}
+
 export async function createProblem(data: CreateProblemData) {
-    return apiFetch<{ status: string; name: string; path: string }>('/api/problems', {
+    return apiFetch<SaveProblemResponse>('/api/problems', {
         method: 'POST',
         body: JSON.stringify(data),
     });
 }
 
 export async function updateProblem(name: string, data: CreateProblemData) {
-    return apiFetch<{ status: string; name: string; path: string }>(`/api/problems/${name}`, {
+    return apiFetch<SaveProblemResponse>(`/api/problems/${name}`, {
         method: 'PUT',
         body: JSON.stringify(data),
+    });
+}
+
+/** Render inputs.hpp for a spec without saving — one generator, shared with the backend. */
+export async function previewInputs(inputs: InputsSpec) {
+    return apiFetch<{ inputs_hpp: string }>('/api/problems/preview-inputs', {
+        method: 'POST',
+        body: JSON.stringify({ inputs }),
     });
 }
 

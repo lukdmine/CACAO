@@ -38,6 +38,16 @@ def _signature_warnings(req: CreateProblemRequest) -> list[str]:
     Reported, never blocking (design I6): this regex cannot parse every legal declaration,
     and a false rejection would be worse than a banner.
     """
+    if req.reference_type != "cuda":
+        # Persisted so the problem round-trips, but the engine skeleton only wires
+        # SetReferenceKernel. KTT does offer SetReferenceComputation (a host callable)
+        # for this; until the skeleton uses it, such a problem cannot run.
+        return [
+            "Framework mode validates only against a CUDA reference kernel. This "
+            "problem's C reference is saved, but it cannot be run until CPU-reference "
+            "support (KTT SetReferenceComputation) lands."
+        ]
+
     match = _REF_SIGNATURE.search(req.ref_kernel_code or "")
     if not match:
         return []
@@ -74,11 +84,27 @@ def _signature_warnings(req: CreateProblemRequest) -> list[str]:
 
 def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
     """Build the pure-metadata problem.yaml dict (the I/O boundary lives in inputs.yaml)."""
-    if not req.ref_function or not req.ref_kernel_code.strip():
+    is_cuda = req.reference_type == "cuda"
+    code = req.ref_kernel_code if is_cuda else req.ref_cpu_code
+    if not req.ref_function or not code.strip():
         raise HTTPException(
             status_code=400,
-            detail="A CUDA reference kernel requires ref_function and ref_kernel_code",
+            detail=f"A {req.reference_type} reference requires ref_function and its source code",
         )
+
+    reference = {
+        "type": req.reference_type,
+        "function": req.ref_function,
+        "file": "ref_kernel.cu" if is_cuda else "ref_cpu.c",
+    }
+    if is_cuda:
+        # Nested, not flat block_x/block_y: utils/framework.py reads ref["block"] and
+        # falls back to a 1x1 block when it is absent.
+        reference["block"] = {
+            "x": req.ref_block_x,
+            "y": req.ref_block_y,
+            "z": req.ref_block_z,
+        }
 
     data = {
         "name": req.name,
@@ -86,17 +112,7 @@ def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
         "gpu": {"index": gpu_index},
         "global_size_type": req.global_size_type,
         "grid": {"x": req.grid_x, "y": req.grid_y, "z": req.grid_z},
-        "reference": {
-            "function": req.ref_function,
-            "file": "ref_kernel.cu",
-            # Nested, not flat block_x/block_y: utils/framework.py reads
-            # ref["block"] and falls back to a 1x1 block when it is absent.
-            "block": {
-                "x": req.ref_block_x,
-                "y": req.ref_block_y,
-                "z": req.ref_block_z,
-            },
-        },
+        "reference": reference,
         "validation": {"tolerance": req.tolerance},
     }
     if req.tuning is not None:
@@ -105,10 +121,13 @@ def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
 
 
 def _write_problem_files(problem_dir, problem_data, req: CreateProblemRequest):
-    """Write problem.yaml, ref_kernel.cu, and the inputs.yaml/inputs.hpp pair."""
+    """Write problem.yaml, the reference source, and the inputs.yaml/inputs.hpp pair."""
     with (problem_dir / "problem.yaml").open("w") as f:
         yaml.dump(problem_data, f, default_flow_style=False, sort_keys=False)
-    (problem_dir / "ref_kernel.cu").write_text(req.ref_kernel_code)
+    if req.reference_type == "cuda":
+        (problem_dir / "ref_kernel.cu").write_text(req.ref_kernel_code)
+    else:
+        (problem_dir / "ref_cpu.c").write_text(req.ref_cpu_code)
     write_inputs(problem_dir, req.inputs)
 
 
@@ -279,6 +298,11 @@ def get_problem(name: str):
     if ref_kernel_path.exists():
         ref_kernel = ref_kernel_path.read_text()
 
+    ref_cpu = ""
+    ref_cpu_path = problem_dir / "ref_cpu.c"
+    if ref_cpu_path.exists():
+        ref_cpu = ref_cpu_path.read_text()
+
     # The structured boundary, not the generated C++. Reloading the spec is what makes
     # Edit lossless: the form never has to reconstruct its state from inputs.hpp.
     inputs = None
@@ -290,6 +314,7 @@ def get_problem(name: str):
         "name": name,
         "config": config,
         "ref_kernel": ref_kernel,
+        "ref_cpu": ref_cpu,
         "inputs": inputs,
         "has_output": (problem_dir / "output").is_dir(),
     }
