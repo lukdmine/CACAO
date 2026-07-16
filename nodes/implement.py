@@ -12,6 +12,12 @@ import prompts.implement
 import prompts.fix_errors
 
 
+def _select_prompt(mode: str):
+    """Retry means the last attempt failed to compile or validate: fix_errors is the
+    prompt that shows the diagnostics and asks for the smallest correct fix."""
+    return prompts.fix_errors if mode == "retry" else prompts.implement
+
+
 async def implement_node(state: WorkingState) -> WorkingState:
     iteration = state.iter_num
     branch_path = Path(state.branch_path) if state.branch_path else None
@@ -25,25 +31,20 @@ async def implement_node(state: WorkingState) -> WorkingState:
     else:
         iter_dir = get_output_dir() / f"iter{iteration}"
         iter_dir.mkdir(parents=True, exist_ok=True)
-    # Determine prompt and mode
-    decision = state.decision or {}
-    decision_action = decision.get("action")
-    is_retry = decision_action == "retry"
-    is_followup = iteration > 1 and bool(state.feedback)
+    # How this iteration was entered, decided once at creation (state/persistence.py).
+    # Previously inferred from a decision blob copied forward from the previous
+    # iteration; that no longer exists, and state.decision is always None here anyway --
+    # decide runs last, implement runs first.
+    is_retry = state.mode == "retry"
+    is_followup = state.mode in ("retry", "followup")
 
     if is_retry:
         log(f"Retry mode: fixing errors from iteration {iteration - 1}", "WARN")
-        output_lines = (state.run_output or "").strip().split("\n")
-        print("\n--- Last 20 lines of tuner output ---")
-        for line in output_lines[-20:]:
-            print(f"  {line}")
-        print("-------------------------------------\n")
-    else:
-        if is_followup:
-            log(
-                f"Follow-up implementation mode: applying requested changes from iteration {iteration - 1}",
-                "INFO",
-            )
+    elif is_followup:
+        log(
+            f"Follow-up implementation mode: applying requested changes from iteration {iteration - 1}",
+            "INFO",
+        )
 
     # Build context
     ctx = build_prompt_context(
@@ -54,6 +55,9 @@ async def implement_node(state: WorkingState) -> WorkingState:
             {"name": "decision"},
             {"name": "feedback", "limit": 1},
             {"name": "proposal", "limit": 1},
+            # A retry must see what it is fixing. This used to ride in on the carried
+            # state.run_output, which no longer exists.
+            {"name": "run_output", "limit": 1},
         ],
     )
 
@@ -62,25 +66,20 @@ async def implement_node(state: WorkingState) -> WorkingState:
     if inputs_src.exists():
         ctx["inputs_hpp"] = inputs_src.read_text()
 
-    # Add node-specific follow-up/retry context
+    # Only the instruction. The feedback, the previous kernel, and the run output all come
+    # from the iteration-history section that precedes this one in the prompt — sending
+    # them again here duplicated ~16 KB per call.
     if is_followup:
-        action_guidance = (
-            "Fix the issues in the kernel based on the feedback and results above."
-            if is_retry
-            else "Apply the requested kernel changes from the feedback above. Preserve correctness, keep all memory accesses in-bounds, and keep parameter usage consistent with the tuning configuration."
-        )
         ctx["current_context"] = (
-            f"## Current Feedback:\n{state.feedback or 'No specific feedback'}\n\n"
-            f"## Decision Action:\n{decision_action or 'N/A'}\n\n"
-            f"## Previous Implementation:\n```cuda\n{state.kernel_code or ''}\n```\n\n"
-            f"{action_guidance}"
+            "Fix the issues in the kernel using the feedback, tuner output, and kernel "
+            "from the most recent iteration above."
+            if is_retry
+            else "Apply the requested kernel changes from the feedback in the most recent "
+            "iteration above. Preserve correctness, keep all memory accesses in-bounds, "
+            "and keep parameter usage consistent with the tuning configuration."
         )
 
-    # Select prompt
-    if is_retry:
-        system, user = prompts.fix_errors.build(ctx)
-    else:
-        system, user = prompts.implement.build(ctx)
+    system, user = _select_prompt(state.mode).build(ctx)
 
     state, kernel_code = await execute_llm_node(
         state,
