@@ -6,6 +6,7 @@ Handles reading and analyzing KTT tuning results.
 
 import json
 import re
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Tuple  # noqa: F401 (Tuple used in check_results)
 
@@ -34,6 +35,68 @@ def parse_reference_time_from_output(tuner_output: str) -> Optional[float]:
     if match:
         return float(match.group(1))
     return None
+
+
+# Heading of the text summarize_failures() produces. Public because state.history keys the
+# head-vs-tail excerpt off it — if these two drift apart, the summary is silently tailed
+# and loses its header and most-frequent cause.
+FAILURE_SUMMARY_HEADING = "## Configuration failures:"
+
+# KTT logs one of these per failed configuration, followed by the compiler's diagnostics.
+_FAILURE_MARKER = "[Warning] Kernel run failed with reason:"
+_DIAGNOSTIC = re.compile(r"^\s*(default_program\(\d+\): (?:error|warning)[^\n]*)", re.M)
+# The reason line carries a per-run function name/pointer in some KTT builds; drop trailing
+# detail so two configs failing the same way group together.
+_REASON = re.compile(r"^\s*(.*?)(?:, additional info:.*)?$", re.S)
+
+
+def summarize_failures(tuner_output: str) -> Optional[str]:
+    """Group per-configuration failures by their diagnostics, one entry per distinct cause.
+
+    KTT runs every configuration, so a kernel that does not compile fails all of them with
+    the same errors. One real run: 957 KB / 21,609 lines / 333 failed configurations
+    carrying exactly TWO distinct causes. Excerpting that log hands the LLM one arbitrary
+    configuration's block — and cuts mid-block, so the actual diagnosis can be missing
+    entirely. Grouping gives every cause, complete, in ~50 lines.
+
+    Returns None when there are no recognizable failure blocks (a clean run, a host compile
+    error, a crash), so callers fall back to an excerpt.
+    """
+    if _FAILURE_MARKER not in tuner_output:
+        return None
+
+    blocks = tuner_output.split(_FAILURE_MARKER)[1:]
+    groups: "OrderedDict[tuple, dict]" = OrderedDict()
+    for block in blocks:
+        head = block.split("\n", 1)[0]
+        reason = _REASON.match(head).group(1).strip()
+        # Sets: a config repeats the same diagnostic across template instantiations, and
+        # ordering varies between runs.
+        diags = tuple(sorted(set(_DIAGNOSTIC.findall(block))))
+        key = (reason, diags)
+        entry = groups.setdefault(key, {"count": 0, "reason": reason, "diags": diags})
+        entry["count"] += 1
+
+    total = len(blocks)
+    lines = [
+        f"{FAILURE_SUMMARY_HEADING} {total} configuration(s), "
+        f"{len(groups)} distinct cause(s)",
+        "",
+        "Grouped from the full log (kept at iter_N/tuner_output.txt). Every distinct cause "
+        "is listed; the counts say how many configurations each one hit.",
+    ]
+    # Most frequent first: this text is itself excerpted head-first for prompts, so the
+    # cause affecting the most configurations must survive truncation.
+    ordered = sorted(groups.values(), key=lambda e: -e["count"])
+    for i, entry in enumerate(ordered, 1):
+        lines.append("")
+        lines.append(f"### Cause {i} — {entry['count']} of {total} configuration(s)")
+        lines.append(entry["reason"])
+        if entry["diags"]:
+            lines.append("```")
+            lines.extend(entry["diags"])
+            lines.append("```")
+    return "\n".join(lines)
 
 
 def load_reference_time(output_dir: Path) -> Optional[float]:

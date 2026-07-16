@@ -25,6 +25,7 @@ from utils.results import (
     save_reference_time,
     get_results_summary,
     load_reference_time,
+    summarize_failures,
 )
 from state.types import WorkingState
 
@@ -289,10 +290,19 @@ async def run_node(state: WorkingState) -> WorkingState:
         save_reference_time(get_output_dir(), ref_time)
         log(f"Reference time: {ref_time:.0f} µs")
 
-    # Save tuner output
+    # The full log is the artifact; keep it on disk.
     save_output(iter_dir, output, "tuner_output.txt")
 
-    state.run_output = output
+    # State carries the summary, not the log. KTT runs every configuration, so a kernel
+    # that does not compile fails all of them with the same diagnostics — one real run was
+    # 957 KB across 333 configurations carrying two distinct causes. Storing that whole log
+    # meant prompts had to excerpt it (showing one arbitrary configuration's block, cut
+    # mid-way, sometimes omitting the diagnosis entirely) and every /tree poll shipped it
+    # to the browser. Grouped, the same evidence is 4 KB and complete.
+    failures = summarize_failures(output)
+    if failures:
+        log(f"Summarized {len(output) // 1024} KB of failures -> {len(failures) // 1024} KB")
+    state.run_output = failures or output
 
     # Save speedup/best_time eagerly so they persist even if later nodes fail
     ref_time_val = load_reference_time(get_output_dir())

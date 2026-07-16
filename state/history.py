@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Optional, Set
 
 from utils.log import log
-from utils.results import get_results_summary, load_reference_time
+from utils.results import (
+    FAILURE_SUMMARY_HEADING as _FAILURE_SUMMARY_HEADING,
+    get_results_summary,
+    load_reference_time,
+)
 
 # Fields that can be requested per-node via the ``include`` parameter.
 _ALL_HISTORY_FIELDS: Set[str] = {
@@ -105,7 +109,9 @@ def output_excerpt(text: str, max_lines: int) -> tuple[str, str]:
     lines = text.strip().split("\n")
     if len(lines) <= max_lines:
         return "\n".join(lines), f"{len(lines)} lines"
-    if text.startswith("[COMPILE ERROR]"):
+    # Both of these lead with what matters — the [COMPILE ERROR] header and root-cause
+    # error, or the failure summary's header and most frequent cause — so take the head.
+    if text.startswith("[COMPILE ERROR]") or text.startswith(_FAILURE_SUMMARY_HEADING):
         return "\n".join(lines[:max_lines]), f"first {max_lines} lines"
     return "\n".join(lines[-max_lines:]), f"last {max_lines} lines"
 
