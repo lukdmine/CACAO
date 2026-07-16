@@ -126,7 +126,9 @@ Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
     if ctx.get("problem_yaml"):
         parts.append(f"## Problem Definition:\n```yaml\n{ctx['problem_yaml']}\n```")
     if ctx.get("ref_kernel"):
-        parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
+        parts.append(
+            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
+        )
     if ctx.get("plan"):
         parts.append(f"## Optimization Plan:\n{ctx['plan']}")
     strategy_text = format_strategy(ctx.get("strategy"))

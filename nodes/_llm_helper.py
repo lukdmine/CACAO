@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Optional, Type
 
+import yaml
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel
 
@@ -270,6 +271,20 @@ def get_tuner_tail(run_output: str, max_lines: int = 50) -> str:
     return "\n".join(lines[-max_lines:])
 
 
+def _infer_ref_language(problem_yaml: str) -> str:
+    ref_type = "cuda"
+    try:
+        meta = yaml.safe_load(problem_yaml) or {}
+        ref_type = str(meta.get("reference", {}).get("type", "cuda")).lower()
+    except Exception:
+        pass
+    if ref_type == "cpu_c":
+        return "c"
+    if ref_type == "python":
+        return "python"
+    return "cuda"
+
+
 def build_prompt_context(
     state, *, iteration_history_fields=None, summary=None, tuner_tail=None
 ) -> dict:
@@ -309,15 +324,14 @@ def build_prompt_context(
         "inputs_hpp": inputs_hpp,
         "problem_yaml": getattr(state, "problem_yaml", "") or "",
         "ref_kernel": getattr(state, "ref_kernel", "") or "",
+        "ref_language": _infer_ref_language(getattr(state, "problem_yaml", "") or ""),
         "analysis": getattr(state, "analysis", "") or "",
         "plan": getattr(state, "plan", "") if iter_num <= 1 else "",
         "strategy": getattr(state, "strategy", None),
         "kernel_code": getattr(state, "kernel_code", "") or "",
         "framework_cpp": getattr(state, "framework_cpp", "") or "",
         "proposal": getattr(state, "proposal", "") or "",
-        "parent_context": format_parent_context(branch_path)
-        if iter_num <= 1
-        else "",
+        "parent_context": format_parent_context(branch_path) if iter_num <= 1 else "",
         "user_messages": format_user_messages(state.model_dump()),
         "iteration_summaries": format_iteration_summaries(branch_path, iter_num),
         "iteration_history": format_iteration_history(

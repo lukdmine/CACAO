@@ -91,7 +91,9 @@ Write your plan as a markdown document:
     if ctx.get("inputs_hpp"):
         parts.append(f"## I/O Boundary (inputs.hpp):\n```cpp\n{ctx['inputs_hpp']}\n```")
     if ctx.get("ref_kernel"):
-        parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
+        parts.append(
+            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
+        )
     if ctx.get("analysis"):
         parts.append(f"## Kernel Analysis:\n{ctx['analysis']}")
     if ctx.get("parent_context"):

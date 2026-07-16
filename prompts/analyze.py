@@ -96,7 +96,9 @@ shared memory per block, max threads per block, memory bandwidth).
     if ctx.get("inputs_hpp"):
         parts.append(f"## I/O Boundary (inputs.hpp):\n```cpp\n{ctx['inputs_hpp']}\n```")
     if ctx.get("ref_kernel"):
-        parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
+        parts.append(
+            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
+        )
     parts.append("Analyze this kernel and identify optimization opportunities.")
 
     return system, "\n\n".join(parts)

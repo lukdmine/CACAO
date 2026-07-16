@@ -47,6 +47,20 @@ async def configure_node(state: WorkingState) -> WorkingState:
     inputs_hpp = inputs_src.read_text()
     shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
 
+    meta = yaml.safe_load(state.problem_yaml) if state.problem_yaml else {}
+    ref = meta.get("reference", {})
+    ref_type = str(ref.get("type", "cuda")).lower()
+
+    if ref_type == "python":
+        ref_py = problem_dir / ref.get("file", "ref.py")
+        if not ref_py.exists():
+            raise FileNotFoundError(
+                f"{ref_py} not found — python reference file required by problem.yaml"
+            )
+        shutil.copyfile(ref_py, iter_dir / "ref.py")
+        inputs_yaml = problem_dir / "inputs.yaml"
+        shutil.copyfile(inputs_yaml, iter_dir / "inputs.yaml")
+
     # Build context
     ctx = build_prompt_context(
         state,
@@ -63,7 +77,7 @@ async def configure_node(state: WorkingState) -> WorkingState:
     if key_params:
         ctx["strategy_section"] = (
             f'## Strategy Key Parameters\nThe strategy "{strategy.name}" should focus '
-            f'on these parameters: {", ".join(key_params)}'
+            f"on these parameters: {', '.join(key_params)}"
         )
 
     prev_context = ""
@@ -76,8 +90,6 @@ async def configure_node(state: WorkingState) -> WorkingState:
         ctx["prev_context"] = prev_context
 
     system, user = prompts.framework_configure.build(ctx)
-
-    meta = yaml.safe_load(state.problem_yaml) if state.problem_yaml else {}
 
     def process(result: FrameworkRegions) -> str:
         regions = {
@@ -110,7 +122,9 @@ async def configure_node(state: WorkingState) -> WorkingState:
 
     if framework_cpp is not None:
         preview = "\n".join(framework_cpp.split("\n")[:40])
-        print(f"\n--- framework.cpp (head) ---\n{preview}\n...\n----------------------------\n")
+        print(
+            f"\n--- framework.cpp (head) ---\n{preview}\n...\n----------------------------\n"
+        )
     else:
         log("Framework configuration failed (structured LLM error)", "ERROR")
         state.status = "deciding"

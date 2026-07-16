@@ -340,6 +340,12 @@ def get_subprocess_env(env: Optional[CudaEnv] = None) -> dict:
     if existing:
         parts.append(existing)
     sub_env["LD_LIBRARY_PATH"] = ":".join(parts)
+    # Add project root to PYTHONPATH so python3 -m utils.python_ref_runner resolves
+    # when the subprocess runs from an iteration directory (python reference mode).
+    pythonpath = sub_env.get("PYTHONPATH", "")
+    sub_env["PYTHONPATH"] = (
+        str(project_root) if not pythonpath else f"{str(project_root)}:{pythonpath}"
+    )
     # Force POSIX numeric locale so tools like NCU always use '.' as the
     # decimal separator, regardless of the host machine's regional settings.
     sub_env["LC_NUMERIC"] = "C"
