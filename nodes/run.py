@@ -26,6 +26,7 @@ from utils.results import (
     get_results_summary,
     load_reference_time,
     summarize_failures,
+    kernel_line_offset,
 )
 from state.types import WorkingState
 
@@ -299,7 +300,12 @@ async def run_node(state: WorkingState) -> WorkingState:
     # meant prompts had to excerpt it (showing one arbitrary configuration's block, cut
     # mid-way, sometimes omitting the diagnosis entirely) and every /tree poll shipped it
     # to the browser. Grouped, the same evidence is 4 KB and complete.
-    failures = summarize_failures(output)
+    # KTT prepends one #define per tuning parameter before NVRTC sees the source, so device
+    # diagnostics are reported against line numbers that do not exist in kernels.cu. The
+    # offset is the parameter count, which results.json carries.
+    failures = summarize_failures(
+        output, kernel_offset=kernel_line_offset(iter_dir / "results.json")
+    )
     if failures:
         log(f"Summarized {len(output) // 1024} KB of failures -> {len(failures) // 1024} KB")
     state.run_output = failures or output

@@ -60,8 +60,35 @@ _DIAGNOSTIC = re.compile(
 _CONTEXT = re.compile(r"^\s*(?:\d+\s*\||\||~|\^|In file included|\s+from |.*\bnote:)")
 
 
-def summarize_failures(tuner_output: str) -> Optional[str]:
+def kernel_line_offset(results_path: Path) -> Optional[int]:
+    """Lines KTT prepends to kernels.cu before handing it to NVRTC.
+
+    KTT emits one ``#define NAME value`` per tuning parameter, so NVRTC's reported line is
+    the file's line plus the parameter count, and every device diagnostic the LLM sees is
+    off by exactly that much from the file it is editing.
+
+    Verified against four real kernels at two different parameter counts (8 and 7): every
+    mapping landed on the offending line, and the 7-parameter kernels would have been off
+    by one under a fixed offset.
+    """
+    data = load_results(results_path)
+    if not data:
+        return None
+    results = data.get("Results") or []
+    if not results:
+        return None
+    config = results[0].get("Configuration")
+    return len(config) if config else None
+
+
+def summarize_failures(
+    tuner_output: str, kernel_offset: Optional[int] = None
+) -> Optional[str]:
     """Every distinct compiler diagnostic, once, with the context the compiler gave for it.
+
+    ``kernel_offset`` (see kernel_line_offset) maps NVRTC's ``default_program(N)`` back to
+    the kernels.cu line the LLM is actually editing. Without it the model has to guess the
+    correspondence, and the numbers it reasons about are not the numbers in its file.
 
     KTT runs every configuration, so a kernel that does not compile fails all of them with
     the same diagnostics. One real run: 957 KB / 21,609 lines / 9,060 lines matching
@@ -108,10 +135,28 @@ def summarize_failures(tuner_output: str) -> Optional[str]:
         )
     out = [header, "", note, "```"]
     for text, entry in sorted(diags.items(), key=lambda kv: -kv[1]["count"]):
-        out.append(f"x{entry['count']:<4} {text}")
+        out.append(f"x{entry['count']:<4} {_map_device_line(text, kernel_offset)}")
         out.extend(f"      {c}" for c in entry["context"])
     out.append("```")
     return "\n".join(out)
+
+
+def _map_device_line(text: str, offset: Optional[int]) -> str:
+    """Rewrite `default_program(N)` to the kernels.cu line it corresponds to.
+
+    The LLM edits kernels.cu, so give it kernels.cu numbers; NVRTC's own numbering is of no
+    use to it and inviting it to do the arithmetic is inviting it to get it wrong. The
+    untouched log stays at iter_N/tuner_output.txt if the mapping ever needs checking.
+    """
+    if not offset:
+        return text
+
+    def sub(m):
+        dev = int(m.group(1))
+        src = dev - offset
+        return f"kernels.cu:{src}" if src > 0 else m.group(0)
+
+    return re.sub(r"default_program\((\d+)\)", sub, text)
 
 
 def _context_below(lines: list, i: int, limit: int = 4) -> list:
