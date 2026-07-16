@@ -37,66 +37,94 @@ def parse_reference_time_from_output(tuner_output: str) -> Optional[float]:
     return None
 
 
-# Heading of the text summarize_failures() produces. Public because state.history keys the
-# head-vs-tail excerpt off it — if these two drift apart, the summary is silently tailed
-# and loses its header and most-frequent cause.
-FAILURE_SUMMARY_HEADING = "## Configuration failures:"
+# Heading prefix of the text summarize_failures() produces. Public because state.history
+# keys the head-vs-tail excerpt off it — if these two drift apart, the summary is silently
+# tailed and loses its header and most widespread diagnostic. Only the prefix is fixed; the
+# rest of the line reports what was actually found.
+FAILURE_SUMMARY_HEADING = "## Compile diagnostics:"
 
 # KTT logs one of these per failed configuration, followed by the compiler's diagnostics.
 _FAILURE_MARKER = "[Warning] Kernel run failed with reason:"
-_DIAGNOSTIC = re.compile(r"^\s*(default_program\(\d+\): (?:error|warning)[^\n]*)", re.M)
-# The reason line carries a per-run function name/pointer in some KTT builds; drop trailing
-# detail so two configs failing the same way group together.
-_REASON = re.compile(r"^\s*(.*?)(?:, additional info:.*)?$", re.S)
+
+# A diagnostic, captured from the LOCATION onward wherever it sits in the line. Both
+# compilers appear: NVRTC as `default_program(58): error: ...` (device) and g++ as
+# `framework.cpp:12:25: error: ...` (host). The location anchor also strips KTT's
+# "[Warning] Kernel run failed with reason: ... additional info: " prefix, which carries
+# the block's first diagnostic inline.
+_DIAGNOSTIC = re.compile(
+    r"((?:default_program\(\d+\)|[\w./+-]+:\d+(?::\d+)?): (?:fatal error|error): .*?)\s*$"
+)
+# Lines the compiler emits UNDER a diagnostic: g++ prints the offending source and a caret
+# ruler, plus "note:" candidates. NVRTC prints nothing. Kept so a host error arrives with
+# the code it is complaining about.
+_CONTEXT = re.compile(r"^\s*(?:\d+\s*\||\||~|\^|In file included|\s+from |.*\bnote:)")
 
 
 def summarize_failures(tuner_output: str) -> Optional[str]:
-    """Group per-configuration failures by their diagnostics, one entry per distinct cause.
+    """Every distinct compiler diagnostic, once, with the context the compiler gave for it.
 
     KTT runs every configuration, so a kernel that does not compile fails all of them with
-    the same errors. One real run: 957 KB / 21,609 lines / 333 failed configurations
-    carrying exactly TWO distinct causes. Excerpting that log hands the LLM one arbitrary
-    configuration's block — and cuts mid-block, so the actual diagnosis can be missing
-    entirely. Grouping gives every cause, complete, in ~50 lines.
+    the same diagnostics. One real run: 957 KB / 21,609 lines / 9,060 lines matching
+    `error:` — carrying 46 distinct diagnostics. Excerpting that log hands the LLM one
+    arbitrary configuration's block, cut mid-way: in that run the tail showed the wmma
+    errors while the float2 errors, on 1,332 lines, never reached the retry at all.
 
-    Returns None when there are no recognizable failure blocks (a clean run, a host compile
-    error, a crash), so callers fall back to an excerpt.
+    Deduplicating by diagnostic rather than by block is what makes the result complete: a
+    per-block grouping reports the same error once per block it appears in, so a cause
+    present in only one block is easy to miss among the repeats.
+
+    Returns None when the output carries no diagnostics (a clean run, a crash), so callers
+    fall back to an excerpt.
     """
-    if _FAILURE_MARKER not in tuner_output:
-        return None
+    lines = tuner_output.split("\n")
+    configs = max(tuner_output.count(_FAILURE_MARKER), 0)
 
-    blocks = tuner_output.split(_FAILURE_MARKER)[1:]
-    groups: "OrderedDict[tuple, dict]" = OrderedDict()
-    for block in blocks:
-        head = block.split("\n", 1)[0]
-        reason = _REASON.match(head).group(1).strip()
-        # Sets: a config repeats the same diagnostic across template instantiations, and
-        # ordering varies between runs.
-        diags = tuple(sorted(set(_DIAGNOSTIC.findall(block))))
-        key = (reason, diags)
-        entry = groups.setdefault(key, {"count": 0, "reason": reason, "diags": diags})
+    diags: "OrderedDict[str, dict]" = OrderedDict()
+    for i, line in enumerate(lines):
+        m = _DIAGNOSTIC.search(line)
+        if not m:
+            continue
+        text = m.group(1).strip()
+        entry = diags.get(text)
+        if entry is None:
+            entry = diags[text] = {"count": 0, "context": _context_below(lines, i)}
         entry["count"] += 1
 
-    total = len(blocks)
-    lines = [
-        f"{FAILURE_SUMMARY_HEADING} {total} configuration(s), "
-        f"{len(groups)} distinct cause(s)",
-        "",
-        "Grouped from the full log (kept at iter_N/tuner_output.txt). Every distinct cause "
-        "is listed; the counts say how many configurations each one hit.",
-    ]
-    # Most frequent first: this text is itself excerpted head-first for prompts, so the
-    # cause affecting the most configurations must survive truncation.
-    ordered = sorted(groups.values(), key=lambda e: -e["count"])
-    for i, entry in enumerate(ordered, 1):
-        lines.append("")
-        lines.append(f"### Cause {i} — {entry['count']} of {total} configuration(s)")
-        lines.append(entry["reason"])
-        if entry["diags"]:
-            lines.append("```")
-            lines.extend(entry["diags"])
-            lines.append("```")
-    return "\n".join(lines)
+    if not diags:
+        return None
+
+    header = f"{FAILURE_SUMMARY_HEADING} {len(diags)} distinct"
+    note = (
+        "Every distinct diagnostic, deduplicated; the full log is kept at "
+        "iter_N/tuner_output.txt."
+    )
+    if configs:
+        header += f", across {configs} failed configuration(s)"
+        # Without this the counts read as severity, and the model chases the wrong error.
+        note += (
+            " `xN` is how many times the compiler emitted it: a kernel that fails to "
+            "compile fails every configuration the same way, so a high count means "
+            "widespread, not severe."
+        )
+    out = [header, "", note, "```"]
+    for text, entry in sorted(diags.items(), key=lambda kv: -kv[1]["count"]):
+        out.append(f"x{entry['count']:<4} {text}")
+        out.extend(f"      {c}" for c in entry["context"])
+    out.append("```")
+    return "\n".join(out)
+
+
+def _context_below(lines: list, i: int, limit: int = 4) -> list:
+    """The compiler's own context under a diagnostic — g++'s source line and caret ruler.
+
+    NVRTC emits none, so this returns empty for device errors and costs nothing.
+    """
+    out = []
+    for line in lines[i + 1 : i + 1 + limit]:
+        if not line.strip() or not _CONTEXT.match(line):
+            break
+        out.append(line.rstrip())
+    return out
 
 
 def load_reference_time(output_dir: Path) -> Optional[float]:
