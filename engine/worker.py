@@ -95,6 +95,9 @@ def _update_manifest_from_working(manifest: BranchManifest, working: WorkingStat
     manifest.speedup = working.speedup
     manifest.status = working.status
     manifest.current_iter = working.current_iter
+    # plan is branch-level and no longer lives on IterState, so the worker is what
+    # carries it from the planning node to branch.json.
+    manifest.plan = working.plan
     if working.sub_strategies:
         manifest.sub_strategies_cache = working.sub_strategies
 
