@@ -22,10 +22,10 @@ class CreateProblemRequest(BaseModel):
     description: str
     gpu: Optional[GpuConfig] = None
     tuning: Optional[TuningConfig] = None
-    # cpu_c is accepted and persisted, but the framework skeleton only wires
-    # SetReferenceKernel (a CUDA kernel) — spec D6 defers the CPU path. Such a problem
-    # round-trips through the form and keeps its ref_cpu.c, but cannot be run until
-    # SetReferenceComputation support lands. The save response says so.
+    # Both kinds run (spec D6), but they take different arguments: a cuda reference is a
+    # kernel over the boundary (buffers + runtime scalars); a cpu_c reference is a C
+    # function linked into the driver, taking every buffer as a pointer with scalars as
+    # -D macros. block_* applies to cuda only.
     reference_type: Literal["cuda", "cpu_c"] = "cuda"
     ref_function: str = "reference"
     ref_block_x: int = 256
@@ -48,6 +48,11 @@ class CreateProblemRequest(BaseModel):
 
 class PreviewInputsRequest(BaseModel):
     inputs: InputsSpec
+    # The reference shapes the generated header: a cpu_c problem gets an extern "C"
+    # declaration and a SetReferenceComputation per validated buffer. Without these the
+    # preview would show CUDA-shaped output for a C-reference problem.
+    reference_type: Literal["cuda", "cpu_c"] = "cuda"
+    ref_function: str = "reference"
 
 
 class RunConfig(BaseModel):

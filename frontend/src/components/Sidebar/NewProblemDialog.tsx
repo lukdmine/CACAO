@@ -14,7 +14,7 @@ import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement } from '@/api/client';
 import { refreshProblems } from '@/api/hooks';
-import { Plus, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2, AlertTriangle } from 'lucide-react';
+import { Plus, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2, AlertTriangle, Info } from 'lucide-react';
 
 // ── Default form state ───────────────────────────────────────────────────────
 function defaultForm(): CreateProblemData {
@@ -93,12 +93,12 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
     useEffect(() => {
         if (!open || step !== 3) return;
         const id = setTimeout(() => {
-            previewInputs(form.inputs)
+            previewInputs(form.inputs, form.reference_type, form.ref_function)
                 .then((r) => setPreviewHpp(r.inputs_hpp))
                 .catch((e) => setPreviewHpp(`// ${e instanceof Error ? e.message : String(e)}`));
         }, 300);
         return () => clearTimeout(id);
-    }, [open, step, form.inputs]);
+    }, [open, step, form.inputs, form.reference_type, form.ref_function]);
 
     function update<K extends keyof CreateProblemData>(key: K, value: CreateProblemData[K]) {
         setForm((prev) => ({ ...prev, [key]: value }));
@@ -163,6 +163,13 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
     // ── Argument list helpers ────────────────────────────────────────────────
     const args = form.inputs.args;
 
+    // What the reference is handed, in order. A CUDA kernel takes the boundary (buffers +
+    // runtime scalars); a C reference takes every buffer as a pointer and reads scalars as
+    // -D macros instead.
+    const refParams = form.reference_type === 'cuda'
+        ? boundaryOf(args)
+        : args.filter((a) => a.kind === 'buffer');
+
     function setArgs(next: ArgSpec[]) {
         setForm((prev) => ({ ...prev, inputs: { ...prev.inputs, args: next } }));
     }
@@ -171,9 +178,9 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setArgs(args.map((a, j) => (j === i ? ({ ...a, ...patch } as ArgSpec) : a)));
     }
 
-    /** Exactly one buffer is compared against the reference, so this behaves as a radio. */
-    function setValidated(i: number) {
-        setArgs(args.map((a, j) => (a.kind === 'buffer' ? { ...a, validate: j === i } : a)));
+    /** Buffers checked against the reference — at least one; a multi-output kernel has several. */
+    function toggleValidated(i: number) {
+        setArgs(args.map((a, j) => (j === i && a.kind === 'buffer' ? { ...a, validate: !a.validate } : a)));
     }
 
     function togglePlacement(i: number, p: Placement) {
@@ -399,12 +406,13 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                 </div>
 
                                 {form.reference_type === 'cpu_c' && (
-                                    <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100 flex gap-2">
-                                        <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                                    <div className="rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-100 flex gap-2">
+                                        <Info size={14} className="shrink-0 mt-0.5" />
                                         <span>
-                                            Framework mode validates only against a CUDA reference kernel. A C reference
-                                            is saved and kept, but the problem <strong>cannot be run</strong> until
-                                            CPU-reference support lands.
+                                            A C reference is compiled and linked into the driver, and runs on the host per
+                                            validated buffer. It takes <strong>every buffer as a pointer</strong>, in the
+                                            order listed under Arguments, and reads scalars as <code className="font-mono">-D</code>{' '}
+                                            macros — so scalars are <strong>not</strong> parameters, and block size does not apply.
                                         </span>
                                     </div>
                                 )}
@@ -466,27 +474,37 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                 <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100 flex gap-2">
                                     <AlertTriangle size={14} className="shrink-0 mt-0.5" />
                                     <span>
-                                        <strong>Order is the reference kernel's signature.</strong> Arguments bind by
-                                        position, not by name — a wrong order makes the reference compute from shuffled
-                                        inputs and validation compare against garbage, with no error. Buffers, and
-                                        scalars marked <code className="font-mono">runtime</code>, are passed; a
-                                        host-only scalar is declared but not passed, so it may sit anywhere.
+                                        <strong>Order is the reference's signature.</strong> Arguments bind by position,
+                                        not by name — a wrong order makes the reference compute from shuffled inputs and
+                                        validation compare against garbage, with no error.{' '}
+                                        {form.reference_type === 'cuda' ? (
+                                            <>Buffers, and scalars marked <code className="font-mono">runtime</code>, are
+                                            passed; a host-only scalar is declared but not passed, so it may sit anywhere.</>
+                                        ) : (
+                                            <>A C reference takes <strong>every buffer</strong> as a pointer; scalars are{' '}
+                                            <code className="font-mono">-D</code> macros, never parameters.</>
+                                        )}
                                     </span>
                                 </div>
 
-                                {/* Derived boundary — what the reference kernel actually receives */}
+                                {/* What the reference actually receives — the two kinds take different things */}
                                 <div className="rounded-md border bg-zinc-950 px-3 py-2 text-xs font-mono text-zinc-300">
-                                    <span className="text-zinc-500">{form.ref_function || 'reference'}(</span>
-                                    {boundaryOf(args).map((a, i) => (
+                                    <span className="text-zinc-500">
+                                        {form.reference_type === 'cuda' ? '__global__ void ' : 'void '}
+                                        {form.ref_function || 'reference'}(
+                                    </span>
+                                    {refParams.map((a, i) => (
                                         <span key={a.name + i}>
                                             {i > 0 && <span className="text-zinc-500">, </span>}
                                             <span className={a.kind === 'scalar' ? 'text-sky-400' : 'text-emerald-400'}>
-                                                {a.name || '?'}
+                                                {a.kind === 'buffer' && form.reference_type === 'cpu_c'
+                                                    ? `${a.access === 'read' ? 'const ' : ''}${a.dtype}* ${a.name || '?'}`
+                                                    : a.name || '?'}
                                             </span>
                                         </span>
                                     ))}
                                     <span className="text-zinc-500">)</span>
-                                    {boundaryOf(args).length === 0 && <span className="text-zinc-600 italic"> — nothing passed</span>}
+                                    {refParams.length === 0 && <span className="text-zinc-600 italic"> — nothing passed</span>}
                                 </div>
 
                                 <div className="flex items-center justify-between">
@@ -610,11 +628,11 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                                     </>
                                                 )}
 
-                                                {/* Exactly one buffer is compared against the reference -> radio, not checkbox */}
+                                                {/* Several buffers may be validated — a multi-output kernel checks each */}
                                                 <label className="flex items-center gap-1 text-xs ml-auto"
-                                                    title="The buffer compared against the reference kernel. Exactly one.">
-                                                    <input type="radio" name="validated" checked={a.validate}
-                                                        onChange={() => setValidated(i)} />
+                                                    title="Compare this buffer against the reference. At least one; a multi-output kernel validates several.">
+                                                    <input type="checkbox" checked={a.validate}
+                                                        onChange={() => toggleValidated(i)} />
                                                     validated
                                                 </label>
                                             </div>
@@ -683,15 +701,18 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                         <div><span className="text-zinc-500">name:</span> {form.name || '—'}</div>
                                         <div><span className="text-zinc-500">slug:</span> {form.slug || '—'}</div>
                                         <div><span className="text-zinc-500">gpu:</span> Index {form.gpu.index} {gpuDevices.find(g => g.index === form.gpu.index)?.name ? `(${gpuDevices.find(g => g.index === form.gpu.index)?.name})` : ''}</div>
-                                        <div><span className="text-zinc-500">ref:</span> {form.ref_function || '—'} ({form.reference_type}) block=[{form.ref_block_x}, {form.ref_block_y}, {form.ref_block_z}]</div>
                                         <div>
-                                            <span className="text-zinc-500">boundary:</span>{' '}
-                                            {boundaryOf(args).map(a => a.name).join(', ') || 'none'}
+                                            <span className="text-zinc-500">ref:</span> {form.ref_function || '—'} ({form.reference_type})
+                                            {form.reference_type === 'cuda' && ` block=[${form.ref_block_x}, ${form.ref_block_y}, ${form.ref_block_z}]`}
+                                        </div>
+                                        <div>
+                                            <span className="text-zinc-500">ref args:</span>{' '}
+                                            {refParams.map(a => a.name).join(', ') || 'none'}
                                         </div>
                                         <div>
                                             <span className="text-zinc-500">validated:</span>{' '}
-                                            {args.find(a => a.kind === 'buffer' && a.validate)?.name ?? (
-                                                <span className="text-amber-400">none — exactly one buffer must be validated</span>
+                                            {args.filter(a => a.kind === 'buffer' && a.validate).map(a => a.name).join(', ') || (
+                                                <span className="text-amber-400">none — at least one buffer must be validated</span>
                                             )}
                                         </div>
                                         <div><span className="text-zinc-500">grid:</span> [{form.grid_x}, {form.grid_y}, {form.grid_z}] ({form.global_size_type})  tolerance={form.tolerance}  tuner={form.tuning?.duration_s ?? 100}s</div>

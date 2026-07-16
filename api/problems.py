@@ -26,6 +26,11 @@ router = APIRouter()
 _REF_SIGNATURE = re.compile(
     r'extern\s+"C"\s+__global__\s+void\s+(\w+)\s*\(([^)]*)\)', re.S
 )
+# A C reference is plain host code: no __global__, and `extern "C"` is optional in the
+# source the user pastes (inputs.hpp re-declares it with extern "C" itself).
+_REF_CPU_SIGNATURE = re.compile(
+    r'(?:extern\s+"C"\s+)?void\s+(\w+)\s*\(([^)]*)\)\s*\{', re.S
+)
 
 
 def _signature_warnings(req: CreateProblemRequest) -> list[str]:
@@ -38,44 +43,46 @@ def _signature_warnings(req: CreateProblemRequest) -> list[str]:
     Reported, never blocking (design I6): this regex cannot parse every legal declaration,
     and a false rejection would be worse than a banner.
     """
-    if req.reference_type != "cuda":
-        # Persisted so the problem round-trips, but the engine skeleton only wires
-        # SetReferenceKernel. KTT does offer SetReferenceComputation (a host callable)
-        # for this; until the skeleton uses it, such a problem cannot run.
-        return [
-            "Framework mode validates only against a CUDA reference kernel. This "
-            "problem's C reference is saved, but it cannot be run until CPU-reference "
-            "support (KTT SetReferenceComputation) lands."
-        ]
-
-    match = _REF_SIGNATURE.search(req.ref_kernel_code or "")
-    if not match:
+    is_cuda = req.reference_type == "cuda"
+    pattern = _REF_SIGNATURE if is_cuda else _REF_CPU_SIGNATURE
+    found = list(pattern.finditer((req.ref_kernel_code if is_cuda else req.ref_cpu_code) or ""))
+    if not found:
         return []
 
-    func, params = match.group(1), match.group(2)
-    if func != req.ref_function:
+    # Match by name, not position: a C reference file may define helpers alongside the
+    # reference, and the first declaration is not necessarily the one problem.yaml names.
+    match = next((m for m in found if m.group(1) == req.ref_function), None)
+    if match is None:
+        declared = ", ".join(f"'{m.group(1)}'" for m in found)
         return [
-            f"problem.yaml names reference function '{req.ref_function}', but "
-            f"ref_kernel.cu declares '{func}'."
+            f"problem.yaml names reference function '{req.ref_function}', but the "
+            f"reference source declares {declared}. The driver looks it up by name."
         ]
 
-    declared = [p for p in (p.strip() for p in params.split(",")) if p]
-    boundary = req.inputs.boundary
-    if len(declared) != len(boundary):
+    func, params = match.group(1), match.group(2)
+
+    # The two references take different things. A CUDA kernel receives the boundary
+    # (buffers + runtime scalars). A C reference receives every buffer as a pointer,
+    # and reads scalars as -D macros instead (utils/inputs.py: scalar_define_flags).
+    expected = req.inputs.boundary if is_cuda else req.inputs.buffers
+    kind = "boundary" if is_cuda else "buffer list"
+
+    declared = [p for p in (p.strip() for p in params.split(",")) if p and p != "void"]
+    if len(declared) != len(expected):
         return [
-            f"Reference kernel '{func}' takes {len(declared)} arguments, but the boundary "
-            f"passes {len(boundary)} ({', '.join(a.name for a in boundary) or 'none'}). "
-            "They are bound by position, so a mismatch validates against garbage."
+            f"Reference '{func}' takes {len(declared)} arguments, but the {kind} passes "
+            f"{len(expected)} ({', '.join(a.name for a in expected) or 'none'}). "
+            "They bind by position, so a mismatch validates against garbage."
         ]
 
     mismatched = [
-        f"#{i + 1}: boundary '{arg.name}' vs reference '{decl}'"
-        for i, (arg, decl) in enumerate(zip(boundary, declared))
+        f"#{i + 1}: {kind} '{arg.name}' vs reference '{decl}'"
+        for i, (arg, decl) in enumerate(zip(expected, declared))
         if not re.search(rf"\b{re.escape(arg.name)}\b", decl)
     ]
     if mismatched:
         return [
-            f"Boundary order may not match reference kernel '{func}' — "
+            f"Argument order may not match reference '{func}' — "
             + "; ".join(mismatched)
             + ". Arguments bind by position, not by name."
         ]
@@ -128,7 +135,9 @@ def _write_problem_files(problem_dir, problem_data, req: CreateProblemRequest):
         (problem_dir / "ref_kernel.cu").write_text(req.ref_kernel_code)
     else:
         (problem_dir / "ref_cpu.c").write_text(req.ref_cpu_code)
-    write_inputs(problem_dir, req.inputs)
+    # The reference drives codegen: a cpu_c problem needs its extern "C" declaration,
+    # host input copies, and a SetReferenceComputation per validated buffer in the header.
+    write_inputs(problem_dir, req.inputs, problem_data["reference"])
 
 
 @router.get("/api/problems")
@@ -200,7 +209,12 @@ def preview_inputs(req: PreviewInputsRequest):
     Lets the form show the generated C++ live while keeping a single generator — the
     frontend never builds the header itself.
     """
-    return {"inputs_hpp": generate_inputs_hpp(req.inputs)}
+    reference = {
+        "type": req.reference_type,
+        "function": req.ref_function,
+        "file": "ref_kernel.cu" if req.reference_type == "cuda" else "ref_cpu.c",
+    }
+    return {"inputs_hpp": generate_inputs_hpp(req.inputs, reference)}
 
 
 @router.post("/api/problems/{name}/clone")

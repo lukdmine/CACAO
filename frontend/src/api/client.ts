@@ -98,7 +98,7 @@ export interface BufferSpec {
     min?: number | null;               // random only
     max?: number | null;               // random only
     body?: string | null;              // custom only: verbatim C++ returning std::vector<dtype>
-    validate: boolean;                 // exactly one buffer, checked against the reference
+    validate: boolean;                 // checked against the reference; at least one buffer
 }
 
 export type ArgSpec = ScalarSpec | BufferSpec;
@@ -162,11 +162,17 @@ export async function updateProblem(name: string, data: CreateProblemData) {
     });
 }
 
-/** Render inputs.hpp for a spec without saving — one generator, shared with the backend. */
-export async function previewInputs(inputs: InputsSpec) {
+/** Render inputs.hpp for a spec without saving — one generator, shared with the backend.
+ *  The reference shapes the output: a cpu_c problem gets its extern "C" declaration and a
+ *  SetReferenceComputation per validated buffer. */
+export async function previewInputs(
+    inputs: InputsSpec,
+    reference_type: 'cuda' | 'cpu_c',
+    ref_function: string,
+) {
     return apiFetch<{ inputs_hpp: string }>('/api/problems/preview-inputs', {
         method: 'POST',
-        body: JSON.stringify({ inputs }),
+        body: JSON.stringify({ inputs, reference_type, ref_function: ref_function || 'reference' }),
     });
 }
 
