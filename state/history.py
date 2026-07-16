@@ -16,7 +16,6 @@ from utils.results import get_results_summary, load_reference_time
 
 # Fields that can be requested per-node via the ``include`` parameter.
 _ALL_HISTORY_FIELDS: Set[str] = {
-    "plan",
     "kernel_code",
     "framework_cpp",
     "run_output",
@@ -82,14 +81,6 @@ def _load_past_iter_states(
     return states
 
 
-def _preview(text: str, max_lines: int) -> str:
-    lines = text.strip().split("\n")
-    preview = "\n".join(lines[:max_lines])
-    if len(lines) > max_lines:
-        preview += f"\n... ({len(lines) - max_lines} more lines)"
-    return preview
-
-
 def output_excerpt(text: str, max_lines: int) -> tuple[str, str]:
     """Most diagnostic slice of driver output, plus an honest label for it.
 
@@ -151,7 +142,6 @@ def _fmt_decision(d: dict) -> str:
 
 
 _FIELD_FORMATTERS = {
-    "plan": lambda v: f"**Plan:**\n{_preview(v, 5)}",
     "kernel_code": lambda v: f"**Kernel Code:**\n```cuda\n{v}\n```",
     "framework_cpp": lambda v: f"**Framework Driver:**\n```cpp\n{v}\n```",
     "run_output": _fmt_run_output,
