@@ -16,9 +16,9 @@
 // --- scalars (host consts) ---------------------------------------------------
 inline constexpr int MAP_W = 2048;
 inline constexpr int MAP_H = 2048;
-inline constexpr int LEVEL = 700;
-inline constexpr int SRC_X = 16;
-inline constexpr int SRC_Y = 16;
+inline constexpr int LEVEL = 600;
+inline constexpr int SRC_X = 0;
+inline constexpr int SRC_Y = 0;
 
 // --- data generators (one per buffer) ----------------------------------------
 inline std::vector<int> gen_heights() {
@@ -90,7 +90,7 @@ inline Inputs DefineInputs(ktt::Tuner& t) {
     in.flooded = t.AddArgumentVector(gen_flooded(), ktt::ArgumentAccessType::WriteOnly);
     in.validated = {in.flooded};
     in.boundary  = {in.heights, in.flooded};
-    in.defines   = " -DMAP_W=2048 -DMAP_H=2048 -DLEVEL=700 -DSRC_X=16 -DSRC_Y=16";
+    in.defines   = " -DMAP_W=2048 -DMAP_H=2048 -DLEVEL=600 -DSRC_X=0 -DSRC_Y=0";
 
     // CPU reference: one computation per validated buffer (engine skeleton
     // skips SetReferenceKernel when the problem's reference is cpu_c).

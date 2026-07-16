@@ -18,21 +18,21 @@ args:
 - kind: scalar
   name: LEVEL
   dtype: int
-  value: 700
+  value: 600
   placements:
   - host
   - define
 - kind: scalar
   name: SRC_X
   dtype: int
-  value: 16
+  value: 0
   placements:
   - host
   - define
 - kind: scalar
   name: SRC_Y
   dtype: int
-  value: 16
+  value: 0
   placements:
   - host
   - define
