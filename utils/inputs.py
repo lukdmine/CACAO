@@ -11,6 +11,8 @@ validate 106/106 on the GPU.
 from __future__ import annotations
 
 import re
+import shlex
+import sys
 import textwrap
 import zlib
 from pathlib import Path
@@ -18,6 +20,10 @@ from pathlib import Path
 import yaml
 
 from models.inputs import BufferSpec, InputsSpec, ScalarSpec
+
+# Repo root (parent of utils/) — baked into the generated python-reference command so
+# the driver can import utils from any working directory.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 
 _ACCESS = {
     "read": "ReadOnly",
@@ -170,18 +176,36 @@ def _python_reference_call(spec: InputsSpec, target: BufferSpec) -> list:
                 f" f.write(reinterpret_cast<const char*>(cacao_ref::h_{b.name}.data()),"
                 f" static_cast<std::streamsize>(cacao_ref::h_{b.name}.size() * sizeof({b.dtype}))); }}"
             )
-    lines.append(
-        f'        std::system("python3 -m utils.python_ref_runner'
-        f" --inputs inputs.yaml --ref ref.py"
-        f' --target {target.name} --output cacao_ref_{target.name}.bin");'
+    # Interpreter and repo baked in at codegen time. The driver runs with cwd set to the
+    # iteration directory, so a bare `python3 -m utils.python_ref_runner` resolves to
+    # whatever python is first on PATH (the base conda env, not the project's) and cannot
+    # import utils at all. inputs.hpp is regenerated at the start of every run, so pinning
+    # these costs nothing.
+    out = f"cacao_ref_{target.name}.bin"
+    cmd = (
+        f"PYTHONPATH={shlex.quote(str(_REPO_ROOT))} {shlex.quote(sys.executable)} "
+        f"-m utils.python_ref_runner --inputs inputs.yaml --ref ref.py "
+        f"--target {target.name} --output {out}"
     )
+    # Every step is checked. A reference that silently fails does not look like an error:
+    # the buffer keeps the zeros it came in with, KTT reports the reference as computed,
+    # and then every configuration "differs" from it — so a correct kernel is reported
+    # broken and the LLM is sent to debug a bug that does not exist.
     target_size = _size_expr(spec, target.size)
-    lines.append(
-        f'        {{ std::ifstream f("cacao_ref_{target.name}.bin", std::ios::binary);'
-        f" f.read(static_cast<char*>(buffer),"
-        f" static_cast<std::streamsize>({target_size} * sizeof({target.dtype}))); }}"
-    )
-    lines.append("    });")
+    nbytes = f"static_cast<std::streamsize>({target_size} * sizeof({target.dtype}))"
+    lines += [
+        f'        const int rc = std::system("{cmd}");',
+        "        if (rc != 0)",
+        f'            throw std::runtime_error("python reference failed (exit " +'
+        f' std::to_string(rc) + "): {target.name}");',
+        f'        std::ifstream f("{out}", std::ios::binary);',
+        "        if (!f)",
+        f'            throw std::runtime_error("python reference wrote no {out}");',
+        f"        f.read(static_cast<char*>(buffer), {nbytes});",
+        f"        if (f.gcount() != {nbytes})",
+        f'            throw std::runtime_error("python reference produced a short {out}");',
+        "    });",
+    ]
     return lines
 
 
@@ -283,6 +307,7 @@ def generate_inputs_hpp(spec: InputsSpec, reference: dict = None) -> str:
         out.append("#include <cstdlib>")
         out.append("#include <fstream>")
         out.append("#include <cstring>")
+        out.append("#include <stdexcept>")  # the reference lambda throws on failure
     out += [f"#include {h}" for h in spec.headers]
 
     host = [s for s in spec.scalars if "host" in s.placements]
