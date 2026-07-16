@@ -1,0 +1,95 @@
+headers: ['<cmath>', '<algorithm>', '<numeric>', '<cstdint>']
+shared_setup: ''
+args:
+- kind: scalar
+  name: MAP_W
+  dtype: int
+  value: 2048
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: MAP_H
+  dtype: int
+  value: 2048
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: LEVEL
+  dtype: int
+  value: 700
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: SRC_X
+  dtype: int
+  value: 16
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: SRC_Y
+  dtype: int
+  value: 16
+  placements:
+  - host
+  - define
+- kind: buffer
+  name: heights
+  dtype: int
+  size: MAP_W * MAP_H
+  access: read
+  init: custom
+  validate: false
+  body: |
+    // Seeded multi-octave value-noise fBm, then rank-transformed to a uniform 0..999.
+    // The rank transform is monotonic, so it preserves the level-set topology exactly:
+    // the flood region at percentile p is identical to the raw fBm's. It buys exact
+    // control over how much terrain is floodable at a given LEVEL, for free.
+    const size_t n = static_cast<size_t>(MAP_W) * static_cast<size_t>(MAP_H);
+    std::vector<float> h(n);
+
+    auto hash2 = [](int x, int y) -> float {
+        uint32_t s = uint32_t(x) * 374761393u + uint32_t(y) * 668265263u;
+        s = (s ^ (s >> 13)) * 1274126177u;
+        return float((s ^ (s >> 16)) & 0xFFFFFFu) / float(0xFFFFFFu);
+    };
+    auto lerp = [](float a, float b, float t) { return a + (b - a) * t; };
+    auto vnoise = [&](float x, float y) {
+        int xi = int(std::floor(x)), yi = int(std::floor(y));
+        float xf = x - float(xi), yf = y - float(yi);
+        float u = xf * xf * (3.0f - 2.0f * xf);
+        float v = yf * yf * (3.0f - 2.0f * yf);
+        return lerp(lerp(hash2(xi, yi),     hash2(xi + 1, yi),     u),
+                    lerp(hash2(xi, yi + 1), hash2(xi + 1, yi + 1), u), v);
+    };
+
+    for (int y = 0; y < MAP_H; ++y) {
+        for (int x = 0; x < MAP_W; ++x) {
+            float f = 0.0f, amp = 1.0f, frq = 1.0f / 128.0f, norm = 0.0f;
+            for (int o = 0; o < 6; ++o) {
+                f += amp * vnoise(float(x) * frq, float(y) * frq);
+                norm += amp; amp *= 0.5f; frq *= 2.0f;
+            }
+            h[static_cast<size_t>(y) * MAP_W + x] = f / norm;
+        }
+    }
+
+    std::vector<uint32_t> idx(n);
+    std::iota(idx.begin(), idx.end(), 0u);
+    std::sort(idx.begin(), idx.end(),
+              [&](uint32_t a, uint32_t b) { return h[a] < h[b]; });
+
+    std::vector<int> out(n);
+    for (size_t r = 0; r < n; ++r) out[idx[r]] = int(r * 1000 / n);
+    out[static_cast<size_t>(SRC_Y) * MAP_W + SRC_X] = 0;  // source is always floodable
+    return out;
+- kind: buffer
+  name: flooded
+  dtype: int
+  size: MAP_W * MAP_H
+  access: write
+  init: zeros
+  validate: true
