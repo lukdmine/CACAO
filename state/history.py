@@ -90,8 +90,29 @@ def _preview(text: str, max_lines: int) -> str:
     return preview
 
 
-def _tail(text: str, max_lines: int) -> str:
-    return "\n".join(text.strip().split("\n")[-max_lines:])
+def output_excerpt(text: str, max_lines: int) -> tuple[str, str]:
+    """Most diagnostic slice of driver output, plus an honest label for it.
+
+    Which end matters depends on what failed. Tuner output is back-loaded: the run
+    progresses and the interesting part (the failure, the summary) is at the end. Host
+    compile output is the opposite — g++ leads with the root-cause error and follows with
+    cascading repeats and template "note:" spam. Tailing it drops the [COMPILE ERROR]
+    header, so the model cannot even tell a compile failure from a tuning failure, and
+    hands it the cascade instead of the first error.
+
+    Returns (excerpt, label) so callers cannot describe a head excerpt as a tail.
+    """
+    lines = text.strip().split("\n")
+    if len(lines) <= max_lines:
+        return "\n".join(lines), f"{len(lines)} lines"
+    if text.startswith("[COMPILE ERROR]"):
+        return "\n".join(lines[:max_lines]), f"first {max_lines} lines"
+    return "\n".join(lines[-max_lines:]), f"last {max_lines} lines"
+
+
+def _fmt_run_output(v: str) -> str:
+    excerpt, label = output_excerpt(v, 30)
+    return f"**Run Output ({label}):**\n```\n{excerpt}\n```"
 
 
 def _fmt_ncu(metrics: dict) -> str:
@@ -133,9 +154,7 @@ _FIELD_FORMATTERS = {
     "plan": lambda v: f"**Plan:**\n{_preview(v, 5)}",
     "kernel_code": lambda v: f"**Kernel Code:**\n```cuda\n{v}\n```",
     "framework_cpp": lambda v: f"**Framework Driver:**\n```cpp\n{v}\n```",
-    "run_output": lambda v: (
-        f"**Run Output (last 30 lines):**\n```\n{_tail(v, 30)}\n```"
-    ),
+    "run_output": _fmt_run_output,
     "ncu_metrics": _fmt_ncu,
     "results_summary": _fmt_results,
     "decision": _fmt_decision,
