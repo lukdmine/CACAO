@@ -22,17 +22,21 @@ class CreateProblemRequest(BaseModel):
     description: str
     gpu: Optional[GpuConfig] = None
     tuning: Optional[TuningConfig] = None
-    # Both kinds run (spec D6), but they take different arguments: a cuda reference is a
-    # kernel over the boundary (buffers + runtime scalars); a cpu_c reference is a C
-    # function linked into the driver, taking every buffer as a pointer with scalars as
-    # -D macros. block_* applies to cuda only.
-    reference_type: Literal["cuda", "cpu_c"] = "cuda"
+    # All three run, and each takes different arguments:
+    #   cuda   — a kernel over the boundary (buffers + runtime scalars), bound by position
+    #   cpu_c  — a C function linked into the driver, every buffer as a pointer, scalars
+    #            as -D macros, bound by position
+    #   python — def f(scalars, buffers) called by utils/python_ref_runner with numpy
+    #            arrays; both are dicts keyed by NAME, so order does not matter here
+    # block_* applies to cuda only: the other two run on the host, with no launch geometry.
+    reference_type: Literal["cuda", "cpu_c", "python"] = "cuda"
     ref_function: str = "reference"
     ref_block_x: int = 256
     ref_block_y: int = 1
     ref_block_z: int = 1
     ref_kernel_code: str = ""
     ref_cpu_code: str = ""
+    ref_python_code: str = ""
     # The I/O boundary. Canonical: persisted to inputs.yaml, and inputs.hpp is generated
     # from it. Never parsed back out of the generated C++.
     inputs: InputsSpec = Field(default_factory=InputsSpec)
@@ -49,9 +53,10 @@ class CreateProblemRequest(BaseModel):
 class PreviewInputsRequest(BaseModel):
     inputs: InputsSpec
     # The reference shapes the generated header: a cpu_c problem gets an extern "C"
-    # declaration and a SetReferenceComputation per validated buffer. Without these the
-    # preview would show CUDA-shaped output for a C-reference problem.
-    reference_type: Literal["cuda", "cpu_c"] = "cuda"
+    # declaration and a SetReferenceComputation per validated buffer; a python problem gets
+    # a lambda that shells out to the runner. Without these the preview would show
+    # CUDA-shaped output for a non-CUDA reference.
+    reference_type: Literal["cuda", "cpu_c", "python"] = "cuda"
     ref_function: str = "reference"
 
 
