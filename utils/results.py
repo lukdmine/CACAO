@@ -63,13 +63,16 @@ _CONTEXT = re.compile(r"^\s*(?:\d+\s*\||\||~|\^|In file included|\s+from |.*\bno
 def kernel_line_offset(results_path: Path) -> Optional[int]:
     """Lines KTT prepends to kernels.cu before handing it to NVRTC.
 
-    KTT emits one ``#define NAME value`` per tuning parameter, so NVRTC's reported line is
-    the file's line plus the parameter count, and every device diagnostic the LLM sees is
-    off by exactly that much from the file it is editing.
+    Exact by construction, not inferred. KTT compiles ``GeneratePrefix() + GetSource()``
+    (TunerCore.cpp:327), and GeneratePrefix appends one ``#define NAME value\\n`` per
+    parameter pair and nothing else (KernelConfiguration.cpp:25-35). So NVRTC's line is the
+    file's line plus the parameter count, and every device diagnostic is off by exactly
+    that much from the file the LLM is editing.
 
-    Verified against four real kernels at two different parameter counts (8 and 7): every
-    mapping landed on the offending line, and the 7-parameter kernels would have been off
-    by one under a fixed offset.
+    If those two ever prepend anything more, this goes silently wrong rather than loudly —
+    the mapped line would simply point at innocent code. Cross-checked against four real
+    kernels at parameter counts 8 and 7: every mapping landed on the offending line, and
+    the 7-parameter ones would have been off by one under a hardcoded offset.
     """
     data = load_results(results_path)
     if not data:
