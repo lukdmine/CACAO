@@ -126,7 +126,11 @@ Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
     if ctx.get("problem_yaml"):
         parts.append(f"## Problem Definition:\n```yaml\n{ctx['problem_yaml']}\n```")
     if ctx.get("ref_kernel"):
-        parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
+        # ref_language: the reference may be CUDA, C, or Python — fencing a Python
+        # reference as ```cuda misleads the model about what it is reading.
+        parts.append(
+            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
+        )
     # The boundary and the scalar contract: a retry is often fixing exactly this — an
     # undefined identifier because a scalar was used as a macro when it is a runtime
     # argument. Without them the fix is a guess.

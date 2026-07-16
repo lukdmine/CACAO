@@ -1,0 +1,17 @@
+name: GEMM (Python Reference)
+description: ''
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: kSizeM
+  y: kSizeN
+  z: '1'
+reference:
+  type: python
+  function: gemm_reference
+  file: ref.py
+validation:
+  tolerance: 1.0
+tuning:
+  duration_s: 100

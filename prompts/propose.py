@@ -65,7 +65,9 @@ Write a highly detailed, analytical technical proposal for the developer.
     if ctx.get("inputs_hpp"):
         parts.append(f"## I/O Boundary (inputs.hpp):\n```cpp\n{ctx['inputs_hpp']}\n```")
     if ctx.get("ref_kernel"):
-        parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
+        parts.append(
+            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
+        )
     if ctx.get("branch_name"):
         parts.append(f"## Strategy:\n{ctx['branch_name']}")
     if ctx.get("plan"):
@@ -98,10 +100,10 @@ Write a highly detailed, analytical technical proposal for the developer.
         parts.append(
             ctx["user_messages"]
             + "\n\n→ The above user messages are **mandatory input** for this proposal. "
-              "If an idea has not yet been tried, make it a primary proposed change — "
-              "do not defer it to a future iteration or relegate it to a brief mention. "
-              "If it was already tried (see iteration history), analyze those results "
-              "and propose the concrete next step."
+            "If an idea has not yet been tried, make it a primary proposed change — "
+            "do not defer it to a future iteration or relegate it to a brief mention. "
+            "If it was already tried (see iteration history), analyze those results "
+            "and propose the concrete next step."
         )
     parts.append(
         "Analyze the results and propose 1-3 specific optimization changes for the next "

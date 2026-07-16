@@ -110,7 +110,9 @@ extern "C" __global__ void kernel(
     if ctx.get("scalar_contract"):
         parts.append(ctx["scalar_contract"])
     if ctx.get("ref_kernel"):
-        parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
+        parts.append(
+            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
+        )
     if ctx.get("plan"):
         parts.append(f"## Optimization Plan:\n{ctx['plan']}")
     strategy_text = format_strategy(ctx.get("strategy"))
