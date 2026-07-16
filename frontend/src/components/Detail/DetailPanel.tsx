@@ -290,14 +290,19 @@ export function DetailPanel() {
                 </div>
 
                 {/* Branch-level: planning runs once per branch, so the plan sits outside
-                    the iteration list rather than being repeated inside iteration 1. */}
+                    the iteration list rather than being repeated inside iteration 1.
+                    Collapsed by default — it is ~10k chars and read once. */}
                 {node.plan && (
                     <>
                         <Separator />
-                        <div>
-                            <span className="text-xs font-medium text-muted-foreground mb-2 block">Plan</span>
-                            <pre className="p-2 bg-muted rounded text-[11px] whitespace-pre-wrap overflow-x-auto">{node.plan}</pre>
-                        </div>
+                        <Accordion type="single" collapsible className="text-xs">
+                            <AccordionItem value="branch-plan" className="border-b-0">
+                                <AccordionTrigger className="py-1.5 text-xs">Plan</AccordionTrigger>
+                                <AccordionContent>
+                                    <pre className="mt-1 p-2 bg-muted rounded text-[11px] whitespace-pre-wrap overflow-x-auto">{node.plan}</pre>
+                                </AccordionContent>
+                            </AccordionItem>
+                        </Accordion>
                     </>
                 )}
 
