@@ -187,6 +187,7 @@ def get_tree(name: str):
                 "key_parameters": [],
             },
             "status": overall_status,
+            "plan": "",  # branch-level; the root is not a branch
             "iter_num": 0,
             "max_iter": 0,
             "best_time_us": best_time,
@@ -229,6 +230,7 @@ def get_tree(name: str):
                 "parentId": parent_id,
                 "strategy": strategy,
                 "status": state.get("status", "initialized"),
+                "plan": state.get("plan", ""),
                 "iter_num": state.get("current_iter", 0),
                 "max_iter": state.get("max_iter", 5),
                 "best_time_us": state.get("best_time_us"),

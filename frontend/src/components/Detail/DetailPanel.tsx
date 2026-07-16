@@ -289,6 +289,18 @@ export function DetailPanel() {
                     )}
                 </div>
 
+                {/* Branch-level: planning runs once per branch, so the plan sits outside
+                    the iteration list rather than being repeated inside iteration 1. */}
+                {node.plan && (
+                    <>
+                        <Separator />
+                        <div>
+                            <span className="text-xs font-medium text-muted-foreground mb-2 block">Plan</span>
+                            <pre className="p-2 bg-muted rounded text-[11px] whitespace-pre-wrap overflow-x-auto">{node.plan}</pre>
+                        </div>
+                    </>
+                )}
+
                 {/* Iteration accordion */}
                 {node.iterations.length > 0 && (
                     <>
@@ -405,17 +417,6 @@ export function DetailPanel() {
                                                 )}
 
                                                 <Accordion type="multiple" className="text-xs">
-                                                    {iter.plan && iter.iter_num === 1 && (
-                                                        <AccordionItem value={`iter-${iter.iter_num}-plan`}>
-                                                            <AccordionTrigger className="py-1.5 text-xs">Plan</AccordionTrigger>
-                                                            <AccordionContent>
-                                                                <div className="border-l border-primary/20 pl-3">
-                                                                    <pre className="mt-1 p-2 bg-muted rounded text-[11px] whitespace-pre-wrap overflow-x-auto">{iter.plan}</pre>
-                                                                </div>
-                                                            </AccordionContent>
-                                                        </AccordionItem>
-                                                    )}
-
                                                     {iter.kernel_code && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-kernel`}>
                                                             <AccordionTrigger className="py-1.5 text-xs">Kernel Code</AccordionTrigger>
