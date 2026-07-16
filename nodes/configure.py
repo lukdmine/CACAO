@@ -55,6 +55,10 @@ async def configure_node(state: WorkingState) -> WorkingState:
             {"name": "decision"},
             {"name": "feedback", "limit": 1},
             {"name": "proposal", "limit": 1},
+            # Was a hand-rolled 30-line tail of the carried run_output. History's
+            # formatter produces the same excerpt from the same data, and excerpts a
+            # compile failure from the end that actually holds the diagnosis.
+            {"name": "run_output", "limit": 1},
         ],
     )
     ctx["inputs_hpp"] = inputs_hpp
@@ -65,15 +69,6 @@ async def configure_node(state: WorkingState) -> WorkingState:
             f'## Strategy Key Parameters\nThe strategy "{strategy.name}" should focus '
             f'on these parameters: {", ".join(key_params)}'
         )
-
-    prev_context = ""
-    if state.feedback:
-        prev_context += f"## Previous Feedback:\n{state.feedback}\n"
-    if state.run_output:
-        tail = "\n".join(state.run_output.strip().split("\n")[-30:])
-        prev_context += f"\n## Previous Run Output (last 30 lines):\n```\n{tail}\n```"
-    if prev_context:
-        ctx["prev_context"] = prev_context
 
     system, user = prompts.framework_configure.build(ctx)
 
