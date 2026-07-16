@@ -21,8 +21,8 @@ args:
   size: STUDENTS * QUESTIONS
   access: read
   init: random
-  min: -2
-  max: 2
+  min: 0
+  max: 100
   validate: false
 - kind: buffer
   name: avg_stud

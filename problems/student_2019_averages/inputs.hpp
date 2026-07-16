@@ -17,7 +17,7 @@ inline constexpr int QUESTIONS = 1024;
 inline std::vector<int> gen_results() {
     std::vector<int> v(static_cast<size_t>(STUDENTS) * static_cast<size_t>(QUESTIONS));
     std::mt19937 rng(2678318100u);
-    std::uniform_int_distribution<int> d(-2, 2);
+    std::uniform_int_distribution<int> d(0, 100);
     for (auto& x : v) x = d(rng);
     return v;
 }
