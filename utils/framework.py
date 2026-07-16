@@ -89,8 +89,10 @@ int main(int argc, char** argv)
     Inputs in = DefineInputs(tuner);
 
     // SetCompilerOptions REPLACES the option string, so the CUDA include dir and the
-    // problem's -D scalar macros (Inputs.defines) must travel in ONE call.
-    tuner.SetCompilerOptions("-I{cuda_include} " + in.defines);
+    // problem's -D scalar macros (Inputs.defines) must travel in ONE call. No separator
+    // here: defines carries its own leading space, or is empty. A trailing space would
+    // tokenize into an empty option and NVRTC rejects the compile ("unrecognized option").
+    tuner.SetCompilerOptions("-I{cuda_include}" + in.defines);
 
 {reference_setup}
 

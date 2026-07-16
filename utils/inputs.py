@@ -147,6 +147,12 @@ def _cpu_reference_call(spec: InputsSpec, target: BufferSpec, func: str) -> list
 def _defines(spec: InputsSpec) -> str:
     """-D macros for `define`-placement scalars, as one compiler-options fragment.
 
+    Carries its OWN leading space when non-empty, and is empty otherwise, so the skeleton
+    can concatenate it directly onto the include flag. If the separator lived in the
+    skeleton instead, a problem with no `define` scalars (e.g. mmul, whose scalars are
+    host+runtime) would leave a trailing space that NVRTC tokenizes into an empty option
+    and rejects — failing every configuration.
+
     Emitted into Inputs.defines rather than passed to SetCompilerOptions from here:
     KTT's SetCompilerOptions REPLACES the option string (Tuner.h:908) and the engine
     skeleton already calls it with the CUDA include path, so a call from inside
@@ -158,7 +164,7 @@ def _defines(spec: InputsSpec) -> str:
         for s in spec.scalars
         if "define" in s.placements
     ]
-    return " ".join(parts)
+    return "".join(f" {p}" for p in parts)
 
 
 def generate_inputs_hpp(spec: InputsSpec, reference: dict = None) -> str:
@@ -273,6 +279,43 @@ def generate_inputs_hpp(spec: InputsSpec, reference: dict = None) -> str:
 
 def load_inputs_spec(path: Path) -> InputsSpec:
     return InputsSpec.model_validate(yaml.safe_load(Path(path).read_text()) or {})
+
+
+def ensure_inputs_hpp(problem_dir) -> Path:
+    """Regenerate ``inputs.hpp`` from the canonical ``inputs.yaml``. Call once per run.
+
+    inputs.yaml is the source of truth; inputs.hpp is a build artifact. Regenerating
+    unconditionally makes drift impossible — a hand-edited inputs.yaml would otherwise be
+    silently ignored, and the run would compile stale input data yet still pass validation
+    (the reference computes from the same stale buffers).
+
+    Nothing is lost by overwriting: everything a user authors — generator bodies
+    (``init: custom``), ``shared_setup``, ``headers`` — lives in inputs.yaml. The rest of
+    the file is the engine's contract (the Inputs struct, KTT registration, reference
+    wiring) and must match the skeleton.
+
+    Raises FileNotFoundError if inputs.yaml is missing: the boundary cannot be invented,
+    and the LLM cannot author it, so there is nothing downstream can do about it.
+    """
+    problem_dir = Path(problem_dir)
+    inputs_yaml = problem_dir / "inputs.yaml"
+    if not inputs_yaml.exists():
+        raise FileNotFoundError(
+            f"{inputs_yaml} not found — the problem has no I/O boundary definition. "
+            "Framework mode generates inputs.hpp from inputs.yaml; define the problem's "
+            "inputs (in the UI, or by writing inputs.yaml) before running."
+        )
+
+    import yaml as _yaml
+
+    reference = None
+    problem_yaml = problem_dir / "problem.yaml"
+    if problem_yaml.exists():
+        reference = (_yaml.safe_load(problem_yaml.read_text()) or {}).get("reference")
+
+    out = problem_dir / "inputs.hpp"
+    out.write_text(generate_inputs_hpp(load_inputs_spec(inputs_yaml), reference))
+    return out
 
 
 def write_inputs(problem_dir: Path, spec: InputsSpec, reference: dict = None) -> None:

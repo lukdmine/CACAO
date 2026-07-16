@@ -51,7 +51,7 @@ inline Inputs DefineInputs(ktt::Tuner& t) {
     in.avg_que = t.AddArgumentVector(gen_avg_que(), ktt::ArgumentAccessType::WriteOnly);
     in.validated = {in.avg_stud, in.avg_que};
     in.boundary  = {in.results, in.avg_stud, in.avg_que};
-    in.defines   = "-DSTUDENTS=4096 -DQUESTIONS=1024";
+    in.defines   = " -DSTUDENTS=4096 -DQUESTIONS=1024";
 
     // CPU reference: one computation per validated buffer (engine skeleton
     // skips SetReferenceKernel when the problem's reference is cpu_c).

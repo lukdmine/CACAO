@@ -70,7 +70,7 @@ inline Inputs DefineInputs(ktt::Tuner& t) {
     in.secondaryScore = t.AddArgumentVector(gen_secondaryScore(), ktt::ArgumentAccessType::WriteOnly);
     in.validated = {in.primaryScore, in.secondaryScore};
     in.boundary  = {in.tableA, in.tableB, in.chains, in.primaryScore, in.secondaryScore};
-    in.defines   = "-DN=1048576";
+    in.defines   = " -DN=1048576";
 
     // CPU reference: one computation per validated buffer (engine skeleton
     // skips SetReferenceKernel when the problem's reference is cpu_c).

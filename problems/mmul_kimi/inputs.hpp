@@ -49,6 +49,6 @@ inline Inputs DefineInputs(ktt::Tuner& t) {
     in.mat_c = t.AddArgumentVector(gen_mat_c(), ktt::ArgumentAccessType::WriteOnly);
     in.validated = {in.mat_c};
     in.boundary  = {in.mat_a, in.mat_b, in.mat_c};
-    in.defines   = "-DM=2048 -DN=2048 -DK=2048";
+    in.defines   = " -DM=2048 -DN=2048 -DK=2048";
     return in;
 }

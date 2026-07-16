@@ -39,6 +39,6 @@ inline Inputs DefineInputs(ktt::Tuner& t) {
     in.average = t.AddArgumentVector(gen_average(), ktt::ArgumentAccessType::WriteOnly);
     in.validated = {in.average};
     in.boundary  = {in.input, in.average};
-    in.defines   = "-DN=33554432 -DR=256";
+    in.defines   = " -DN=33554432 -DR=256";
     return in;
 }

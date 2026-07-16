@@ -141,6 +141,19 @@ def check_prerequisites(problem_dir: Path):
         return False
     log(f"Reference source found: {ref_file}", "SUCCESS")
 
+    # Regenerate inputs.hpp from the canonical inputs.yaml before anything reads it.
+    from utils.inputs import ensure_inputs_hpp
+
+    try:
+        ensure_inputs_hpp(problem_dir)
+        log("inputs.hpp generated from inputs.yaml", "SUCCESS")
+    except FileNotFoundError as e:
+        log(str(e), "ERROR")
+        return False
+    except Exception as e:
+        log(f"Failed to generate inputs.hpp: {e}", "ERROR")
+        return False
+
     # Check libktt.so (the framework driver links against it)
     libktt_path = SCRIPT_DIR / "libktt.so"
     if not libktt_path.exists():

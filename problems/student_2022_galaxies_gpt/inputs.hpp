@@ -95,7 +95,7 @@ inline Inputs DefineInputs(ktt::Tuner& t) {
     in.result = t.AddArgumentVector(gen_result(), ktt::ArgumentAccessType::WriteOnly);
     in.validated = {in.result};
     in.boundary  = {in.Ax, in.Ay, in.Az, in.Bx, in.By, in.Bz, in.result};
-    in.defines   = "-DN=50000";
+    in.defines   = " -DN=50000";
 
     // CPU reference: one computation per validated buffer (engine skeleton
     // skips SetReferenceKernel when the problem's reference is cpu_c).

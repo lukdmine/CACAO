@@ -32,15 +32,20 @@ async def configure_node(state: WorkingState) -> WorkingState:
     if state.kernel_code:
         save_output(iter_dir, state.kernel_code, "kernels.cu")
 
-    # inputs.hpp must sit beside framework.cpp for its #include at compile time.
+    # inputs.hpp must sit beside framework.cpp for its #include at compile time. It is
+    # generated from inputs.yaml once per run (utils.inputs.ensure_inputs_hpp), so its
+    # absence here is not something this iteration can recover from: the LLM does not own
+    # the file and cannot author it. Fail loudly rather than routing an impossible task to
+    # the fix loop.
     problem_dir = get_problem_dir()
     inputs_src = problem_dir / "inputs.hpp"
-    inputs_hpp = ""
-    if inputs_src.exists():
-        inputs_hpp = inputs_src.read_text()
-        shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
-    else:
-        log("inputs.hpp not found in problem dir — framework build will fail", "WARN")
+    if not inputs_src.exists():
+        raise FileNotFoundError(
+            f"{inputs_src} not found — the problem's I/O boundary was never generated. "
+            "It comes from inputs.yaml at the start of a run; check that inputs.yaml exists."
+        )
+    inputs_hpp = inputs_src.read_text()
+    shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
 
     # Build context
     ctx = build_prompt_context(

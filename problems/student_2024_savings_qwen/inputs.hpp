@@ -51,7 +51,7 @@ inline Inputs DefineInputs(ktt::Tuner& t) {
     in.sum = t.AddArgumentVector(gen_sum(), ktt::ArgumentAccessType::WriteOnly);
     in.validated = {in.account, in.sum};
     in.boundary  = {in.changes, in.account, in.sum};
-    in.defines   = "-DCLIENTS=8192 -DPERIODS=8192";
+    in.defines   = " -DCLIENTS=8192 -DPERIODS=8192";
 
     // CPU reference: one computation per validated buffer (engine skeleton
     // skips SetReferenceKernel when the problem's reference is cpu_c).

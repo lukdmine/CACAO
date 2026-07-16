@@ -220,12 +220,19 @@ def load_json(path: Path) -> dict:
 
 
 def load_problem_inputs(problem_dir: Path) -> tuple[str, str]:
-    """Load problem.yaml and the configured reference source code."""
+    """Load problem.yaml and the configured reference source code.
+
+    Also regenerates inputs.hpp from the canonical inputs.yaml, since this runs once per
+    run before any node reads the header. Raises FileNotFoundError if inputs.yaml is
+    missing — the run cannot proceed without an I/O boundary.
+    """
     from utils.files import load_file
+    from utils.inputs import ensure_inputs_hpp
 
     problem_yaml = load_file(problem_dir / "problem.yaml")
     config = yaml.safe_load(problem_yaml) or {}
     ref_file = config.get("reference", {}).get("file", "ref_kernel.cu")
+    ensure_inputs_hpp(problem_dir)
     return problem_yaml, load_file(problem_dir / ref_file)
 
 
