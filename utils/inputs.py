@@ -161,6 +161,9 @@ def _python_reference_call(spec: InputsSpec, target: BufferSpec) -> list:
     Called once per Tune (cached by KTT), so the subprocess overhead is negligible.
     The runner reads inputs.yaml for metadata (sizes, types, scalar values) and the
     cacao_in_<name>.bin files for actual input data, then writes cacao_ref_<target>.bin.
+
+    All three failure modes (runner exit code, missing output file, short read)
+    throw so KTT aborts instead of validating against garbage.
     """
     lines = [f"    t.SetReferenceComputation(in.{target.name}, [](void* buffer) {{"]
     for b in spec.buffers:
@@ -171,15 +174,20 @@ def _python_reference_call(spec: InputsSpec, target: BufferSpec) -> list:
                 f" static_cast<std::streamsize>(cacao_ref::h_{b.name}.size() * sizeof({b.dtype}))); }}"
             )
     lines.append(
-        f'        std::system("python3 -m utils.python_ref_runner'
+        f'        if (std::system("python3 -m utils.python_ref_runner'
         f" --inputs inputs.yaml --ref ref.py"
-        f' --target {target.name} --output cacao_ref_{target.name}.bin");'
+        f' --target {target.name} --output cacao_ref_{target.name}.bin") != 0)'
+    )
+    lines.append(
+        f'            throw std::runtime_error("python_ref_runner failed for {target.name}");'
     )
     target_size = _size_expr(spec, target.size)
     lines.append(
         f'        {{ std::ifstream f("cacao_ref_{target.name}.bin", std::ios::binary);'
+        f' if (!f) throw std::runtime_error("missing cacao_ref_{target.name}.bin");'
         f" f.read(static_cast<char*>(buffer),"
-        f" static_cast<std::streamsize>({target_size} * sizeof({target.dtype}))); }}"
+        f" static_cast<std::streamsize>({target_size} * sizeof({target.dtype})));"
+        f' if (!f) throw std::runtime_error("short read on cacao_ref_{target.name}.bin"); }}'
     )
     lines.append("    });")
     return lines

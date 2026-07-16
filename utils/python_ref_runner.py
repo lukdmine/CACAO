@@ -79,7 +79,7 @@ def run(inputs_yaml: Path, ref_py: Path, target: str, output: Path) -> None:
             in_file = Path(f"cacao_in_{name}.bin")
             if in_file.exists():
                 raw = in_file.read_bytes()
-                arr = np.frombuffer(raw, dtype=dtype)
+                arr = np.frombuffer(raw, dtype=dtype).copy()
                 if len(arr) != size:
                     raise RuntimeError(
                         f"Buffer '{name}': expected {size} elements of {dtype.__name__} "
