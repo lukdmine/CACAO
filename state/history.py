@@ -81,6 +81,15 @@ def _load_past_iter_states(
     return states
 
 
+def _preview(text: str, max_lines: int) -> str:
+    """First few lines, with a count of what was elided."""
+    lines = text.strip().split("\n")
+    preview = "\n".join(lines[:max_lines])
+    if len(lines) > max_lines:
+        preview += f"\n... ({len(lines) - max_lines} more lines)"
+    return preview
+
+
 def output_excerpt(text: str, max_lines: int) -> tuple[str, str]:
     """Most diagnostic slice of driver output, plus an honest label for it.
 
@@ -469,16 +478,24 @@ def format_parent_context(branch_path: Optional[str]) -> str:
     include = _ALL_HISTORY_FIELDS
     formatted = _format_iter_state(snap, include)
 
-    # Get parent strategy name
+    # Parent strategy name and plan both come from the manifest. The plan used to ride in
+    # on the iteration snapshot above, back when every iteration carried a copy of it; it
+    # lives on the branch now, so read it from there rather than silently dropping the
+    # parent's approach from every sub-branch's prompts.
     parent_name = "unknown"
+    parent_plan = ""
     branch_file = parent_path / "branch.json"
     if branch_file.exists():
         try:
             with branch_file.open("r") as f:
                 ps = json.load(f)
             parent_name = ps.get("strategy", {}).get("name", "unknown")
+            parent_plan = ps.get("plan", "") or ""
         except (json.JSONDecodeError, OSError):
             pass
+
+    if parent_plan:
+        formatted = f"**Plan:**\n{_preview(parent_plan, 5)}\n\n{formatted}"
 
     return (
         f"\n## Parent Branch Context ('{parent_name}' — last iteration):\n{formatted}"

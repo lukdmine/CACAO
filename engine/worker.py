@@ -279,18 +279,23 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
             iter_state = _decompose_to_iter_state(working)
             _update_manifest_from_working(manifest, working)
 
-            # Save iteration state and intermediate manifest after every node
+            # Manifest first, then the iteration state — the order the other save sites in
+            # this file already use. The manifest now carries the branch plan, so a crash
+            # between the two writes must not leave state.json advanced past "planning"
+            # with the plan unwritten: plan_node dispatches on status, so it would never
+            # re-run and every implement prompt for the branch would silently lose its plan
+            # section. In this order such a crash leaves status="planning", and plan_node
+            # re-runs and resumes from the persisted plan without another LLM call.
+            # (If it's deciding, the logic below will save the manifest instead.)
+            if current_status != "deciding":
+                save_branch_manifest(branch_path, manifest)
+
             save_iter_state(branch_path, iter_num, iter_state)
 
             # Flush token stats to disk after every node
             from config import global_tracker
 
             global_tracker.save()
-
-            # Save manifest strictly if we are NOT finished with the iteration yet
-            # (If it's deciding, the logic below will save the manifest instead)
-            if current_status != "deciding":
-                save_branch_manifest(branch_path, manifest)
 
             # On iteration complete: advance or finish
             if current_status == "deciding":
