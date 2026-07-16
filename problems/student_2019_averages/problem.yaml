@@ -7,41 +7,13 @@ description: 'Compute per-student and per-question averages from a results matri
   '
 gpu:
   index: 0
-kernel:
-  file: kernel.cu
-  function: kernel
+global_size_type: opencl
+grid:
+  x: STUDENTS
+  y: QUESTIONS
 reference:
   type: cpu_c
   function: averages_reference
   file: ref_cpu.c
-scalars:
-- name: STUDENTS
-  dtype: int
-  value: 4096
-- name: QUESTIONS
-  dtype: int
-  value: 1024
-grid:
-  x: STUDENTS
-  y: QUESTIONS
-vectors:
-- name: results
-  dtype: int
-  size: STUDENTS * QUESTIONS
-  access: read
-  init: random
-  validate: false
-- name: avg_stud
-  dtype: float
-  size: STUDENTS
-  access: write
-  init: zeros
-  validate: true
-- name: avg_que
-  dtype: float
-  size: QUESTIONS
-  access: write
-  init: zeros
-  validate: true
 validation:
   tolerance: 1.0e-06

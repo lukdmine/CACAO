@@ -1,0 +1,51 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: N
+  dtype: int
+  value: 1048576
+  placements:
+  - host
+  - define
+- kind: buffer
+  name: tableA
+  dtype: float
+  size: 20 * 18
+  access: read
+  init: random
+  min: -2
+  max: 2
+  validate: false
+- kind: buffer
+  name: tableB
+  dtype: float
+  size: 20 * 18
+  access: read
+  init: random
+  min: -2
+  max: 2
+  validate: false
+- kind: buffer
+  name: chains
+  dtype: int
+  size: N + 17
+  access: read
+  init: random
+  min: 0
+  max: 19
+  validate: false
+- kind: buffer
+  name: primaryScore
+  dtype: float
+  size: N
+  access: write
+  init: zeros
+  validate: true
+- kind: buffer
+  name: secondaryScore
+  dtype: float
+  size: N
+  access: write
+  init: zeros
+  validate: true

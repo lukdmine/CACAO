@@ -8,52 +8,13 @@ description: 'Evaluate peptide chains for antibiotic affinity scoring. Input is 
   '
 gpu:
   index: 0
-kernel:
-  file: kernel.cu
-  function: kernel
+global_size_type: opencl
+grid:
+  x: N
+  y: '1'
 reference:
   type: cpu_c
   function: peptides_reference
   file: ref_cpu.c
-scalars:
-- name: N
-  dtype: int
-  value: 1048576
-grid:
-  x: N
-  y: '1'
-vectors:
-- name: tableA
-  dtype: float
-  size: 20 * 18
-  access: read
-  init: random
-  validate: false
-- name: tableB
-  dtype: float
-  size: 20 * 18
-  access: read
-  init: random
-  validate: false
-- name: chains
-  dtype: int
-  size: N + 17
-  access: read
-  init: random
-  init_min: 0
-  init_max: 19
-  validate: false
-- name: primaryScore
-  dtype: float
-  size: N
-  access: write
-  init: zeros
-  validate: true
-- name: secondaryScore
-  dtype: float
-  size: N
-  access: write
-  init: zeros
-  validate: true
 validation:
   tolerance: 0.001

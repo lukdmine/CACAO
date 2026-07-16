@@ -1,0 +1,40 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: STUDENTS
+  dtype: int
+  value: 4096
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: QUESTIONS
+  dtype: int
+  value: 1024
+  placements:
+  - host
+  - define
+- kind: buffer
+  name: results
+  dtype: int
+  size: STUDENTS * QUESTIONS
+  access: read
+  init: random
+  min: -2
+  max: 2
+  validate: false
+- kind: buffer
+  name: avg_stud
+  dtype: float
+  size: STUDENTS
+  access: write
+  init: zeros
+  validate: true
+- kind: buffer
+  name: avg_que
+  dtype: float
+  size: QUESTIONS
+  access: write
+  init: zeros
+  validate: true

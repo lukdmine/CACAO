@@ -1,0 +1,40 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: CLIENTS
+  dtype: int
+  value: 8192
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: PERIODS
+  dtype: int
+  value: 8192
+  placements:
+  - host
+  - define
+- kind: buffer
+  name: changes
+  dtype: int
+  size: CLIENTS * PERIODS
+  access: read
+  init: random
+  min: -2
+  max: 2
+  validate: false
+- kind: buffer
+  name: account
+  dtype: int
+  size: CLIENTS * PERIODS
+  access: write
+  init: zeros
+  validate: true
+- kind: buffer
+  name: sum
+  dtype: int
+  size: PERIODS
+  access: write
+  init: zeros
+  validate: true

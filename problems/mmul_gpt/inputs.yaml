@@ -1,0 +1,49 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: M
+  dtype: int
+  value: 2048
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: N
+  dtype: int
+  value: 2048
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: K
+  dtype: int
+  value: 2048
+  placements:
+  - host
+  - define
+- kind: buffer
+  name: mat_a
+  dtype: float
+  size: M * K
+  access: read
+  init: random
+  min: -2
+  max: 2
+  validate: false
+- kind: buffer
+  name: mat_b
+  dtype: float
+  size: N * K
+  access: read
+  init: random
+  min: -2
+  max: 2
+  validate: false
+- kind: buffer
+  name: mat_c
+  dtype: float
+  size: M * N
+  access: write
+  init: zeros
+  validate: true
