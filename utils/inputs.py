@@ -167,6 +167,48 @@ def _defines(spec: InputsSpec) -> str:
     return "".join(f" {p}" for p in parts)
 
 
+def scalar_contract_text(spec: InputsSpec) -> str:
+    """How this problem's scalars reach the kernel — as prompt markdown.
+
+    NVRTC compiles kernels.cu standalone: it never sees inputs.hpp, so a scalar is
+    visible to a kernel ONLY as a -D macro or as an argument. Which one depends on the
+    problem's placements, and getting it wrong is an undefined-identifier compile error.
+    A generic prompt cannot state this; it has to be derived per problem.
+    """
+    macros = [s for s in spec.scalars if "define" in s.placements]
+    runtime = [s for s in spec.scalars if "runtime" in s.placements]
+
+    lines = ["## Problem scalars — how THIS problem's kernels must access them"]
+    if macros:
+        lines.append(
+            "- **Compile-time `-D` macros** (KTT passes them to NVRTC; use the name "
+            "directly, keep it OUT of the signature): "
+            + ", ".join(f"`{s.name}` = {_literal(s.value, s.dtype)}" for s in macros)
+        )
+    if runtime:
+        lines.append(
+            "- **Runtime arguments** (NOT macros — each MUST be a kernel parameter, "
+            "bound positionally in the next step): "
+            + ", ".join(f"`{s.dtype} {s.name}`" for s in runtime)
+        )
+    host_only = [
+        s for s in spec.scalars if "define" not in s.placements and "runtime" not in s.placements
+    ]
+    if host_only:
+        lines.append(
+            "- **Host-only** (size the input buffers; NOT reachable from a kernel at all): "
+            + ", ".join(f"`{s.name}`" for s in host_only)
+        )
+    if not spec.scalars:
+        lines.append("- This problem declares no scalars.")
+
+    lines.append(
+        "\nA `constexpr` in inputs.hpp is compiled into the host driver, not the kernel — "
+        "referencing one from a kernel is an undefined identifier."
+    )
+    return "\n".join(lines)
+
+
 def generate_inputs_hpp(spec: InputsSpec, reference: dict = None) -> str:
     """Render the spec as the inputs.hpp the engine compiles.
 

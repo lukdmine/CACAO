@@ -127,6 +127,19 @@ Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
         parts.append(f"## Problem Definition:\n```yaml\n{ctx['problem_yaml']}\n```")
     if ctx.get("ref_kernel"):
         parts.append(f"## Reference Kernel:\n```cuda\n{ctx['ref_kernel']}\n```")
+    # The boundary and the scalar contract: a retry is often fixing exactly this — an
+    # undefined identifier because a scalar was used as a macro when it is a runtime
+    # argument. Without them the fix is a guess.
+    if ctx.get("inputs_hpp"):
+        parts.append(
+            "## Inputs (inputs.hpp) — your kernel's I/O boundary.\n"
+            "**Compiled into the host driver, NOT into your kernel.** NVRTC compiles "
+            "kernels.cu on its own, so nothing here — including every `inline constexpr` "
+            "— is visible to a kernel unless it is a `-D` macro or an argument.\n"
+            f"```cpp\n{ctx['inputs_hpp']}\n```"
+        )
+    if ctx.get("scalar_contract"):
+        parts.append(ctx["scalar_contract"])
     if ctx.get("plan"):
         parts.append(f"## Optimization Plan:\n{ctx['plan']}")
     strategy_text = format_strategy(ctx.get("strategy"))

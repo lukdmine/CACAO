@@ -5,6 +5,7 @@ from pathlib import Path
 
 from config import get_output_dir, get_problem_dir
 from utils.files import save_output, create_iter_dir
+from utils.inputs import load_inputs_spec, scalar_contract_text
 from utils.log import log
 from state.types import WorkingState
 from nodes._llm_helper import execute_llm_node, build_prompt_context
@@ -65,6 +66,18 @@ async def implement_node(state: WorkingState) -> WorkingState:
     inputs_src = get_problem_dir() / "inputs.hpp"
     if inputs_src.exists():
         ctx["inputs_hpp"] = inputs_src.read_text()
+
+    # State how THIS problem's scalars reach a kernel. inputs.hpp shows them as
+    # `inline constexpr`, which reads like they are available everywhere — but NVRTC
+    # compiles kernels.cu standalone and never sees that file. Whether a scalar is a -D
+    # macro or a kernel argument is per-problem, and a generic prompt gets it wrong for
+    # whichever problems do not match its example.
+    inputs_yaml = get_problem_dir() / "inputs.yaml"
+    if inputs_yaml.exists():
+        try:
+            ctx["scalar_contract"] = scalar_contract_text(load_inputs_spec(inputs_yaml))
+        except Exception as e:
+            log(f"Could not derive the scalar contract from inputs.yaml: {e}", "WARN")
 
     # Only the instruction. The feedback, the previous kernel, and the run output all come
     # from the iteration-history section that precedes this one in the prompt — sending
