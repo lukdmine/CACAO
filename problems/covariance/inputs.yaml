@@ -1,0 +1,33 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: COV_M
+  dtype: int
+  value: 8192
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: COV_K
+  dtype: int
+  value: 512
+  placements:
+  - host
+  - define
+- kind: buffer
+  name: data
+  dtype: float
+  size: COV_M * COV_K
+  access: read
+  init: random
+  min: -2
+  max: 2
+  validate: false
+- kind: buffer
+  name: cov
+  dtype: float
+  size: COV_K * COV_K
+  access: write
+  init: zeros
+  validate: true
