@@ -82,18 +82,17 @@ int main(int argc, char** argv)
     ktt::Tuner tuner(platform, device, ktt::ComputeApi::CUDA);
     tuner.SetGlobalSizeType(ktt::GlobalSizeType::{gst});
     tuner.SetTimeUnit(ktt::TimeUnit::Microseconds);
-    tuner.SetCompilerOptions("-I{cuda_include}");
 
     const ktt::DimensionVector ndRange({ndrange});
 
     // ---- inputs (user-owned; the entire I/O boundary) ----
     Inputs in = DefineInputs(tuner);
 
-    // ---- reference kernel (engine-owned validation) ----
-    const ktt::KernelDefinitionId refDef = tuner.AddKernelDefinitionFromFile(
-        "{ref_func}", refFile, ndRange, ktt::DimensionVector({ref_block}));
-    const ktt::KernelId refKernel = tuner.CreateSimpleKernel("Reference", refDef);
-    tuner.SetArguments(refDef, in.boundary);
+    // SetCompilerOptions REPLACES the option string, so the CUDA include dir and the
+    // problem's -D scalar macros (Inputs.defines) must travel in ONE call.
+    tuner.SetCompilerOptions("-I{cuda_include} " + in.defines);
+
+{reference_setup}
 
     // ===================== BEGIN CACAO:KERNELS (LLM) ========================
 {kernels}
@@ -128,7 +127,7 @@ int main(int argc, char** argv)
 
     // ---- validation + search + tune (engine-owned) ----
     tuner.SetValidationMethod(ktt::ValidationMethod::SideBySideComparison, tolerance);
-    tuner.SetReferenceKernel(in.validated, refKernel, ktt::KernelConfiguration());
+{reference_bind}
     tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
     const auto results = tuner.Tune(kernel, std::make_unique<ktt::TuningDuration>(duration));
     tuner.SaveResults(results, output, ktt::OutputFormat::JSON);
@@ -157,6 +156,35 @@ def _region(body: str, empty_hint: str) -> str:
     return textwrap.indent(body, "    ")
 
 
+def _reference_blocks(ref: dict) -> tuple[str, str]:
+    """(setup, bind) C++ for the validation reference, by reference type.
+
+    cuda: a reference kernel definition + SetReferenceKernel per validated buffer.
+    cpu_c: nothing here — DefineInputs (inputs.hpp) registered a KTT
+    SetReferenceComputation per validated buffer, and utils/build.py links
+    ref_cpu.c into the driver. The skeleton never learns the C signature.
+    """
+    if str(ref.get("type", "cuda")).lower() == "cpu_c":
+        setup = (
+            "    // ---- reference: CPU function from ref_cpu.c (linked into this driver);\n"
+            "    // DefineInputs registered a SetReferenceComputation per validated buffer.\n"
+            "    (void)refFile;"
+        )
+        return setup, ""
+    setup = (
+        "    // ---- reference kernel (engine-owned validation) ----\n"
+        "    const ktt::KernelDefinitionId refDef = tuner.AddKernelDefinitionFromFile(\n"
+        f'        "{ref["function"]}", refFile, ndRange, ktt::DimensionVector({_dim_args(ref.get("block", {"x": 1}))}));\n'
+        '    const ktt::KernelId refKernel = tuner.CreateSimpleKernel("Reference", refDef);\n'
+        "    tuner.SetArguments(refDef, in.boundary);"
+    )
+    bind = (
+        "    for (const auto& validatedArg : in.validated)\n"
+        "        tuner.SetReferenceKernel(validatedArg, refKernel, ktt::KernelConfiguration());"
+    )
+    return setup, bind
+
+
 def assemble_framework_cpp(
     meta: dict,
     regions: dict,
@@ -166,6 +194,7 @@ def assemble_framework_cpp(
     cuda_include = cuda_include or resolve_cuda_include()
     gst = "OpenCL" if str(meta.get("global_size_type", "cuda")).lower() == "opencl" else "CUDA"
     ref = meta["reference"]
+    reference_setup, reference_bind = _reference_blocks(ref)
     return _TEMPLATE.format(
         duration=float((meta.get("tuning") or {}).get("duration_s", 20.0)),
         tolerance=float((meta.get("validation") or {}).get("tolerance", 1e-4)),
@@ -173,8 +202,8 @@ def assemble_framework_cpp(
         gst=gst,
         cuda_include=cuda_include,
         ndrange=_dim_args(meta["grid"]),
-        ref_func=ref["function"],
-        ref_block=_dim_args(ref.get("block", {"x": 1})),
+        reference_setup=reference_setup,
+        reference_bind=reference_bind,
         kernels=_region(regions.get("kernels", ""), "KERNELS region (LLM): define defs, `kernel`, SetArguments"),
         params=_region(regions.get("params", ""), "PARAMS region (LLM): AddParameter / AddConstraint / AddThreadModifier"),
         launcher=_region(regions.get("launcher", ""), "LAUNCHER region (LLM): single kernel uses default launch"),

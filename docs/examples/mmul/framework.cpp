@@ -25,15 +25,17 @@ int main(int argc, char** argv)
     ktt::Tuner tuner(platform, device, ktt::ComputeApi::CUDA);
     tuner.SetGlobalSizeType(ktt::GlobalSizeType::OpenCL);
     tuner.SetTimeUnit(ktt::TimeUnit::Microseconds);
-    // Substituted per-machine from the include dir utils/cuda_env.py detects: a system
-    // CUDA install resolves to /usr/include, a toolkit install to /usr/local/cuda/include.
-    // NVRTC cannot open <mma.h> if this is wrong, so never hardcode it.
-    tuner.SetCompilerOptions("-I{cuda_include}");
 
     const ktt::DimensionVector ndRange(kSizeM, kSizeN);
 
     // ---- inputs (user-owned; the entire I/O boundary) ----
     Inputs in = DefineInputs(tuner);
+
+    // SetCompilerOptions REPLACES the option string, so the CUDA include dir and the
+    // problem's -D scalar macros (Inputs.defines) must travel in ONE call. The include
+    // dir is substituted per-machine from utils/cuda_env.py detection: a system CUDA
+    // install resolves to /usr/include, a toolkit install to /usr/local/cuda/include.
+    tuner.SetCompilerOptions("-I{cuda_include} " + in.defines);
 
     // ---- reference kernel (engine-owned validation) ----
     const ktt::KernelDefinitionId refDef = tuner.AddKernelDefinitionFromFile(
@@ -108,7 +110,8 @@ int main(int argc, char** argv)
 
     // ---- validation + search + tune (engine-owned) ----
     tuner.SetValidationMethod(ktt::ValidationMethod::SideBySideComparison, tolerance);
-    tuner.SetReferenceKernel(in.validated, refKernel, ktt::KernelConfiguration());
+    for (const auto& validatedArg : in.validated)
+        tuner.SetReferenceKernel(validatedArg, refKernel, ktt::KernelConfiguration());
     tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
     const auto results = tuner.Tune(kernel, std::make_unique<ktt::TuningDuration>(duration));
     tuner.SaveResults(results, output, ktt::OutputFormat::JSON);

@@ -46,7 +46,7 @@ engine-generated, part user-authored, part LLM-authored:
 | D3 | The **launcher lambda is written directly by the LLM** (free-form), not compiled from a declarative graph. | It's KTT's only native mechanism anyway; max expressiveness (data-dependent loops, conditional pipelines). The LLM owns topo + sync correctness. |
 | D4 | **Validation is engine-owned.** The LLM never writes the correctness check. | A functionally-wrong pipeline must *fail*, not report a fake speedup. |
 | D5 | Framework path **fully replaces** the legacy YAML/`tuner.py`/`params.json` path. **No backward compatibility.** | Rewriting the tuner layer; one path ⇒ simpler engine. `tuner.py`, `params.json` removed; `problem.yaml` slimmed. Existing problems migrated or dropped. |
-| D6 | Validation uses **one CUDA reference kernel** (for now). | Single simplest mechanism. CPU-reference deferred. |
+| D6 | Validation reference is a **CUDA kernel** (`reference.type: cuda`) or a **C function** (`cpu_c`): a CUDA reference gets `SetReferenceKernel` per validated buffer; a cpu_c reference is linked into the driver (compiled to an object with `-D` scalar macros) and `DefineInputs` registers a `SetReferenceComputation` per validated buffer. | Both legacy reference kinds preserved; the skeleton stays argument-agnostic — for cpu_c it never learns the C signature. |
 | D7 | `inputs.hpp` is a **separate, form-editable** file (with the reference kernel). Its **structured spec is canonical**; `inputs.hpp` is generated from it. | Clean ownership; LLM never edits it; users author data in the UI. |
 | D8 | **One `kernels.cu`** holds all `__global__`s; **searcher + stop condition FIXED** (not LLM-chosen). | Simplicity; LLM owns the parameter space, not the search meta-strategy. |
 | D9 | **No CACAO C++ helper library.** The Python engine **codegens the fixed skeleton** as pure-KTT text; the LLM fills only 3 regions. | Nothing C++ to maintain; validation stays engine-controlled (D4). Building blocks (`AddArgumentVector`, `SetReferenceKernel`, `ParameterPair::GetParameterValue`, `<random>`) are already KTT/stdlib. |
@@ -80,7 +80,7 @@ problems/<name>/
 **Tier 2 — the I/O boundary (USER-owned, form-generated, shared across iterations):**
 ```
 problems/<name>/inputs.hpp     # scalars + data generators + KTT arg registration +
-                               # which buffer is validated — all via DefineInputs() (§6)
+                               # which buffers are validated — all via DefineInputs() (§6)
 ```
 
 **Tier 3 — per iteration (generated; never user-touched):**
@@ -120,7 +120,7 @@ iteration's build.
 │    // ===== BEGIN CACAO:LAUNCHER =====  <<< LLM >>>                         │
 │                                                                            │
 │  tuner.SetValidationMethod(SideBySideComparison, tolerance);               │
-│  tuner.SetReferenceKernel(in.validated, refKernel, {});                    │
+│  for (arg : in.validated) tuner.SetReferenceKernel(arg, refKernel, {});    │
 │  tuner.SetSearcher(kernel, make_unique<RandomSearcher>());                 │
 │  tuner.Tune(kernel, make_unique<TuningDuration>(duration)); SaveResults…   │
 └────────────────────────────────────────────────────────────────────────────┘
@@ -168,7 +168,7 @@ inline std::vector<float> gen_out()  { return std::vector<float>(N, 0.f); }
 
 struct Inputs {
     ktt::ArgumentId data, out;                        // named -> LLM uses in.data / in.out
-    ktt::ArgumentId validated;                        // buffer checked vs the reference
+    std::vector<ktt::ArgumentId> validated;           // buffers checked vs the reference
     std::vector<ktt::ArgumentId> boundary;            // args in reference-signature order
 };
 
@@ -176,18 +176,20 @@ inline Inputs DefineInputs(ktt::Tuner& t) {
     Inputs in;
     in.data = t.AddArgumentVector(gen_data(), ktt::ArgumentAccessType::ReadOnly);
     in.out  = t.AddArgumentVector(gen_out(),  ktt::ArgumentAccessType::WriteOnly);
-    in.validated = in.out;
+    in.validated = {in.out};
     in.boundary  = {in.data, in.out};
     return in;
 }
 ```
 
 The `Inputs` struct **is** the contract: its fields are the arg handles the LLM
-references (`in.data`); `validated` is the buffer checked against the reference;
-`boundary` is the ordered list the engine passes to the reference's
-`SetArguments`. Rules: exactly one `validated`; sizes are expressions over
-scalars; generators use scalars, never tuning params (§7). Working example:
-`problems/mmul/framework/inputs.hpp`.
+references (`in.data`); `validated` lists the buffers checked against the
+reference; `boundary` is the ordered list the engine passes to the reference's
+`SetArguments`. Rules: at least one `validated`; sizes are expressions over
+scalars; generators use scalars, never tuning params (§7). For `cpu_c`
+references `DefineInputs` additionally registers a `SetReferenceComputation`
+per validated buffer that calls the C function (see D6). Working example:
+`problems/mmul/inputs.hpp`.
 
 ---
 
@@ -258,7 +260,8 @@ int main(int argc, char** argv) {
     // ===== BEGIN CACAO:LAUNCHER =====  (LLM)
 
     tuner.SetValidationMethod(ktt::ValidationMethod::SideBySideComparison, tolerance);
-    tuner.SetReferenceKernel(in.validated, refKernel, ktt::KernelConfiguration());
+    for (const auto& validatedArg : in.validated)
+        tuner.SetReferenceKernel(validatedArg, refKernel, ktt::KernelConfiguration());
     tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
     auto results = tuner.Tune(kernel, std::make_unique<ktt::TuningDuration>(duration));
     tuner.SaveResults(results, output, ktt::OutputFormat::JSON);
@@ -414,12 +417,18 @@ Notes:
 ## 11. Validation (engine-owned)
 
 The engine emits, argument-agnostically (via the `Inputs` struct from §6):
-1. the reference kernel definition (`ref_kernel.cu`, `reference.function`, `reference.block`);
+1. for `reference.type: cuda`, the reference kernel definition (`ref_kernel.cu`,
+   `reference.function`, `reference.block`);
 2. `tuner.SetArguments(refDef, in.boundary)` — the user-declared boundary args, in
    order. Scratch buffers are LLM-local and never in `in.boundary`, so they never
    reach the reference;
 3. `SetValidationMethod(SideBySideComparison, tolerance)` +
-   `SetReferenceKernel(in.validated, refKernel, {})`.
+   `SetReferenceKernel(arg, refKernel, {})` per `in.validated` entry.
+
+For `reference.type: cpu_c` steps 1–2 and the `SetReferenceKernel` loop are
+replaced by nothing: `DefineInputs` (inputs.hpp) already registered a
+`SetReferenceComputation` per validated buffer, and the build links `ref_cpu.c`
+into the driver (see §14).
 
 The reference computes the final output from the **original** inputs. The LLM
 emits no validation code; `in.validated` is declared by the *user* in
@@ -465,6 +474,15 @@ g++ -std=c++17 -m64 -O3 -I<repo>/KTT/Source \
 ```
 `libcuda`/`libnvrtc`/`libOpenCL` come **transitively** from `libktt.so` (its
 `NEEDED` entries) — no explicit `-lcuda -lnvrtc`.
+
+For `cpu_c` references `ref_cpu.c` is first compiled to an object **in its own
+translation unit** with `-DNAME=value` for every problem scalar, then linked in:
+```bash
+g++ -std=c++17 -m64 -O3 -DN=1024 ... -c ref_cpu.c -o ref_cpu.o   # scalars as macros
+g++ ... framework.cpp ref_cpu.o <repo>/libktt.so ...             # no -D here
+```
+The two-step split is load-bearing: a `-DSTUDENTS=4096` on the driver TU would
+clobber inputs.hpp's `inline constexpr int STUDENTS` of the same name.
 
 **Run:** `./driver <platform> <device> <duration_s> <tolerance> <output_base> <kernels.cu> <ref_kernel.cu>`
 — KTT writes `<output_base>.json` (it appends the extension for `OutputFormat::JSON`).

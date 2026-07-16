@@ -80,8 +80,8 @@ broken launch); `cuda` → grid in blocks. `ndRange` follows the same convention
 `ci.RunKernel(def, g, l)` REPLACES both and IGNORES every modifier for that launch —
 per definition, pick one mechanism.
 For data-dependent iteration, use runtime scalar args + `ci.UpdateScalarArgument(id, &v)`
-and `ci.SwapArguments(def, a, b)` between launches. The FINAL write must land in the
-validated output buffer (`in.<validated>`), or validation fails.
+and `ci.SwapArguments(def, a, b)` between launches. The FINAL writes must land in the
+validated output buffer(s) (`in.validated` entries), or validation fails.
 
 # Hard requirements
 1. CACAO:KERNELS must define `ktt::KernelId kernel`.

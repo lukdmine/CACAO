@@ -70,8 +70,9 @@ Run this whenever `state/types.py` or `models/` Pydantic models change.
 ## Adding a New Problem
 
 Create a directory under `problems/` with:
-- `problem.yaml` — defines GPU hardware, kernel interface, scalars, vectors, validation tolerance
-- `ref_kernel.cu` — reference CUDA implementation that the optimizer benchmarks against
+- `problem.yaml` — GPU index, grid, reference (type/function/file), validation tolerance
+- `inputs.yaml` — the I/O boundary spec (scalars, buffers, which buffers validate); `inputs.hpp` is generated from it by `utils/inputs.py`
+- the reference implementation: `ref_kernel.cu` (`reference.type: cuda`) **or** `ref_cpu.c` (`reference.type: cpu_c`, a C function linked into the driver — pointer args only, scalars as `-D` macros)
 
 See `docs/PROBLEM_YAML_GUIDE.md` and `docs/REFERENCE_IMPLEMENTATION_GUIDE.md` for format docs.
 

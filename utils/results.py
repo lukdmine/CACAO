@@ -23,6 +23,10 @@ def parse_reference_time_from_output(tuner_output: str) -> Optional[float]:
     KTT logs lines like:
         [Info] Reference result for argument with id 4 was computed in 18688us
 
+    With multiple validated buffers KTT logs one line per buffer, but each run
+    executes the FULL reference (kernel or C function), so the first match is
+    one complete reference execution — summing would double-count.
+
     Returns:
         Reference time in microseconds (first match) or None.
     """

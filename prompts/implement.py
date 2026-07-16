@@ -56,7 +56,7 @@ OUT of the signature.
 // BLOCK_Y    - Block size in Y dimension (threads per block)
 // TILE_SIZE  - Tile size for shared memory caching
 // =============================================================================
-// PROBLEM SCALARS (provided as compiler defines from problem.yaml)
+// PROBLEM SCALARS (the -D macros listed in inputs.hpp's `defines` string)
 // =============================================================================
 // M, N, K   - Matrix dimensions (compile-time constants)
 // =============================================================================

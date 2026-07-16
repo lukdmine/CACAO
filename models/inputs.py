@@ -101,10 +101,10 @@ class InputsSpec(BaseModel):
             raise ValueError(f"Duplicate argument names: {sorted(dupes)}")
 
         validated = [a for a in self.buffers if a.validate_output]
-        if len(validated) != 1:
+        if not validated:
             raise ValueError(
-                f"Exactly one buffer must set validate=true (found {len(validated)}); "
-                "it is the buffer compared against the reference kernel."
+                "At least one buffer must set validate=true — the buffer(s) compared "
+                "against the reference."
             )
         return self
 
@@ -117,8 +117,9 @@ class InputsSpec(BaseModel):
         return [a for a in self.args if a.kind == "buffer"]
 
     @property
-    def validated(self) -> BufferSpec:
-        return next(b for b in self.buffers if b.validate_output)
+    def validated(self) -> List[BufferSpec]:
+        """All buffers checked against the reference (at least one)."""
+        return [b for b in self.buffers if b.validate_output]
 
     @property
     def boundary(self) -> List[ArgSpec]:

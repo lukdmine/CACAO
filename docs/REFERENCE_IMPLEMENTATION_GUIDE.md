@@ -92,10 +92,19 @@ reference:
 ```
 
 Rules:
-- only vector (pointer) arguments, in `vectors:` order from problem.yaml
-- scalars are available as compile-time `#define` constants via `-D` gcc flags — do not include them as function parameters
-- keep vector order exactly the same as `vectors:` in `problem.yaml`
+- only vector (pointer) arguments, in buffer declaration order from `inputs.yaml`
+  (`args:`, buffers only — scalars are skipped)
+- scalars are available as compile-time `#define` constants via `-D` gcc flags — do
+  not include them as function parameters (every scalar is passed, regardless of
+  its kernel-side placements)
 - for C++ sources, export the function with `extern "C"`
+
+How it runs: the engine compiles `ref_cpu.c` into the driver (separate translation
+unit, so the `-D` macros never touch the driver source) and the generated
+`inputs.hpp` registers one KTT `SetReferenceComputation` per `validate: true`
+buffer. Each registered computation calls the full C function: the validated
+buffer is the one KTT hands in, read buffers come from kept host copies, and any
+other output buffer gets a scratch allocation.
 
 Example C reference:
 

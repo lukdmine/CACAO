@@ -15,7 +15,7 @@ import io
 import yaml
 
 from config import get_problem_dir
-from utils.build import compile_framework, driver_command
+from utils.build import compile_framework, driver_command, reference_build_extras
 from utils.files import save_output, get_iter_dir
 from utils.gpu_lock import acquire_gpu_lock
 from utils.log import log
@@ -151,7 +151,10 @@ async def profile_node(state: WorkingState) -> WorkingState:
     # The driver from the run node should exist; rebuild if missing.
     driver = iter_dir / "driver"
     if not driver.exists():
-        build_result = compile_framework(iter_dir)
+        extra_sources, extra_flags = reference_build_extras(get_problem_dir())
+        build_result = compile_framework(
+            iter_dir, extra_sources=extra_sources, extra_flags=extra_flags
+        )
         if not build_result.ok:
             log("Driver rebuild for profiling failed, skipping", "WARN")
             state.ncu_metrics = None

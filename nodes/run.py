@@ -16,7 +16,7 @@ from pathlib import Path
 
 import config as _cfg
 from config import SCRIPT_DIR, get_problem_dir
-from utils.build import compile_framework, driver_command
+from utils.build import compile_framework, driver_command, reference_build_extras
 from utils.files import save_output
 from utils.gpu_lock import acquire_gpu_lock
 from utils.log import log
@@ -151,6 +151,9 @@ async def run_node(state: WorkingState) -> WorkingState:
     except Exception as e:
         log(f"Failed to parse problem.yaml, using defaults: {e}", "WARN")
 
+    # cpu_c references add ref_cpu.c + -D scalar macros to the driver build.
+    extra_sources, extra_flags = reference_build_extras(problem_dir)
+
     budget_s, budget_source = _resolve_tuning_budget(problem_yaml_path)
     watchdog_s = budget_s + max(_WATCHDOG_MARGIN_S, budget_s * _WATCHDOG_MARGIN_FRAC)
     log(
@@ -159,7 +162,9 @@ async def run_node(state: WorkingState) -> WorkingState:
 
     # --- Compile the framework driver (host compile; kernels stay NVRTC) ---
     log("Compiling framework driver (framework.cpp -> driver)...")
-    build_result = compile_framework(iter_dir)
+    build_result = compile_framework(
+        iter_dir, extra_sources=extra_sources, extra_flags=extra_flags
+    )
     if not build_result.ok:
         output = (
             "[COMPILE ERROR] Host compilation of framework.cpp failed.\n\n"

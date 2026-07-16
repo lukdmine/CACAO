@@ -4,21 +4,21 @@ args:
 - kind: scalar
   name: kSizeM
   dtype: int
-  value: 1024
+  value: 2048
   placements:
   - host
   - runtime
 - kind: scalar
   name: kSizeN
   dtype: int
-  value: 1024
+  value: 2048
   placements:
   - host
   - runtime
 - kind: scalar
   name: kSizeK
   dtype: int
-  value: 1024
+  value: 2048
   placements:
   - host
   - runtime
@@ -28,8 +28,8 @@ args:
   size: kSizeM * kSizeK
   access: read
   init: random
-  min: -2.0
-  max: 2.0
+  min: -2
+  max: 2
   validate: false
 - kind: buffer
   name: mat_b
@@ -37,8 +37,8 @@ args:
   size: kSizeN * kSizeK
   access: read
   init: random
-  min: -2.0
-  max: 2.0
+  min: -2
+  max: 2
   validate: false
 - kind: buffer
   name: mat_c
