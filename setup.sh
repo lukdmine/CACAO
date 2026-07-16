@@ -318,7 +318,33 @@ else
         rm -rf premake5-build-tmp
     }
 
-    if [ ! -f premake5 ]; then
+    # Does this premake binary actually run? Probe from a scratch dir: premake auto-loads
+    # premake5.lua from the working directory, and KTT's calls error() when it cannot find
+    # the compute SDK (premake5.lua:233). Probing from inside KTT/ therefore fails whenever
+    # CUDA_PATH is unset or has no CUDA under it — which says nothing about the binary, but
+    # used to be reported as an incompatible glibc and trigger a source rebuild.
+    premake_runs() {
+        local bin="$1" probe rc
+        [ -x "$bin" ] || return 1
+        probe="$(mktemp -d)"
+        (cd "$probe" && "$bin" --version) &>/dev/null
+        rc=$?
+        rm -rf "$probe"
+        return $rc
+    }
+
+    # Prefer a premake5 that already exists, local copy first, then the system's — a
+    # machine with premake5 installed should not have a second copy fetched for it.
+    PREMAKE=""
+    if premake_runs "$PWD/premake5"; then
+        PREMAKE="$PWD/premake5"
+    elif command -v premake5 &>/dev/null && premake_runs "$(command -v premake5)"; then
+        PREMAKE="$(command -v premake5)"
+        info "Using system premake5: $PREMAKE ($(cd "$(mktemp -d)" && "$PREMAKE" --version 2>/dev/null))"
+        info "  (KTT is built and tested against ${PREMAKE_VERSION}; if generation fails, delete it from PATH to use the pinned build)"
+    fi
+
+    if [ -z "$PREMAKE" ]; then
         info "premake5 not found — downloading pre-built binary..."
         if download_premake5; then
             success "premake5 ${PREMAKE_VERSION} downloaded"
@@ -327,26 +353,13 @@ else
         fi
     fi
 
-    # Test whether the binary itself runs (the pre-built one needs a recent glibc).
-    #
-    # Run it from a scratch dir: premake auto-loads premake5.lua from the working
-    # directory, and KTT's calls error() when the compute SDK is not configured
-    # (premake5.lua:233). From inside KTT/, `./premake5 --version` therefore exits
-    # non-zero whenever CUDA_PATH is unset or points somewhere without a CUDA install —
-    # which says nothing about the binary. That read as "incompatible glibc" below, and
-    # deleted a perfectly good premake5 to rebuild it from source.
-    PREMAKE_OK=false
-    if [ -f premake5 ]; then
-        PREMAKE_BIN="$PWD/premake5"          # absolute: $PWD changes inside the subshell
-        PREMAKE_PROBE_DIR="$(mktemp -d)"
-        if (cd "$PREMAKE_PROBE_DIR" && "$PREMAKE_BIN" --version) &>/dev/null; then
-            PREMAKE_OK=true
-        fi
-        rm -rf "$PREMAKE_PROBE_DIR"
+    # Re-check after the download; a system premake5 resolved above keeps its value.
+    if [ -z "$PREMAKE" ] && premake_runs "$PWD/premake5"; then
+        PREMAKE="$PWD/premake5"
     fi
 
-    if ! $PREMAKE_OK; then
-        warn "Pre-built premake5 binary is incompatible with this system (likely old glibc)"
+    if [ -z "$PREMAKE" ]; then
+        warn "No usable premake5 (the pre-built binary needs a recent glibc)"
         echo "  Falling back to building premake5 from source..."
         rm -f premake5
 
@@ -396,6 +409,7 @@ else
 
         if build_premake5_from_source; then
             success "premake5 ${PREMAKE_VERSION} built from source"
+            PREMAKE="$PWD/premake5"
         else
             error "Failed to build premake5 from source"
             echo "  You can try installing premake5 manually:"
@@ -410,7 +424,7 @@ else
     # the bindings compiles them into libktt.so itself (premake5.lua copies the
     # same .so to pyktt.so), leaving a NEEDED entry for libpython that ld cannot
     # resolve — every driver link then fails with undefined Py* references.
-    ./premake5 gmake
+    "$PREMAKE" gmake
     cd Build
     make config=release_x86_64 Ktt -j"$(nproc)"
     cd "$SCRIPT_DIR"
