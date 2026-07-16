@@ -327,10 +327,22 @@ else
         fi
     fi
 
-    # Test if premake5 binary works (may fail on old glibc)
+    # Test whether the binary itself runs (the pre-built one needs a recent glibc).
+    #
+    # Run it from a scratch dir: premake auto-loads premake5.lua from the working
+    # directory, and KTT's calls error() when the compute SDK is not configured
+    # (premake5.lua:233). From inside KTT/, `./premake5 --version` therefore exits
+    # non-zero whenever CUDA_PATH is unset or points somewhere without a CUDA install —
+    # which says nothing about the binary. That read as "incompatible glibc" below, and
+    # deleted a perfectly good premake5 to rebuild it from source.
     PREMAKE_OK=false
-    if [ -f premake5 ] && ./premake5 --version &>/dev/null; then
-        PREMAKE_OK=true
+    if [ -f premake5 ]; then
+        PREMAKE_BIN="$PWD/premake5"          # absolute: $PWD changes inside the subshell
+        PREMAKE_PROBE_DIR="$(mktemp -d)"
+        if (cd "$PREMAKE_PROBE_DIR" && "$PREMAKE_BIN" --version) &>/dev/null; then
+            PREMAKE_OK=true
+        fi
+        rm -rf "$PREMAKE_PROBE_DIR"
     fi
 
     if ! $PREMAKE_OK; then
