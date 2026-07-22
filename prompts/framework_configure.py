@@ -45,6 +45,7 @@ Tuning parameters become compile-time macros in the kernel — KTT prepends `#de
 lines per config and recompiles. Never `#define` a parameter name inside the kernel source.
 ```cpp
 tuner.AddParameter(kernel, "TILE", std::vector<uint64_t>{16, 32, 64});
+tuner.AddParameter(kernel, "B_TILE", std::vector<uint64_t>{16, 32}, "stage_b");  // 4th arg = group
 tuner.AddConstraint(kernel, {"TILE", "THREADS"},
     [](const std::vector<uint64_t>& v){ return v[0] % v[1] == 0; });
 // ONE parameter → name + action:
@@ -58,6 +59,19 @@ tuner.AddThreadModifier(kernel, {def}, ktt::ModifierType::Global, ktt::ModifierD
 ```
 Every macro your kernel uses via `#ifdef`/as a constant must be declared here.
 Add constraints that guarantee legal, in-bounds configs (divisibility, shared mem).
+
+**Parameter groups (4th `AddParameter` arg, default `""`).** KTT enumerates each group
+SEPARATELY and the per-group counts ADD instead of multiplying, holding every other group at
+the best configuration found so far. Two stages of 3 params x 4 values cost 64+64 grouped vs
+4096 ungrouped; the gap is what makes a multi-kernel pipeline tunable at all. So: parameters
+that affect only ONE definition belong in that definition's own group. Parameters that must
+agree ACROSS definitions — a tile size two stages share, one shared-memory budget they both
+draw on — belong together in ONE group. A single-kernel pipeline wants no groups: leave the
+argument off and everything lands in the default group, which is the current behaviour.
+HARD RULE: every parameter named by an `AddConstraint` must sit in the SAME group. KTT
+evaluates a constraint only once a group holds ALL of its parameters, so one split across
+groups is dropped SILENTLY — no warning, and the illegal configurations it was meant to
+exclude reach the GPU and fail at launch.
 
 # Region 3 — CACAO:LAUNCHER
 - **Single kernel using thread modifiers: leave EMPTY** (KTT's default launcher runs it).
@@ -95,7 +109,7 @@ validated output buffer(s) (`in.validated` entries), or validation fails.
 # KTT C++ API you may use
 `tuner`: AddKernelDefinitionFromFile(name,file,global,local); CreateSimpleKernel(name,def);
 CreateCompositeKernel(name,{defs}); SetLauncher(kernel,lambda); AddParameter(kernel,name,
-std::vector<uint64_t>{...}) — spell the vector type; only uint64_t params may drive
+std::vector<uint64_t>{...}[,group]) — spell the vector type; only uint64_t params may drive
 constraints/modifiers; AddConstraint(kernel,{names},fn) with fn=bool(const std::vector<uint64_t>&);
 AddThreadModifier(kernel,{defs},ModifierType{Global,Local},ModifierDimension{X,Y,Z}, then
 "NAME",ModifierAction{Add,Subtract,Multiply,Divide,DivideCeil} — or for several params

@@ -301,11 +301,31 @@ tuner.SetArguments(defB, {tmpId, in.out});
 ```cpp
 tuner.AddParameter(kernel, "TILE",    std::vector<uint64_t>{16, 32, 64});
 tuner.AddParameter(kernel, "THREADS", std::vector<uint64_t>{64, 128, 256});
+tuner.AddParameter(kernel, "B_UNROLL", std::vector<uint64_t>{1, 2, 4}, "stage_b");  // group
 tuner.AddConstraint(kernel, {"TILE", "THREADS"},
     [](const std::vector<uint64_t>& v){ return v[0] % v[1] == 0; });
 tuner.AddThreadModifier(kernel, {defB}, ktt::ModifierType::Local,
     ktt::ModifierDimension::X, "THREADS", ktt::ModifierAction::Multiply);
 ```
+
+**Parameter groups.** `AddParameter`'s optional 4th argument (`Tuner.h:231`, default `""`)
+names a group. KTT builds one `ConfigurationForest` per group and
+`ConfigurationData::GetTotalConfigurationsCount()` **sums** them rather than multiplying
+(`ConfigurationData.cpp:178`); while one group is explored the rest are pinned to the best
+configuration so far (`GetConfigurationForIndex` → `result.Merge(m_BestConfiguration.first)`),
+making the search coordinate descent across groups. Twenty pipeline stages at 3 params x 4
+values are 64²⁰ ≈ 1.3e36 configurations ungrouped and 20 x 64 = 1280 grouped, so groups are
+the difference between a multi-kernel pipeline being tunable and not. Group by independent
+unit: parameters touching a single definition get that definition's group; parameters that
+must agree across definitions stay together in one group. A single-kernel problem should use
+no groups at all — everything in the default group is the correct and current behaviour.
+
+> **A constraint must not straddle groups.** `Kernel::GetConstraintsForParameters` attaches a
+> constraint to *every* group holding any of its parameters, but
+> `KernelParameterGroup::GetConstraintEvaluationLevels` only schedules it once a group holds
+> **all** of them (`HasAllParameters`). A constraint split across groups therefore matches in
+> neither and is **silently never evaluated** — no warning, and the illegal configurations it
+> existed to exclude are generated and fail at `cuLaunchKernel`.
 
 ### 9.3 `CACAO:LAUNCHER`
 ```cpp
@@ -449,7 +469,7 @@ Kernels are still NVRTC-compiled inside KTT:
 
 Anchored to `KTT/Source/Api/ComputeInterface.h` and `KTT/Source/Python/PythonTuner.cpp`.
 
-**`ktt::Tuner`** (in LLM regions): `AddKernelDefinitionFromFile(name,file,global,local)→KernelDefinitionId`; `CreateSimpleKernel(name,def)→KernelId`; `CreateCompositeKernel(name,{defs}[,launcher])→KernelId`; `SetLauncher(kernel,launcher)`; `AddParameter(kernel,name,std::vector<uint64_t>)` (+ Int/Double/Bool/String); `AddConstraint(kernel,{names},fn)`; `AddThreadModifier(kernel,{defs},ModifierType{Global,Local},ModifierDimension{X,Y,Z},…)` — either one `"NAME"` + `ModifierAction{Add,Subtract,Multiply,Divide,DivideCeil}`, or `std::vector<std::string>{names}` + a `uint64_t(uint64_t base, const std::vector<uint64_t>& values)` lambda; **no name-list+action overload exists** (a braced list with an action compiles but corrupts the parameter name); `AddArgumentVector(vec,AccessType)→ArgumentId`; `AddArgumentScalar(v)`, `AddArgumentLocal<T>(size)`; `SetArguments(def,{ids})`.
+**`ktt::Tuner`** (in LLM regions): `AddKernelDefinitionFromFile(name,file,global,local)→KernelDefinitionId`; `CreateSimpleKernel(name,def)→KernelId`; `CreateCompositeKernel(name,{defs}[,launcher])→KernelId`; `SetLauncher(kernel,launcher)`; `AddParameter(kernel,name,std::vector<uint64_t>[,group])` (+ Int/Double/Bool/String) — the optional `group` string tunes parameters in separate, summed configuration spaces (§9.2); `AddConstraint(kernel,{names},fn)` — all named parameters must share one group; `AddThreadModifier(kernel,{defs},ModifierType{Global,Local},ModifierDimension{X,Y,Z},…)` — either one `"NAME"` + `ModifierAction{Add,Subtract,Multiply,Divide,DivideCeil}`, or `std::vector<std::string>{names}` + a `uint64_t(uint64_t base, const std::vector<uint64_t>& values)` lambda; **no name-list+action overload exists** (a braced list with an action compiles but corrupts the parameter name); `AddArgumentVector(vec,AccessType)→ArgumentId`; `AddArgumentScalar(v)`, `AddArgumentLocal<T>(size)`; `SetArguments(def,{ids})`.
 
 **`ktt::ComputeInterface`** (in launcher): `RunKernel(def[,global,local])` (sync); `RunKernelAsync(def,queue[,g,l])→ComputeActionId` + `WaitForComputeAction(id)`; `GetDefaultQueue()`,`GetAllQueues()`,`SynchronizeQueue(q)`,`SynchronizeQueues()`; `GetCurrentConfiguration()` (`.GetPairs()`→`ParameterPair`); `GetCurrentGlobalSize(def)`/`GetCurrentLocalSize(def)`; `SwapArguments`,`ChangeArguments`,`UpdateScalarArgument`,`UpdateLocalArgument`,`ResizeBuffer`,`ClearBuffer`.
 
