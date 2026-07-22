@@ -1,8 +1,10 @@
 """Tree scanning, results, status, and GPU endpoints."""
 
+import hashlib
+import threading
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Response
 
 from api.helpers import (
     get_problem_dir,
@@ -13,6 +15,28 @@ from api.helpers import (
     is_problem_running,
 )
 from utils.files import get_parent_branch_dir
+
+# Fields of IterState the tree carries inline. Everything else is fetched per
+# iteration by the detail panel — see get_iteration() in api/branches.py.
+_LIGHT_ITER_FIELDS = ("iter_num", "status", "decision", "results_summary")
+
+# Fields stripped from the tree. The panel only renders these inside collapsed
+# accordion sections, one iteration at a time, but they dominate the payload:
+# on a long run ncu_metrics alone is ~16 MB across all iterations.
+_HEAVY_ITER_FIELDS = (
+    "kernel_code",
+    "framework_cpp",
+    "run_output",
+    "ncu_metrics",
+    "proposal",
+)
+
+# problem name -> {state.json path: (mtime_ns, size, light iteration dict)}
+# The tree is polled every few seconds and almost nothing changes between polls,
+# so unchanged state.json files are projected once and reused. Pruned each scan
+# to the files actually seen, so reverted/deleted branches don't linger.
+_iter_cache: dict[str, dict[str, tuple[int, int, dict]]] = {}
+_iter_cache_lock = threading.Lock()
 
 
 def _load_token_usage(output_dir: Path) -> dict | None:
@@ -40,12 +64,58 @@ def _load_run_meta(output_dir: Path) -> dict:
 router = APIRouter()
 
 
-def _scan_branches(branches_dir: Path) -> list[dict]:
+def _project_iter(snap: dict) -> dict:
+    """Reduce a full IterState to what the tree needs, plus presence flags.
+
+    The panel gates each accordion section on the field being non-empty, so the
+    flags have to survive even though the content does not. ``bool({})`` is
+    False, which matches the frontend's ``Object.keys(...).length > 0`` check on
+    ncu_metrics.
+    """
+    light = {k: snap.get(k) for k in _LIGHT_ITER_FIELDS}
+    light["has"] = {f: bool(snap.get(f)) for f in _HEAVY_ITER_FIELDS}
+    return light
+
+
+def _fingerprint(problem_dir: Path, name: str) -> str:
+    """Hash everything the tree response is derived from, for the ETag.
+
+    Stat-only: it never opens a file. ``running`` is process state rather than
+    file state, so it is folded in explicitly — otherwise a run starting or
+    dying would not invalidate the cached tree.
+    """
+    output_dir = problem_dir / "output"
+    h = hashlib.blake2b(digest_size=16)
+    h.update(b"1|")  # bump when the response shape changes
+    h.update(b"running" if is_problem_running(name) else b"idle")
+
+    paths = [
+        problem_dir / "problem.yaml",
+        output_dir / "run_meta.json",
+        output_dir / "token_usage.json",
+        output_dir / "strategies.json",
+    ]
+    branches_dir = output_dir / "branches"
+    if branches_dir.is_dir():
+        paths.extend(sorted(branches_dir.rglob("branch.json")))
+        paths.extend(sorted(branches_dir.rglob("iter*/state.json")))
+
+    for p in paths:
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        h.update(f"|{p}|{st.st_mtime_ns}|{st.st_size}".encode())
+    return f'W/"{h.hexdigest()}"'
+
+
+def _scan_branches(branches_dir: Path, name: str, seen: set[str]) -> list[dict]:
     """Recursively scan branch directories and collect branch.json + iter states."""
     from utils.results import get_results_summary, load_reference_time
 
     output_dir = branches_dir.parent
     ref_time = load_reference_time(output_dir)
+    cache = _iter_cache.setdefault(name, {})
 
     results = []
     if not branches_dir.is_dir():
@@ -63,11 +133,22 @@ def _scan_branches(branches_dir: Path) -> list[dict]:
 
         # Load all iteration states
         iters = []
+        all_msgs = []
         for iter_dir in sorted(entry.iterdir()):
             if not iter_dir.is_dir() or not iter_dir.name.startswith("iter"):
                 continue
             state_file = iter_dir / "state.json"
-            if state_file.exists():
+            try:
+                info = state_file.stat()
+            except OSError:
+                continue
+
+            key = str(state_file)
+            seen.add(key)
+            cached = cache.get(key)
+            if cached and cached[0] == info.st_mtime_ns and cached[1] == info.st_size:
+                light, msgs = cached[2]
+            else:
                 snap = load_json(state_file)
                 if not snap.get("results_summary") and snap.get("iter_num") is not None:
                     results_path = iter_dir / "results.json"
@@ -75,10 +156,22 @@ def _scan_branches(branches_dir: Path) -> list[dict]:
                         snap["results_summary"] = get_results_summary(
                             results_path, ref_time
                         )
-                iters.append(snap)
+                light = _project_iter(snap)
+                msgs = [
+                    {**m, "iter_num": snap.get("iter_num", 0)}
+                    for m in snap.get("user_messages", [])
+                ]
+                cache[key] = (info.st_mtime_ns, info.st_size, (light, msgs))
 
-        iters.sort(key=lambda s: s.get("iter_num", 0))
+            iters.append(light)
+            all_msgs.append(msgs)
+
+        # Directory order is lexicographic (iter10 before iter2), so sort by
+        # iter_num — the fallback and latest-status logic below both depend on it.
+        order = sorted(range(len(iters)), key=lambda i: iters[i].get("iter_num", 0))
+        iters = [iters[i] for i in order]
         manifest["_iteration_snapshots"] = iters
+        manifest["_all_user_messages"] = [m for i in order for m in all_msgs[i]]
 
         # Fallback: pull best_time/speedup from iterations if missing from manifest
         best_time = manifest.get("best_time_us")
@@ -101,49 +194,56 @@ def _scan_branches(branches_dir: Path) -> list[dict]:
             if latest_status not in ("success", "failed", "decided"):
                 manifest["status"] = latest_status
 
-        # Collect user messages across all iterations
-        all_msgs = []
-        for snap in iters:
-            for msg in snap.get("user_messages", []):
-                all_msgs.append({**msg, "iter_num": snap.get("iter_num", 0)})
-        manifest["_all_user_messages"] = all_msgs
-
         results.append(manifest)
 
         # Recurse into sub-branches
         sub = entry / "branches"
         if sub.is_dir():
-            results.extend(_scan_branches(sub))
+            results.extend(_scan_branches(sub, name, seen))
 
     return results
 
 
 @router.get("/api/problems/{name}/tree")
-def get_tree(name: str):
-    """Get the full optimization tree for a problem."""
+def get_tree(
+    name: str,
+    response: Response,
+    if_none_match: str | None = Header(default=None),
+):
+    """Get the optimization tree for a problem.
+
+    Iterations are returned in light form — heavy work products come from
+    /branches/{id}/iterations/{n} when the panel opens one. The response carries
+    an ETag; an unchanged tree answers 304 and the frontend skips its store
+    write entirely, which also keeps React Flow from re-rendering every node.
+    """
     problem_dir = get_problem_dir(name)
     output_dir = problem_dir / "output"
 
+    etag = _fingerprint(problem_dir, name)
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+
     if not output_dir.is_dir():
-        return {
-            "nodes": [],
-            "analysis": "",
-            "strategies": [],
-            "running": is_problem_running(name),
-        }
+        return {"nodes": [], "running": is_problem_running(name)}
 
-    # Load analysis and strategies
-    analysis = ""
-    analysis_path = output_dir / "analysis.md"
-    if analysis_path.exists():
-        analysis = analysis_path.read_text()
-
-    strategies = []
+    # Only the count is used (in the root node's hypothesis line), so the
+    # strategy bodies never leave the server.
+    num_strategies = 0
     strategies_path = output_dir / "strategies.json"
     if strategies_path.exists():
-        strategies = load_json(strategies_path).get("strategies", [])
+        num_strategies = len(load_json(strategies_path).get("strategies", []))
 
-    branch_states = _scan_branches(output_dir / "branches")
+    seen: set[str] = set()
+    with _iter_cache_lock:
+        branch_states = _scan_branches(output_dir / "branches", name, seen)
+        # Drop entries for iterations that no longer exist (reverted or deleted
+        # branches), so the cache tracks the tree rather than growing with it.
+        cache = _iter_cache.get(name)
+        if cache is not None:
+            for stale in cache.keys() - seen:
+                del cache[stale]
 
     # Root node aggregation
     best_time = best_speedup = None
@@ -183,7 +283,7 @@ def get_tree(name: str):
             "strategy": {
                 "name": config.get("name", name),
                 "description": config.get("description", ""),
-                "hypothesis": f"Optimizing with {len(strategies)} strategies",
+                "hypothesis": f"Optimizing with {num_strategies} strategies",
                 "key_parameters": [],
             },
             "status": overall_status,
@@ -247,8 +347,6 @@ def get_tree(name: str):
 
     return {
         "nodes": nodes,
-        "analysis": analysis,
-        "strategies": strategies,
         "running": is_problem_running(name),
         "llm_model": run_meta.get("model"),
         "llm_provider": run_meta.get("provider"),

@@ -55,12 +55,10 @@ export async function fetchProblemDetail(name: string): Promise<ProblemDetailRes
 // Tree endpoint
 // =============================================================================
 
-import type { TreeNode, TokenUsage } from '@/api/types.generated';
+import type { TreeNode, TokenUsage, IterationDetail } from '@/api/types.generated';
 
 export interface TreeResponse {
     nodes: TreeNode[];
-    analysis: string;
-    strategies: unknown[];
     running: boolean;
     llm_model?: string;
     llm_provider?: string;
@@ -68,8 +66,52 @@ export interface TreeResponse {
     tuning_duration_s?: number | null;
 }
 
+/**
+ * A conditional GET result. `data: null` means the server answered 304 — the
+ * resource is byte-identical to the etag we sent, so the caller should leave
+ * its existing copy (and the React tree hanging off it) untouched.
+ */
+export interface Conditional<T> {
+    data: T | null;
+    etag: string | null;
+}
+
+async function apiFetchConditional<T>(path: string, etag: string | null): Promise<Conditional<T>> {
+    const res = await fetch(`${API_BASE}${path}`, {
+        headers: etag ? { 'If-None-Match': etag } : undefined,
+    });
+    if (res.status === 304) {
+        return { data: null, etag };
+    }
+    if (!res.ok) {
+        throw new Error(`API ${res.status}: ${await res.text()}`);
+    }
+    // Null when the backend is reached through something that strips ETag —
+    // the caller then simply polls unconditionally, which is the old behaviour.
+    return { data: (await res.json()) as T, etag: res.headers.get('ETag') };
+}
+
 export async function fetchTree(problemName: string): Promise<TreeResponse> {
     return apiFetch<TreeResponse>(`/api/problems/${problemName}/tree`);
+}
+
+export function fetchTreeConditional(problemName: string, etag: string | null) {
+    return apiFetchConditional<TreeResponse>(`/api/problems/${problemName}/tree`, etag);
+}
+
+/**
+ * Full work products for one iteration — the fields the tree omits.
+ */
+export function fetchIteration(
+    problemName: string,
+    branchId: string,
+    iterNum: number,
+    etag: string | null,
+) {
+    return apiFetchConditional<IterationDetail>(
+        `/api/problems/${problemName}/branches/${branchId}/iterations/${iterNum}`,
+        etag,
+    );
 }
 
 // =============================================================================

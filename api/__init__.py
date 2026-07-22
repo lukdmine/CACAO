@@ -17,6 +17,10 @@ def create_app() -> FastAPI:
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+        # The frontend is a different origin, so ETag is invisible to JS unless
+        # it is explicitly exposed — without this every conditional poll would
+        # send no If-None-Match and never see a 304.
+        expose_headers=["ETag"],
     )
 
     from api.problems import router as problems_router

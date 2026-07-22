@@ -2,7 +2,7 @@
 
 import shutil
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Response
 
 from api.helpers import (
     get_problem_dir,
@@ -154,6 +154,36 @@ def configure_branch(name: str, branch_id: str, req: BranchConfigRequest):
     _atomic_write_json(branch_path / "branch.json", manifest)
 
     return {"status": "configured", "branch": branch_id}
+
+
+@router.get("/api/problems/{name}/branches/{branch_id:path}/iterations/{iter_num}")
+def get_iteration(
+    name: str,
+    branch_id: str,
+    iter_num: int,
+    response: Response,
+    if_none_match: str | None = Header(default=None),
+):
+    """Full state for one iteration — the work products the tree leaves out.
+
+    The panel fetches this when an iteration is expanded. A finished iteration
+    never changes, so its ETag is stable and re-opening it costs a 304.
+    """
+    branch_path = resolve_branch_path(name, branch_id)
+    state_file = branch_path / f"iter{iter_num}" / "state.json"
+    try:
+        info = state_file.stat()
+    except OSError:
+        raise HTTPException(
+            status_code=404, detail=f"Iteration {iter_num} not found in '{branch_id}'"
+        ) from None
+
+    etag = f'W/"{info.st_mtime_ns:x}-{info.st_size:x}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+
+    return load_json(state_file)
 
 
 @router.delete("/api/problems/{name}/branches/{branch_id:path}")
