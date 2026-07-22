@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useSelectedNode } from '@/store/appStore';
 import { useAppStore } from '@/store/appStore';
 import { Badge } from '@/components/ui/badge';
@@ -9,12 +9,27 @@ import { Separator } from '@/components/ui/separator';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { getStatusStyle, formatTime, formatSpeedup } from '@/utils/statusColors';
 import { stopBranch, resumeBranch, messageBranch, changeDecision, configureBranch, deleteBranch } from '@/api/client';
-import { refreshTree } from '@/api/hooks';
+import { refreshTree, useIterationDetail } from '@/api/hooks';
 import { toast } from 'sonner';
 import { X, Square, Play, MessageSquare, Send, Settings2, Timer, Zap, CheckCircle2, XCircle, Trash2, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react';
 
 function branchIdFromNodeId(nodeId: string): string {
     return nodeId.replace(/^branch\//, '');
+}
+
+/** Stand-in for a section whose body is still in flight, or never arrived.
+ *  The tree told us the section exists, so an empty body once the request has
+ *  settled means the fetch failed rather than that there is nothing to show. */
+function Pending({ loading }: { loading: boolean }) {
+    return (
+        <div className="mt-1 flex items-center gap-1.5 p-2 text-[11px] text-muted-foreground">
+            {loading ? (
+                <><Loader2 size={11} className="animate-spin" /> Loading…</>
+            ) : (
+                <>Could not load this section.</>
+            )}
+        </div>
+    );
 }
 
 export function DetailPanel() {
@@ -42,6 +57,34 @@ export function DetailPanel() {
     const [confirmDelete, setConfirmDelete] = useState(false);
     const [isDeleting, setIsDeleting] = useState(false);
 
+    // Which iteration is expanded. Held per node so switching branches resets,
+    // and left unset until the reader picks one — an untouched panel tracks the
+    // newest iteration, which is what you want while a branch is running.
+    const [openState, setOpenState] = useState<{ nodeId: string | null; iter: number | null }>(
+        { nodeId: null, iter: null },
+    );
+
+    // Derived above the early return, because the iteration fetch below is a
+    // hook and hooks cannot sit behind a conditional.
+    const nodeId = node?.id ?? null;
+    const isRoot = nodeId === 'root';
+    const branchId = node && !isRoot ? branchIdFromNodeId(node.id) : '';
+    const isActive = !!node && !isRoot
+        && !['success', 'failed', 'branching'].includes(node.status);
+
+    const iterations = node?.iterations ?? [];
+    const lastIterNum = iterations.length ? iterations[iterations.length - 1].iter_num : null;
+    const openIter = openState.nodeId === nodeId ? openState.iter : lastIterNum;
+
+    // Only the newest iteration of a running branch can still change; everything
+    // else is immutable and served from cache after the first open.
+    const { detail: openDetail, loading: detailLoading } = useIterationDetail(
+        activeProblem,
+        branchId,
+        openIter,
+        isRunning && isActive && openIter === lastIterNum,
+    );
+
     if (!node) {
         return (
             <div className="h-full flex items-center justify-center text-muted-foreground text-sm p-6">
@@ -51,9 +94,6 @@ export function DetailPanel() {
     }
 
     const style = getStatusStyle(node.status);
-    const isRoot = node.id === 'root';
-    const branchId = isRoot ? '' : branchIdFromNodeId(node.id);
-    const isActive = !isRoot && !['success', 'failed', 'branching'].includes(node.status);
     const isStopped = node.status === 'stopped';
 
     async function handleStop() {
@@ -312,8 +352,22 @@ export function DetailPanel() {
                         <Separator />
                         <div>
                             <span className="text-xs font-medium text-muted-foreground mb-2 block">Iterations</span>
-                            <Accordion type="single" collapsible defaultValue={`iter-${node.iterations[node.iterations.length - 1].iter_num}`}>
-                                {node.iterations.map((iter) => (
+                            <Accordion
+                                type="single"
+                                collapsible
+                                value={openIter !== null ? `iter-${openIter}` : ''}
+                                onValueChange={(v) => setOpenState({
+                                    nodeId,
+                                    iter: v ? Number(v.slice('iter-'.length)) : null,
+                                })}
+                            >
+                                {node.iterations.map((iter) => {
+                                    // Only the expanded iteration has a fetched body.
+                                    const detail = openDetail?.iter_num === iter.iter_num ? openDetail : null;
+                                    function body<T>(v: T | null | undefined, render: (v: T) => ReactNode) {
+                                        return v ? render(v) : <Pending loading={detailLoading} />;
+                                    }
+                                    return (
                                     <AccordionItem
                                         key={iter.iter_num}
                                         value={`iter-${iter.iter_num}`}
@@ -421,70 +475,83 @@ export function DetailPanel() {
                                                     </div>
                                                 )}
 
+                                                {/* Bodies come from the per-iteration fetch; the tree only
+                                                    says which sections exist. `body` renders the spinner
+                                                    while that request is still in flight. */}
                                                 <Accordion type="multiple" className="text-xs">
-                                                    {iter.kernel_code && (
+                                                    {iter.has.kernel_code && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-kernel`}>
                                                             <AccordionTrigger className="py-1.5 text-xs">Kernel Code</AccordionTrigger>
                                                             <AccordionContent>
                                                                 <div className="border-l border-primary/20 pl-3">
-                                                                    <pre className="mt-1 p-2 bg-zinc-900 rounded text-[11px] text-green-300 whitespace-pre-wrap overflow-x-auto font-mono">{iter.kernel_code}</pre>
+                                                                    {body(detail?.kernel_code, (v) => (
+                                                                        <pre className="mt-1 p-2 bg-zinc-900 rounded text-[11px] text-green-300 whitespace-pre-wrap overflow-x-auto font-mono">{v}</pre>
+                                                                    ))}
                                                                 </div>
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
 
-                                                    {iter.framework_cpp && (
+                                                    {iter.has.framework_cpp && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-framework`}>
                                                             <AccordionTrigger className="py-1.5 text-xs">Framework Driver</AccordionTrigger>
                                                             <AccordionContent>
                                                                 <div className="border-l border-primary/20 pl-3">
-                                                                    <pre className="mt-1 p-2 bg-zinc-900 rounded text-[11px] text-green-300 whitespace-pre-wrap overflow-x-auto font-mono">{iter.framework_cpp}</pre>
+                                                                    {body(detail?.framework_cpp, (v) => (
+                                                                        <pre className="mt-1 p-2 bg-zinc-900 rounded text-[11px] text-green-300 whitespace-pre-wrap overflow-x-auto font-mono">{v}</pre>
+                                                                    ))}
                                                                 </div>
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
 
-                                                    {iter.run_output && (
+                                                    {iter.has.run_output && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-output`}>
                                                             <AccordionTrigger className="py-1.5 text-xs">Run Output</AccordionTrigger>
                                                             <AccordionContent>
                                                                 <div className="border-l border-primary/20 pl-3">
-                                                                    <pre className={`mt-1 p-2 rounded text-[11px] whitespace-pre-wrap overflow-x-auto font-mono ${iter.run_output.includes('ERROR') ? 'bg-red-950/50 text-red-300' : 'bg-zinc-900 text-zinc-300'}`}>
-                                                                        {iter.run_output}
-                                                                    </pre>
+                                                                    {body(detail?.run_output, (v) => (
+                                                                        <pre className={`mt-1 p-2 rounded text-[11px] whitespace-pre-wrap overflow-x-auto font-mono ${v.includes('ERROR') ? 'bg-red-950/50 text-red-300' : 'bg-zinc-900 text-zinc-300'}`}>
+                                                                            {v}
+                                                                        </pre>
+                                                                    ))}
                                                                 </div>
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
 
-                                                    {iter.ncu_metrics && Object.keys(iter.ncu_metrics).length > 0 && (
+                                                    {iter.has.ncu_metrics && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-ncu`}>
                                                             <AccordionTrigger className="py-1.5 text-xs">NCU Metrics</AccordionTrigger>
                                                             <AccordionContent>
                                                                 <div className="border-l border-primary/20 pl-3">
-                                                                    <div className="mt-1 overflow-hidden">
-                                                                        <table className="text-[11px]">
-                                                                            <tbody>
-                                                                                {Object.entries(iter.ncu_metrics).map(([key, val]) => (
-                                                                                    <tr key={key} className="border-b last:border-0">
-                                                                                        <td className="py-1 px-2 text-muted-foreground font-mono truncate max-w-[380px]">{key}</td>
-                                                                                        <td className="py-1 px-2 font-mono whitespace-nowrap">{String(val)}</td>
-                                                                                    </tr>
-                                                                                ))}
-                                                                            </tbody>
-                                                                        </table>
-                                                                    </div>
+                                                                    {body(detail?.ncu_metrics, (metrics) => (
+                                                                        <div className="mt-1 overflow-hidden">
+                                                                            <table className="text-[11px]">
+                                                                                <tbody>
+                                                                                    {Object.entries(metrics).map(([key, val]) => (
+                                                                                        <tr key={key} className="border-b last:border-0">
+                                                                                            <td className="py-1 px-2 text-muted-foreground font-mono truncate max-w-[380px]">{key}</td>
+                                                                                            <td className="py-1 px-2 font-mono whitespace-nowrap">{String(val)}</td>
+                                                                                        </tr>
+                                                                                    ))}
+                                                                                </tbody>
+                                                                            </table>
+                                                                        </div>
+                                                                    ))}
                                                                 </div>
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
 
-                                                    {iter.proposal && (
+                                                    {iter.has.proposal && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-proposal`}>
                                                             <AccordionTrigger className="py-1.5 text-xs">Optimization Proposal</AccordionTrigger>
                                                             <AccordionContent>
                                                                 <div className="border-l border-pink-500/30 pl-3">
-                                                                    <pre className="mt-1 p-2 bg-pink-950/20 border border-pink-500/20 rounded text-[11px] whitespace-pre-wrap overflow-x-auto text-pink-100">{iter.proposal}</pre>
+                                                                    {body(detail?.proposal, (v) => (
+                                                                        <pre className="mt-1 p-2 bg-pink-950/20 border border-pink-500/20 rounded text-[11px] whitespace-pre-wrap overflow-x-auto text-pink-100">{v}</pre>
+                                                                    ))}
                                                                 </div>
                                                             </AccordionContent>
                                                         </AccordionItem>
@@ -516,7 +583,8 @@ export function DetailPanel() {
                                             </div>
                                         </AccordionContent>
                                     </AccordionItem>
-                                ))}
+                                    );
+                                })}
                             </Accordion>
                         </div>
                     </>

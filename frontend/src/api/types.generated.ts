@@ -166,14 +166,28 @@ export interface UserMessage {
 export interface IterationSnapshot {
   iter_num: number;
   status: string;
-  mode: string;
-  kernel_code: string;
-  framework_cpp: string;
-  run_output: string;
-  ncu_metrics: Record<string, unknown> | null;
-  proposal?: string;
   decision: OptimizationDecision | null;
-  feedback: string;
+  results_summary?: ResultsSummary | null;
+  has: {
+    kernel_code: boolean;
+    framework_cpp: boolean;
+    run_output: boolean;
+    ncu_metrics: boolean;
+    proposal: boolean;
+  };
+}
+
+export interface IterationDetail {
+  iter_num: number;
+  status: string;
+  mode?: string;
+  kernel_code?: string;
+  framework_cpp?: string;
+  run_output?: string;
+  ncu_metrics?: Record<string, unknown> | null;
+  proposal?: string;
+  decision?: OptimizationDecision | null;
+  feedback?: string;
   results_summary?: ResultsSummary | null;
   user_messages?: UserMessage[];
 }
