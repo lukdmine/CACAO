@@ -78,6 +78,34 @@ def _extract_retry_after(error) -> Optional[float]:
     return None
 
 
+def _format_error(error) -> str:
+    """Render an exception with its type, HTTP body, and underlying cause chain.
+
+    str(e) alone is near-useless for provider errors: the OpenAI SDK raises
+    APIConnectionError with the fixed message "Connection error." and stores the
+    actual failure (refused socket, DNS, TLS handshake) in __cause__, so the log
+    line ends up saying nothing about what went wrong.
+    """
+    parts = [f"{type(error).__name__}: {error}"]
+
+    status = _extract_status_code(error)
+    if status is not None:
+        parts.append(f"status={status}")
+
+    body = getattr(error, "body", None)
+    if body:
+        parts.append(f"body={body!r}")
+
+    current = error.__cause__ or error.__context__
+    seen = {id(error)}
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(f"caused by {type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+
+    return " | ".join(parts)
+
+
 def _is_transient_error(error) -> bool:
     """Return True for retryable provider/network/rate-limit errors."""
     current = error
@@ -322,19 +350,28 @@ class TrackedLLM:
                 return response
             except Exception as e:
                 if not _is_transient_error(e):
+                    from utils.log import log
+
+                    log(
+                        f"LLM invoke failed (non-transient): {_format_error(e)}",
+                        "ERROR",
+                    )
                     raise
                 retries += 1
                 if retries > max_retries:
                     from utils.log import log
 
-                    log(f"LLM invoke failed after {max_retries} retries: {e}", "ERROR")
+                    log(
+                        f"LLM invoke failed after {max_retries} retries: {_format_error(e)}",
+                        "ERROR",
+                    )
                     raise
 
                 wait_time = _compute_retry_wait(e, retries, base_wait)
                 from utils.log import log
 
                 log(
-                    f"LLM transient error ({e}). Retrying {retries}/{max_retries} in {wait_time:.1f}s...",
+                    f"LLM transient error ({_format_error(e)}). Retrying {retries}/{max_retries} in {wait_time:.1f}s...",
                     "WARN",
                 )
                 await asyncio.sleep(wait_time)
@@ -374,7 +411,14 @@ class TrackedStructuredLLM:
                 return response
             except Exception as e:
                 if not _is_transient_error(e):
-                    if self._base_llm and self._schema:
+                    from utils.log import log
+
+                    will_fallback = bool(self._base_llm and self._schema)
+                    log(
+                        f"Structured LLM invoke failed (non-transient): {_format_error(e)}",
+                        "WARN" if will_fallback else "ERROR",
+                    )
+                    if will_fallback:
                         result = await self._try_raw_fallback_async(*args, **kwargs)
                         if result is not None:
                             return result
@@ -384,7 +428,7 @@ class TrackedStructuredLLM:
                     from utils.log import log
 
                     log(
-                        f"Structured LLM invoke failed after {max_retries} retries: {e}",
+                        f"Structured LLM invoke failed after {max_retries} retries: {_format_error(e)}",
                         "ERROR",
                     )
                     raise
@@ -393,7 +437,7 @@ class TrackedStructuredLLM:
                 from utils.log import log
 
                 log(
-                    f"Structured LLM transient error ({e}). Retrying {retries}/{max_retries} in {wait_time:.1f}s...",
+                    f"Structured LLM transient error ({_format_error(e)}). Retrying {retries}/{max_retries} in {wait_time:.1f}s...",
                     "WARN",
                 )
                 await asyncio.sleep(wait_time)
@@ -431,7 +475,7 @@ class TrackedStructuredLLM:
             )
             return result
         except Exception as fallback_err:
-            log(f"Raw LLM fallback also failed: {fallback_err}", "WARN")
+            log(f"Raw LLM fallback also failed: {_format_error(fallback_err)}", "WARN")
             return None
 
 
