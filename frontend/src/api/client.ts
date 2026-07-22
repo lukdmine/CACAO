@@ -40,6 +40,7 @@ export interface ProblemDetailResponse {
     config: Record<string, unknown>;
     ref_kernel: string;
     ref_cpu: string;
+    ref_python: string;
     // The structured boundary spec, not the generated inputs.hpp. Edit reloads this;
     // it never reconstructs form state from C++. Null for a problem with no inputs.yaml.
     inputs: InputsSpec | null;
@@ -74,6 +75,9 @@ export async function fetchTree(problemName: string): Promise<TreeResponse> {
 // =============================================================================
 // Create Problem
 // =============================================================================
+
+// The correctness oracle a kernel is validated against.
+export type ReferenceType = 'cuda' | 'cpu_c' | 'python';
 
 // host    -> inline constexpr in inputs.hpp (sizes the generators)
 // define  -> -D macro for NVRTC (compile-time constant inside the kernels; UPPERCASE name)
@@ -121,15 +125,19 @@ export interface CreateProblemData {
     tuning?: {
         duration_s: number;
     };
-    // cpu_c round-trips and is persisted, but framework mode cannot yet run it — the
-    // skeleton only wires SetReferenceKernel. Saving one returns a warning.
-    reference_type: 'cuda' | 'cpu_c';
+    // All three run. They differ in what the reference receives:
+    //   cuda   — a kernel over the boundary (buffers + runtime scalars), bound by position
+    //   cpu_c  — a C function taking every buffer as a pointer, scalars as -D macros
+    //   python — def f(scalars, buffers), dicts keyed by name; order does not apply
+    // block_* is cuda-only: the host references have no launch geometry.
+    reference_type: ReferenceType;
     ref_function: string;
     ref_block_x: number;
     ref_block_y: number;
     ref_block_z: number;
     ref_kernel_code: string;
     ref_cpu_code: string;
+    ref_python_code: string;
     inputs: InputsSpec;
     // OpenCL: grid is total work-items. CUDA: grid is the number of blocks.
     global_size_type: 'cuda' | 'opencl';
@@ -163,11 +171,12 @@ export async function updateProblem(name: string, data: CreateProblemData) {
 }
 
 /** Render inputs.hpp for a spec without saving — one generator, shared with the backend.
- *  The reference shapes the output: a cpu_c problem gets its extern "C" declaration and a
- *  SetReferenceComputation per validated buffer. */
+ *  The reference shapes the output: cpu_c gets an extern "C" declaration and a
+ *  SetReferenceComputation per validated buffer; python gets a lambda that shells out
+ *  to the runner. */
 export async function previewInputs(
     inputs: InputsSpec,
-    reference_type: 'cuda' | 'cpu_c',
+    reference_type: ReferenceType,
     ref_function: string,
 ) {
     return apiFetch<{ inputs_hpp: string }>('/api/problems/preview-inputs', {

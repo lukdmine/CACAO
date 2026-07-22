@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement } from '@/api/client';
+import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType } from '@/api/client';
 import { refreshProblems } from '@/api/hooks';
 import { Plus, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2, AlertTriangle, Info } from 'lucide-react';
 
@@ -25,6 +25,7 @@ function defaultForm(): CreateProblemData {
         ref_function: '', ref_block_x: 256, ref_block_y: 1, ref_block_z: 1,
         ref_kernel_code: '',
         ref_cpu_code: '',
+        ref_python_code: '',
         inputs: {
             headers: [],
             shared_setup: '',
@@ -45,6 +46,50 @@ function defaultForm(): CreateProblemData {
 function boundaryOf(args: ArgSpec[]): ArgSpec[] {
     return args.filter((a) => a.kind === 'buffer' || a.placements.includes('runtime'));
 }
+
+/** What each reference kind is, and what it receives. One table rather than a branch per
+ *  call site — the previous two-way splits were spread across ten of them. */
+const REFERENCE_KINDS: Record<ReferenceType, {
+    label: string;
+    field: 'ref_kernel_code' | 'ref_cpu_code' | 'ref_python_code';
+    codeLabel: string;
+    placeholder: string;
+    /** Whether the reference binds its arguments positionally. Python does not. */
+    positional: boolean;
+    note: string;
+}> = {
+    cuda: {
+        label: 'CUDA reference kernel',
+        field: 'ref_kernel_code',
+        codeLabel: 'Reference Kernel Code *',
+        placeholder: 'extern "C" __global__ void my_kernel(...) {\n  // Reference implementation\n}',
+        positional: true,
+        note: '',
+    },
+    cpu_c: {
+        label: 'CPU C/C++ reference',
+        field: 'ref_cpu_code',
+        codeLabel: 'CPU Reference Code *',
+        placeholder: 'void reference(const float* in, float* out) {\n  // Runs on the host\n}',
+        positional: true,
+        note: 'Compiled and linked into the driver, and run on the host once per validated buffer. '
+            + 'It takes every buffer as a pointer, in the order listed under Arguments, and reads '
+            + 'scalars as -D macros — so scalars are not parameters, and block size does not apply.',
+    },
+    python: {
+        label: 'Python reference',
+        field: 'ref_python_code',
+        codeLabel: 'Python Reference Code *',
+        placeholder: 'import numpy as np\n\ndef reference(scalars, buffers):\n'
+            + '    # scalars: {"N": 1024, ...}   buffers: {"input": np.ndarray, ...}\n'
+            + '    return buffers["input"] * 2   # flat array for the validated buffer',
+        positional: false,
+        note: 'Run on the host once per validated buffer, via a subprocess. It receives '
+            + 'def f(scalars, buffers) — two dicts keyed by NAME, with buffers as numpy arrays — '
+            + 'and returns the validated buffer as a flat array. Argument order does not apply, '
+            + 'and block size does not either. Requires numpy.',
+    },
+};
 
 const PLACEMENTS: Placement[] = ['host', 'define', 'runtime'];
 
@@ -117,7 +162,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setLoading(true);
         try {
             const data = await fetchProblemDetail(editProblemName);
-            const ref = (data.config.reference ?? {}) as { type?: 'cuda' | 'cpu_c'; function?: string; block?: { x?: number; y?: number; z?: number } };
+            const ref = (data.config.reference ?? {}) as { type?: ReferenceType; function?: string; block?: { x?: number; y?: number; z?: number } };
             const grid = (data.config.grid ?? {}) as { x?: string; y?: string; z?: string };
 
             // The boundary comes from the structured spec, never from the generated
@@ -142,6 +187,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 ref_block_z: ref.block?.z ?? 1,
                 ref_kernel_code: data.ref_kernel || '',
                 ref_cpu_code: data.ref_cpu || '',
+                ref_python_code: data.ref_python || '',
                 inputs: data.inputs ?? { headers: [], shared_setup: '', args: [] },
                 global_size_type: (data.config.global_size_type as CreateProblemData['global_size_type']) || 'cuda',
                 grid_x: grid.x ? String(grid.x) : 'N',
@@ -163,9 +209,12 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
     // ── Argument list helpers ────────────────────────────────────────────────
     const args = form.inputs.args;
 
+    const refKind = REFERENCE_KINDS[form.reference_type];
+
     // What the reference is handed, in order. A CUDA kernel takes the boundary (buffers +
-    // runtime scalars); a C reference takes every buffer as a pointer and reads scalars as
-    // -D macros instead.
+    // runtime scalars); a C reference takes every buffer as a pointer with scalars as -D
+    // macros. A python reference takes dicts keyed by name, so order does not apply and
+    // there is no positional signature to preview.
     const refParams = form.reference_type === 'cuda'
         ? boundaryOf(args)
         : args.filter((a) => a.kind === 'buffer');
@@ -384,10 +433,11 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                         <select
                                             className="h-8 w-full rounded border bg-background px-2 text-xs"
                                             value={form.reference_type}
-                                            onChange={(e) => update('reference_type', e.target.value as CreateProblemData['reference_type'])}
+                                            onChange={(e) => update('reference_type', e.target.value as ReferenceType)}
                                         >
-                                            <option value="cuda">CUDA reference kernel</option>
-                                            <option value="cpu_c">CPU C/C++ reference</option>
+                                            {(Object.keys(REFERENCE_KINDS) as ReferenceType[]).map((k) => (
+                                                <option key={k} value={k}>{REFERENCE_KINDS[k].label}</option>
+                                            ))}
                                         </select>
                                     </div>
                                     <div className="space-y-1.5">
@@ -405,15 +455,10 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                     </div>
                                 </div>
 
-                                {form.reference_type === 'cpu_c' && (
+                                {refKind.note && (
                                     <div className="rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-100 flex gap-2">
                                         <Info size={14} className="shrink-0 mt-0.5" />
-                                        <span>
-                                            A C reference is compiled and linked into the driver, and runs on the host per
-                                            validated buffer. It takes <strong>every buffer as a pointer</strong>, in the
-                                            order listed under Arguments, and reads scalars as <code className="font-mono">-D</code>{' '}
-                                            macros — so scalars are <strong>not</strong> parameters, and block size does not apply.
-                                        </span>
+                                        <span>{refKind.note}</span>
                                     </div>
                                 )}
 
@@ -448,20 +493,12 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                 </div>
 
                                 <div className="space-y-2">
-                                    <Label>{form.reference_type === 'cuda' ? 'Reference Kernel Code *' : 'CPU Reference Code *'}</Label>
+                                    <Label>{refKind.codeLabel}</Label>
                                     <textarea
                                         className="w-full rounded-md border bg-zinc-950 text-zinc-100 font-mono text-xs px-3 py-2 min-h-[200px] resize-y"
-                                        placeholder={form.reference_type === 'cuda'
-                                            ? 'extern "C" __global__ void my_kernel(...) {\n  // Reference implementation\n}'
-                                            : 'extern "C" void reference(float* in, float* out, int N) {\n  // CPU reference implementation\n}'}
-                                        value={form.reference_type === 'cuda' ? form.ref_kernel_code : form.ref_cpu_code}
-                                        onChange={(e) => {
-                                            if (form.reference_type === 'cuda') {
-                                                update('ref_kernel_code', e.target.value);
-                                            } else {
-                                                update('ref_cpu_code', e.target.value);
-                                            }
-                                        }}
+                                        placeholder={refKind.placeholder}
+                                        value={form[refKind.field]}
+                                        onChange={(e) => update(refKind.field, e.target.value)}
                                         spellCheck={false}
                                     />
                                 </div>
@@ -471,40 +508,72 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                         {/* ── Step 3: Arguments ─────────────────────────────────────────── */}
                         {step === 2 && (
                             <div className="space-y-3 py-2">
-                                <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100 flex gap-2">
-                                    <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                                <div className={`rounded-md border px-3 py-2 text-xs flex gap-2 ${refKind.positional
+                                    ? 'border-amber-500/30 bg-amber-500/10 text-amber-100'
+                                    : 'border-sky-500/30 bg-sky-500/10 text-sky-100'}`}>
+                                    {refKind.positional
+                                        ? <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                                        : <Info size={14} className="shrink-0 mt-0.5" />}
                                     <span>
-                                        <strong>Order is the reference's signature.</strong> Arguments bind by position,
-                                        not by name — a wrong order makes the reference compute from shuffled inputs and
-                                        validation compare against garbage, with no error.{' '}
-                                        {form.reference_type === 'cuda' ? (
-                                            <>Buffers, and scalars marked <code className="font-mono">runtime</code>, are
+                                        {form.reference_type === 'cuda' && (
+                                            <><strong>Order is the reference's signature.</strong> Arguments bind by
+                                            position, not by name — a wrong order makes the reference compute from
+                                            shuffled inputs and validation compare against garbage, with no error.
+                                            Buffers, and scalars marked <code className="font-mono">runtime</code>, are
                                             passed; a host-only scalar is declared but not passed, so it may sit anywhere.</>
-                                        ) : (
-                                            <>A C reference takes <strong>every buffer</strong> as a pointer; scalars are{' '}
+                                        )}
+                                        {form.reference_type === 'cpu_c' && (
+                                            <><strong>Order is the reference's signature.</strong> Arguments bind by
+                                            position, not by name — a wrong order makes the reference compute from
+                                            shuffled inputs and validation compare against garbage, with no error. A C
+                                            reference takes <strong>every buffer</strong> as a pointer; scalars are{' '}
                                             <code className="font-mono">-D</code> macros, never parameters.</>
+                                        )}
+                                        {form.reference_type === 'python' && (
+                                            <><strong>Order does not matter for a Python reference.</strong> It receives{' '}
+                                            <code className="font-mono">scalars</code> and <code className="font-mono">buffers</code>{' '}
+                                            as dicts keyed by name, so it reads what it needs. Order still defines the
+                                            kernel's own signature, which the configure step binds by position.</>
                                         )}
                                     </span>
                                 </div>
 
-                                {/* What the reference actually receives — the two kinds take different things */}
+                                {/* What the reference actually receives — each kind takes something different */}
                                 <div className="rounded-md border bg-zinc-950 px-3 py-2 text-xs font-mono text-zinc-300">
-                                    <span className="text-zinc-500">
-                                        {form.reference_type === 'cuda' ? '__global__ void ' : 'void '}
-                                        {form.ref_function || 'reference'}(
-                                    </span>
-                                    {refParams.map((a, i) => (
-                                        <span key={a.name + i}>
-                                            {i > 0 && <span className="text-zinc-500">, </span>}
-                                            <span className={a.kind === 'scalar' ? 'text-sky-400' : 'text-emerald-400'}>
-                                                {a.kind === 'buffer' && form.reference_type === 'cpu_c'
-                                                    ? `${a.access === 'read' ? 'const ' : ''}${a.dtype}* ${a.name || '?'}`
-                                                    : a.name || '?'}
+                                    {refKind.positional ? (
+                                        <>
+                                            <span className="text-zinc-500">
+                                                {form.reference_type === 'cuda' ? '__global__ void ' : 'void '}
+                                                {form.ref_function || 'reference'}(
                                             </span>
-                                        </span>
-                                    ))}
-                                    <span className="text-zinc-500">)</span>
-                                    {refParams.length === 0 && <span className="text-zinc-600 italic"> — nothing passed</span>}
+                                            {refParams.map((a, i) => (
+                                                <span key={a.name + i}>
+                                                    {i > 0 && <span className="text-zinc-500">, </span>}
+                                                    <span className={a.kind === 'scalar' ? 'text-sky-400' : 'text-emerald-400'}>
+                                                        {a.kind === 'buffer' && form.reference_type === 'cpu_c'
+                                                            ? `${a.access === 'read' ? 'const ' : ''}${a.dtype}* ${a.name || '?'}`
+                                                            : a.name || '?'}
+                                                    </span>
+                                                </span>
+                                            ))}
+                                            <span className="text-zinc-500">)</span>
+                                            {refParams.length === 0 && <span className="text-zinc-600 italic"> — nothing passed</span>}
+                                        </>
+                                    ) : (
+                                        // Python takes dicts keyed by name — there is no positional signature to show,
+                                        // so show the keys it will actually find in them.
+                                        <>
+                                            <span className="text-zinc-500">def {form.ref_function || 'reference'}(scalars, buffers)</span>
+                                            <div className="mt-1 text-[11px]">
+                                                <span className="text-zinc-500">scalars: </span>
+                                                {args.filter(a => a.kind === 'scalar').map(a => a.name).join(', ') || <span className="text-zinc-600 italic">none</span>}
+                                            </div>
+                                            <div className="text-[11px]">
+                                                <span className="text-zinc-500">buffers: </span>
+                                                {args.filter(a => a.kind === 'buffer').map(a => a.name).join(', ') || <span className="text-zinc-600 italic">none</span>}
+                                            </div>
+                                        </>
+                                    )}
                                 </div>
 
                                 <div className="flex items-center justify-between">
@@ -707,7 +776,9 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                         </div>
                                         <div>
                                             <span className="text-zinc-500">ref args:</span>{' '}
-                                            {refParams.map(a => a.name).join(', ') || 'none'}
+                                            {refKind.positional
+                                                ? (refParams.map(a => a.name).join(', ') || 'none')
+                                                : 'scalars + buffers dicts (by name)'}
                                         </div>
                                         <div>
                                             <span className="text-zinc-500">validated:</span>{' '}
@@ -771,7 +842,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                         Next <ChevronRight size={14} className="ml-1" />
                                     </Button>
                                 ) : (
-                                    <Button size="sm" onClick={handleSubmit} disabled={submitting || !form.slug || !form.name || !form.ref_function || (form.reference_type === 'cuda' ? !form.ref_kernel_code : !form.ref_cpu_code)}>
+                                    <Button size="sm" onClick={handleSubmit} disabled={submitting || !form.slug || !form.name || !form.ref_function || !form[refKind.field]}>
                                         {submitting && <Loader2 size={14} className="mr-1 animate-spin" />}
                                         {mode === 'create' ? 'Create Problem' : 'Save Changes'}
                                     </Button>

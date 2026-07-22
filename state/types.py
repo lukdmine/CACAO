@@ -12,7 +12,7 @@ Also retained:
 - SubStrategyDict: sub-strategy descriptor for recursive branching
 """
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 from pydantic import BaseModel, Field
 
 # Pydantic models for core state
@@ -64,6 +64,10 @@ class BranchManifest(BaseModel):
     """
 
     strategy: StrategyInfo = Field(default_factory=StrategyInfo)
+    # Branch-level: nodes/plan.py runs once per branch, so every iteration of a branch
+    # shares one plan. It lived on IterState and was stored identically in each
+    # iter_N/state.json.
+    plan: str = ""
     branch_depth: int = 0
     path_iters_consumed: int = (
         0  # Total iterations used by ancestors (path budget mode)
@@ -92,7 +96,11 @@ class IterState(BaseModel):
     next_status: Optional[str] = (
         None  # status for the *next* iteration (implementing | configuring | success | failed | branching)
     )
-    plan: str = ""
+    # How this iteration was entered. Computed once by create_initial_iter_state from the
+    # previous decision — implement branches on it to reach the fix_errors prompt. The
+    # previous decision/feedback/kernel themselves come from state/history.py; only this
+    # verdict has to travel, because history returns formatted markdown, not values.
+    mode: Literal["fresh", "retry", "followup"] = "fresh"
     kernel_code: str = ""
     framework_cpp: str = ""  # assembled framework.cpp driver (framework-file mode)
     run_output: str = ""

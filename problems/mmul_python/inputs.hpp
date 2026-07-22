@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <cstring>
+#include <stdexcept>
 
 // --- scalars (host consts) ---------------------------------------------------
 inline constexpr int kSizeM = 2048;
@@ -71,9 +72,15 @@ inline Inputs DefineInputs(ktt::Tuner& t) {
     t.SetReferenceComputation(in.mat_c, [](void* buffer) {
         { std::ofstream f("cacao_in_mat_a.bin", std::ios::binary); f.write(reinterpret_cast<const char*>(cacao_ref::h_mat_a.data()), static_cast<std::streamsize>(cacao_ref::h_mat_a.size() * sizeof(float))); }
         { std::ofstream f("cacao_in_mat_b.bin", std::ios::binary); f.write(reinterpret_cast<const char*>(cacao_ref::h_mat_b.data()), static_cast<std::streamsize>(cacao_ref::h_mat_b.size() * sizeof(float))); }
-        if (std::system("python3 -m utils.python_ref_runner --inputs inputs.yaml --ref ref.py --function gemm_reference --target mat_c --output cacao_ref_mat_c.bin") != 0)
-            throw std::runtime_error("python_ref_runner failed for mat_c");
-        { std::ifstream f("cacao_ref_mat_c.bin", std::ios::binary); if (!f) throw std::runtime_error("missing cacao_ref_mat_c.bin"); f.read(static_cast<char*>(buffer), static_cast<std::streamsize>(static_cast<size_t>(kSizeM) * static_cast<size_t>(kSizeN) * sizeof(float))); if (!f) throw std::runtime_error("short read on cacao_ref_mat_c.bin"); }
+        const int rc = std::system("PYTHONPATH=/home/u550615/CACAO /home/u550615/miniconda3/envs/ktt/bin/python -m utils.python_ref_runner --inputs inputs.yaml --ref ref.py --function gemm_reference --target mat_c --output cacao_ref_mat_c.bin");
+        if (rc != 0)
+            throw std::runtime_error("python reference failed (exit " + std::to_string(rc) + "): mat_c");
+        std::ifstream f("cacao_ref_mat_c.bin", std::ios::binary);
+        if (!f)
+            throw std::runtime_error("python reference wrote no cacao_ref_mat_c.bin");
+        f.read(static_cast<char*>(buffer), static_cast<std::streamsize>(static_cast<size_t>(kSizeM) * static_cast<size_t>(kSizeN) * sizeof(float)));
+        if (f.gcount() != static_cast<std::streamsize>(static_cast<size_t>(kSizeM) * static_cast<size_t>(kSizeN) * sizeof(float)))
+            throw std::runtime_error("python reference produced a short cacao_ref_mat_c.bin");
     });
     return in;
 }

@@ -1,0 +1,21 @@
+name: Covariance Matrix
+description: 'Sample covariance of an M x K observation matrix: column means, center,
+  then centered^T * centered, normalized by (M-1). The centering step needs the column
+  means over every row, so the means must complete before any covariance element can be
+  computed. The three stages have different launch geometries (K, M*K, K x K).
+
+  '
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: COV_K
+  y: COV_K
+reference:
+  type: cpu_c
+  function: covariance_reference
+  file: ref_cpu.c
+validation:
+  tolerance: 0.05
+tuning:
+  duration_s: 100

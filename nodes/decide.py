@@ -26,6 +26,16 @@ from nodes._llm_helper import (
 import prompts.decide
 
 
+def _format_run_output(run_output: str) -> str:
+    """Raw driver output section — the primary evidence when a step failed before
+    producing results (implement returned nothing, host compile error). Without it the
+    LLM invents phantom diagnoses from "0 configs"."""
+    if not run_output:
+        return ""
+    excerpt, label = get_tuner_tail(run_output)
+    return f"## Run Output ({label}):\n```\n{excerpt}\n```"
+
+
 async def decide_node(state: WorkingState) -> WorkingState:
     iteration = state.iter_num
     strategy = state.strategy or {}
@@ -80,14 +90,7 @@ async def decide_node(state: WorkingState) -> WorkingState:
             f"- Strategy: {branch_name}"
         ),
         "results_summary_text": f"## Results Summary:\n{format_results_summary(summary)}",
-        # The raw run/tuner output is the primary evidence when a step failed
-        # before producing results (e.g. implement returned nothing, compile
-        # error) — without it the LLM invents phantom diagnoses from "0 configs".
-        "run_output_text": (
-            f"## Run Output (tail):\n```\n{get_tuner_tail(state.run_output)}\n```"
-            if state.run_output
-            else ""
-        ),
+        "run_output_text": _format_run_output(state.run_output),
         "proposal": getattr(state, "proposal", "") or "",
         "prev_feedback": prev_feedback,
         "iteration_summaries": iteration_summaries,

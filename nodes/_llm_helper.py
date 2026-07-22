@@ -250,25 +250,28 @@ def _format_current_iter(state, summary, tuner_tail) -> str:
 
     if not summary:
         return ""
+    tuner_excerpt, tuner_label = tuner_tail or ("", "no output")
     return (
         f"## Current Iteration ({state.iter_num}):\n\n"
         f"### Kernel Code (kernels.cu):\n```cuda\n{state.kernel_code}\n```\n\n"
         f"### Framework Driver (framework.cpp — your regions are between the CACAO:* markers):\n```cpp\n{state.framework_cpp}\n```\n\n"
         f"### Results Summary:\n{format_results_summary(summary)}\n\n"
-        f"### Tuner Output (last 50 lines):\n```\n{tuner_tail or 'No output'}\n```\n"
+        f"### Tuner Output ({tuner_label}):\n```\n{tuner_excerpt or 'No output'}\n```\n"
         f"{format_ncu_context(state.ncu_metrics)}"
     )
 
 
-def get_tuner_tail(run_output: str, max_lines: int = 50) -> str:
+def get_tuner_tail(run_output: str, max_lines: int = 50) -> tuple[str, str]:
+    """(excerpt, label) of the driver output — see state.history.output_excerpt.
+
+    Returns the label too so callers describe what they actually got: a compile failure
+    yields a HEAD excerpt, and calling that a "tail" misleads the reader and the model.
+    """
     if not run_output:
-        return "No output"
-    lines = run_output.split("\n")
-    # g++ diagnostics are front-loaded — the errors come first, then pages of template
-    # "note:" spam. Tailing them drops the header and can leave only notes.
-    if run_output.startswith("[COMPILE ERROR]"):
-        return "\n".join(lines[:max_lines])
-    return "\n".join(lines[-max_lines:])
+        return "No output", "no output"
+    from state.history import output_excerpt
+
+    return output_excerpt(run_output, max_lines)
 
 
 def _infer_ref_language(problem_yaml: str) -> str:

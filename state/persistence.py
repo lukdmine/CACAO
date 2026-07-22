@@ -92,24 +92,37 @@ def load_iter_state_if_exists(branch_path: Path, iter_num: int) -> Optional[Iter
 def create_initial_iter_state(
     iter_num: int, prev_state: Optional[IterState] = None
 ) -> IterState:
-    """Create a fresh iteration state for a new iteration, carrying over state from previous if provided."""
+    """Create the next iteration's state. It owns only what it will produce itself.
+
+    Previous-iteration context (the last kernel, feedback, decision, run output) is NOT
+    copied: state/history.py already loads it from disk per-field with configurable
+    depth, and every consuming node already requests it. Copying it forward duplicated
+    that — the same kernel reached the implement prompt twice — and left the frontend
+    rendering the previous iteration's decision as this one's.
+
+    What cannot come from history is a value to branch on, since history returns
+    formatted markdown: hence ``mode``, computed once here from the previous decision.
+    """
     if prev_state is None:
         return IterState(iter_num=iter_num, status="planning")
 
-    # Carry the decision context forward. implement/configure select retry vs
-    # follow-up mode from `decision`/`feedback`, and `run_output` is the evidence
-    # of what went wrong — without these, every retry silently degrades to a
-    # from-scratch reattempt and the fix_errors prompt is unreachable.
-    # kernel_code carries as "the previous implementation": implement overwrites
-    # it on success, and the configuring path (skip_implement) requires it.
+    status = prev_state.next_status if prev_state.next_status else "implementing"
+    action = (prev_state.decision or {}).get("action")
+    if action == "retry":
+        mode = "retry"
+    elif prev_state.feedback:
+        mode = "followup"
+    else:
+        mode = "fresh"
+
     return IterState(
         iter_num=iter_num,
-        status=prev_state.next_status if prev_state.next_status else "implementing",
-        plan=prev_state.plan,
-        kernel_code=prev_state.kernel_code,
-        decision=prev_state.decision,
-        feedback=prev_state.feedback,
-        run_output=prev_state.run_output,
+        status=status,
+        mode=mode,
+        # skip_implement routes straight to configuring, so no node will write a kernel
+        # this iteration: the previous one IS this iteration's kernel. Adoption, not
+        # carried context.
+        kernel_code=prev_state.kernel_code if status == "configuring" else "",
     )
 
 

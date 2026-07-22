@@ -80,6 +80,7 @@ export interface StrategyInfo {
 
 export interface BranchManifest {
   strategy: StrategyInfo;
+  plan: string;
   branch_depth: number;
   path_iters_consumed: number;
   current_iter: number;
@@ -95,7 +96,7 @@ export interface IterState {
   iter_num: number;
   status: string;
   next_status?: string | null;
-  plan: string;
+  mode: "fresh" | "retry" | "followup";
   kernel_code: string;
   framework_cpp: string;
   run_output: string;
@@ -165,7 +166,7 @@ export interface UserMessage {
 export interface IterationSnapshot {
   iter_num: number;
   status: string;
-  plan: string;
+  mode: string;
   kernel_code: string;
   framework_cpp: string;
   run_output: string;
@@ -182,6 +183,7 @@ export interface TreeNode {
   parentId: string | null;
   strategy: Strategy;
   status: string;
+  plan: string;
   iter_num: number;
   max_iter: number;
   best_time_us: number | null;

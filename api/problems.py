@@ -31,6 +31,9 @@ _REF_SIGNATURE = re.compile(
 _REF_CPU_SIGNATURE = re.compile(
     r'(?:extern\s+"C"\s+)?void\s+(\w+)\s*\(([^)]*)\)\s*\{', re.S
 )
+# A python reference is a top-level def. Its parameters are (scalars, buffers) dicts, so
+# only the name matters — there is no positional binding to get wrong.
+_REF_PY_SIGNATURE = re.compile(r"^def\s+(\w+)\s*\(", re.M)
 
 
 def _signature_warnings(req: CreateProblemRequest) -> list[str]:
@@ -43,6 +46,21 @@ def _signature_warnings(req: CreateProblemRequest) -> list[str]:
     Reported, never blocking (design I6): this regex cannot parse every legal declaration,
     and a false rejection would be worse than a banner.
     """
+    # A python reference is called as f(scalars, buffers) with dicts keyed by NAME
+    # (utils/python_ref_runner), so none of the positional reasoning below applies to it.
+    # Only the name has to match — the runner looks the function up.
+    if req.reference_type == "python":
+        found = _REF_PY_SIGNATURE.findall(req.ref_python_code or "")
+        if not found:
+            return []
+        if req.ref_function not in found:
+            declared = ", ".join(f"'{f}'" for f in found)
+            return [
+                f"problem.yaml names reference function '{req.ref_function}', but ref.py "
+                f"defines {declared}. The runner looks it up by name."
+            ]
+        return []
+
     is_cuda = req.reference_type == "cuda"
     pattern = _REF_SIGNATURE if is_cuda else _REF_CPU_SIGNATURE
     found = list(pattern.finditer((req.ref_kernel_code if is_cuda else req.ref_cpu_code) or ""))
@@ -89,10 +107,28 @@ def _signature_warnings(req: CreateProblemRequest) -> list[str]:
     return []
 
 
+# Filename each reference kind is written to, and read back from. The engine reads
+# reference.file, so these are the names nodes/configure.py and utils/build.py expect.
+_REFERENCE_FILE = {
+    "cuda": "ref_kernel.cu",
+    "cpu_c": "ref_cpu.c",
+    "python": "ref.py",
+}
+
+
+def _reference_source(req: CreateProblemRequest) -> str:
+    """The request field carrying this reference kind's code."""
+    return {
+        "cuda": req.ref_kernel_code,
+        "cpu_c": req.ref_cpu_code,
+        "python": req.ref_python_code,
+    }[req.reference_type]
+
+
 def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
     """Build the pure-metadata problem.yaml dict (the I/O boundary lives in inputs.yaml)."""
     is_cuda = req.reference_type == "cuda"
-    code = req.ref_kernel_code if is_cuda else req.ref_cpu_code
+    code = _reference_source(req)
     if not req.ref_function or not code.strip():
         raise HTTPException(
             status_code=400,
@@ -102,7 +138,7 @@ def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
     reference = {
         "type": req.reference_type,
         "function": req.ref_function,
-        "file": "ref_kernel.cu" if is_cuda else "ref_cpu.c",
+        "file": _REFERENCE_FILE[req.reference_type],
     }
     if is_cuda:
         # Nested, not flat block_x/block_y: utils/framework.py reads ref["block"] and
@@ -131,12 +167,10 @@ def _write_problem_files(problem_dir, problem_data, req: CreateProblemRequest):
     """Write problem.yaml, the reference source, and the inputs.yaml/inputs.hpp pair."""
     with (problem_dir / "problem.yaml").open("w") as f:
         yaml.dump(problem_data, f, default_flow_style=False, sort_keys=False)
-    if req.reference_type == "cuda":
-        (problem_dir / "ref_kernel.cu").write_text(req.ref_kernel_code)
-    else:
-        (problem_dir / "ref_cpu.c").write_text(req.ref_cpu_code)
-    # The reference drives codegen: a cpu_c problem needs its extern "C" declaration,
-    # host input copies, and a SetReferenceComputation per validated buffer in the header.
+    (problem_dir / _REFERENCE_FILE[req.reference_type]).write_text(_reference_source(req))
+    # The reference drives codegen: cpu_c needs its extern "C" declaration, host input
+    # copies, and a SetReferenceComputation per validated buffer; python needs a lambda
+    # that dumps the buffers and shells out to the runner.
     write_inputs(problem_dir, req.inputs, problem_data["reference"])
 
 
@@ -317,6 +351,13 @@ def get_problem(name: str):
     if ref_cpu_path.exists():
         ref_cpu = ref_cpu_path.read_text()
 
+    # Without this, opening Edit on a python problem and saving would write an empty
+    # ref.py — the same way the boundary used to be wiped.
+    ref_python = ""
+    ref_python_path = problem_dir / _REFERENCE_FILE["python"]
+    if ref_python_path.exists():
+        ref_python = ref_python_path.read_text()
+
     # The structured boundary, not the generated C++. Reloading the spec is what makes
     # Edit lossless: the form never has to reconstruct its state from inputs.hpp.
     inputs = None
@@ -329,6 +370,7 @@ def get_problem(name: str):
         "config": config,
         "ref_kernel": ref_kernel,
         "ref_cpu": ref_cpu,
+        "ref_python": ref_python,
         "inputs": inputs,
         "has_output": (problem_dir / "output").is_dir(),
     }

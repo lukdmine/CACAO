@@ -6,6 +6,7 @@ Handles reading and analyzing KTT tuning results.
 
 import json
 import re
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional, Tuple  # noqa: F401 (Tuple used in check_results)
 
@@ -34,6 +35,144 @@ def parse_reference_time_from_output(tuner_output: str) -> Optional[float]:
     if match:
         return float(match.group(1))
     return None
+
+
+# Heading prefix of the text summarize_failures() produces. Public because state.history
+# keys the head-vs-tail excerpt off it — if these two drift apart, the summary is silently
+# tailed and loses its header and most widespread diagnostic. Only the prefix is fixed; the
+# rest of the line reports what was actually found.
+FAILURE_SUMMARY_HEADING = "## Compile diagnostics:"
+
+# KTT logs one of these per failed configuration, followed by the compiler's diagnostics.
+_FAILURE_MARKER = "[Warning] Kernel run failed with reason:"
+
+# A diagnostic, captured from the LOCATION onward wherever it sits in the line. Both
+# compilers appear: NVRTC as `default_program(58): error: ...` (device) and g++ as
+# `framework.cpp:12:25: error: ...` (host). The location anchor also strips KTT's
+# "[Warning] Kernel run failed with reason: ... additional info: " prefix, which carries
+# the block's first diagnostic inline.
+_DIAGNOSTIC = re.compile(
+    r"((?:default_program\(\d+\)|[\w./+-]+:\d+(?::\d+)?): (?:fatal error|error): .*?)\s*$"
+)
+# Lines the compiler emits UNDER a diagnostic: g++ prints the offending source and a caret
+# ruler, plus "note:" candidates. NVRTC prints nothing. Kept so a host error arrives with
+# the code it is complaining about.
+_CONTEXT = re.compile(r"^\s*(?:\d+\s*\||\||~|\^|In file included|\s+from |.*\bnote:)")
+
+
+def kernel_line_offset(results_path: Path) -> Optional[int]:
+    """Lines KTT prepends to kernels.cu before handing it to NVRTC.
+
+    Exact by construction, not inferred. KTT compiles ``GeneratePrefix() + GetSource()``
+    (TunerCore.cpp:327), and GeneratePrefix appends one ``#define NAME value\\n`` per
+    parameter pair and nothing else (KernelConfiguration.cpp:25-35). So NVRTC's line is the
+    file's line plus the parameter count, and every device diagnostic is off by exactly
+    that much from the file the LLM is editing.
+
+    If those two ever prepend anything more, this goes silently wrong rather than loudly —
+    the mapped line would simply point at innocent code. Cross-checked against four real
+    kernels at parameter counts 8 and 7: every mapping landed on the offending line, and
+    the 7-parameter ones would have been off by one under a hardcoded offset.
+    """
+    data = load_results(results_path)
+    if not data:
+        return None
+    results = data.get("Results") or []
+    if not results:
+        return None
+    config = results[0].get("Configuration")
+    return len(config) if config else None
+
+
+def summarize_failures(
+    tuner_output: str, kernel_offset: Optional[int] = None
+) -> Optional[str]:
+    """Every distinct compiler diagnostic, once, with the context the compiler gave for it.
+
+    ``kernel_offset`` (see kernel_line_offset) maps NVRTC's ``default_program(N)`` back to
+    the kernels.cu line the LLM is actually editing. Without it the model has to guess the
+    correspondence, and the numbers it reasons about are not the numbers in its file.
+
+    KTT runs every configuration, so a kernel that does not compile fails all of them with
+    the same diagnostics. One real run: 957 KB / 21,609 lines / 9,060 lines matching
+    `error:` — carrying 46 distinct diagnostics. Excerpting that log hands the LLM one
+    arbitrary configuration's block, cut mid-way: in that run the tail showed the wmma
+    errors while the float2 errors, on 1,332 lines, never reached the retry at all.
+
+    Deduplicating by diagnostic rather than by block is what makes the result complete: a
+    per-block grouping reports the same error once per block it appears in, so a cause
+    present in only one block is easy to miss among the repeats.
+
+    Returns None when the output carries no diagnostics (a clean run, a crash), so callers
+    fall back to an excerpt.
+    """
+    lines = tuner_output.split("\n")
+    configs = max(tuner_output.count(_FAILURE_MARKER), 0)
+
+    diags: "OrderedDict[str, dict]" = OrderedDict()
+    for i, line in enumerate(lines):
+        m = _DIAGNOSTIC.search(line)
+        if not m:
+            continue
+        text = m.group(1).strip()
+        entry = diags.get(text)
+        if entry is None:
+            entry = diags[text] = {"count": 0, "context": _context_below(lines, i)}
+        entry["count"] += 1
+
+    if not diags:
+        return None
+
+    header = f"{FAILURE_SUMMARY_HEADING} {len(diags)} distinct"
+    note = (
+        "Every distinct diagnostic, deduplicated; the full log is kept at "
+        "iter_N/tuner_output.txt."
+    )
+    if configs:
+        header += f", across {configs} failed configuration(s)"
+        # Without this the counts read as severity, and the model chases the wrong error.
+        note += (
+            " `xN` is how many times the compiler emitted it: a kernel that fails to "
+            "compile fails every configuration the same way, so a high count means "
+            "widespread, not severe."
+        )
+    out = [header, "", note, "```"]
+    for text, entry in sorted(diags.items(), key=lambda kv: -kv[1]["count"]):
+        out.append(f"x{entry['count']:<4} {_map_device_line(text, kernel_offset)}")
+        out.extend(f"      {c}" for c in entry["context"])
+    out.append("```")
+    return "\n".join(out)
+
+
+def _map_device_line(text: str, offset: Optional[int]) -> str:
+    """Rewrite `default_program(N)` to the kernels.cu line it corresponds to.
+
+    The LLM edits kernels.cu, so give it kernels.cu numbers; NVRTC's own numbering is of no
+    use to it and inviting it to do the arithmetic is inviting it to get it wrong. The
+    untouched log stays at iter_N/tuner_output.txt if the mapping ever needs checking.
+    """
+    if not offset:
+        return text
+
+    def sub(m):
+        dev = int(m.group(1))
+        src = dev - offset
+        return f"kernels.cu:{src}" if src > 0 else m.group(0)
+
+    return re.sub(r"default_program\((\d+)\)", sub, text)
+
+
+def _context_below(lines: list, i: int, limit: int = 4) -> list:
+    """The compiler's own context under a diagnostic — g++'s source line and caret ruler.
+
+    NVRTC emits none, so this returns empty for device errors and costs nothing.
+    """
+    out = []
+    for line in lines[i + 1 : i + 1 + limit]:
+        if not line.strip() or not _CONTEXT.match(line):
+            break
+        out.append(line.rstrip())
+    return out
 
 
 def load_reference_time(output_dir: Path) -> Optional[float]:

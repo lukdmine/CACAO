@@ -12,11 +12,14 @@ from pathlib import Path
 from typing import Optional, Set
 
 from utils.log import log
-from utils.results import get_results_summary, load_reference_time
+from utils.results import (
+    FAILURE_SUMMARY_HEADING as _FAILURE_SUMMARY_HEADING,
+    get_results_summary,
+    load_reference_time,
+)
 
 # Fields that can be requested per-node via the ``include`` parameter.
 _ALL_HISTORY_FIELDS: Set[str] = {
-    "plan",
     "kernel_code",
     "framework_cpp",
     "run_output",
@@ -83,6 +86,7 @@ def _load_past_iter_states(
 
 
 def _preview(text: str, max_lines: int) -> str:
+    """First few lines, with a count of what was elided."""
     lines = text.strip().split("\n")
     preview = "\n".join(lines[:max_lines])
     if len(lines) > max_lines:
@@ -90,8 +94,31 @@ def _preview(text: str, max_lines: int) -> str:
     return preview
 
 
-def _tail(text: str, max_lines: int) -> str:
-    return "\n".join(text.strip().split("\n")[-max_lines:])
+def output_excerpt(text: str, max_lines: int) -> tuple[str, str]:
+    """Most diagnostic slice of driver output, plus an honest label for it.
+
+    Which end matters depends on what failed. Tuner output is back-loaded: the run
+    progresses and the interesting part (the failure, the summary) is at the end. Host
+    compile output is the opposite — g++ leads with the root-cause error and follows with
+    cascading repeats and template "note:" spam. Tailing it drops the [COMPILE ERROR]
+    header, so the model cannot even tell a compile failure from a tuning failure, and
+    hands it the cascade instead of the first error.
+
+    Returns (excerpt, label) so callers cannot describe a head excerpt as a tail.
+    """
+    lines = text.strip().split("\n")
+    if len(lines) <= max_lines:
+        return "\n".join(lines), f"{len(lines)} lines"
+    # Both of these lead with what matters — the [COMPILE ERROR] header and root-cause
+    # error, or the failure summary's header and most frequent cause — so take the head.
+    if text.startswith("[COMPILE ERROR]") or text.startswith(_FAILURE_SUMMARY_HEADING):
+        return "\n".join(lines[:max_lines]), f"first {max_lines} lines"
+    return "\n".join(lines[-max_lines:]), f"last {max_lines} lines"
+
+
+def _fmt_run_output(v: str) -> str:
+    excerpt, label = output_excerpt(v, 30)
+    return f"**Run Output ({label}):**\n```\n{excerpt}\n```"
 
 
 def _fmt_ncu(metrics: dict) -> str:
@@ -130,12 +157,9 @@ def _fmt_decision(d: dict) -> str:
 
 
 _FIELD_FORMATTERS = {
-    "plan": lambda v: f"**Plan:**\n{_preview(v, 5)}",
     "kernel_code": lambda v: f"**Kernel Code:**\n```cuda\n{v}\n```",
     "framework_cpp": lambda v: f"**Framework Driver:**\n```cpp\n{v}\n```",
-    "run_output": lambda v: (
-        f"**Run Output (last 30 lines):**\n```\n{_tail(v, 30)}\n```"
-    ),
+    "run_output": _fmt_run_output,
     "ncu_metrics": _fmt_ncu,
     "results_summary": _fmt_results,
     "decision": _fmt_decision,
@@ -460,16 +484,24 @@ def format_parent_context(branch_path: Optional[str]) -> str:
     include = _ALL_HISTORY_FIELDS
     formatted = _format_iter_state(snap, include)
 
-    # Get parent strategy name
+    # Parent strategy name and plan both come from the manifest. The plan used to ride in
+    # on the iteration snapshot above, back when every iteration carried a copy of it; it
+    # lives on the branch now, so read it from there rather than silently dropping the
+    # parent's approach from every sub-branch's prompts.
     parent_name = "unknown"
+    parent_plan = ""
     branch_file = parent_path / "branch.json"
     if branch_file.exists():
         try:
             with branch_file.open("r") as f:
                 ps = json.load(f)
             parent_name = ps.get("strategy", {}).get("name", "unknown")
+            parent_plan = ps.get("plan", "") or ""
         except (json.JSONDecodeError, OSError):
             pass
+
+    if parent_plan:
+        formatted = f"**Plan:**\n{_preview(parent_plan, 5)}\n\n{formatted}"
 
     return (
         f"\n## Parent Branch Context ('{parent_name}' — last iteration):\n{formatted}"

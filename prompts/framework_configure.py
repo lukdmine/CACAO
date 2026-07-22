@@ -136,8 +136,6 @@ def build(ctx: dict) -> tuple[str, str]:
         parts.append(ctx["iteration_history"])
     if ctx.get("best_so_far"):
         parts.append(ctx["best_so_far"])
-    if ctx.get("prev_context"):
-        parts.append(ctx["prev_context"])
     if ctx.get("user_messages"):
         parts.append(ctx["user_messages"])
     parts.append(

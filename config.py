@@ -501,20 +501,26 @@ MODELS = {
         "default": "gemini-3-pro",
         "available": ["gemini-3-pro", "gemini-3-flash"],
     },
+    # Chat models served by cerit's endpoint, as listed by GET /v1/models. Version-pinned
+    # names only: the endpoint also serves bare aliases (glm, kimi, coder, thinker, ...)
+    # whose target moves without notice, plus embedding/reranker/whisper models that
+    # cannot answer a chat completion at all.
     "cerit": {
         "default": "glm-5.2",
         "available": [
+            "glm-5",
+            "glm-5.2",
+            "kimi-k2.6",
+            "kimi-k2.7",
             "qwen3.5",
             "qwen3.5-122b",
-            "kimi-k2.5",
-            "kimi-k2.6",
-            "glm-5",
-            "glm-5.1",
-            "glm-5.2",
-            "deepseek-v3.2",
-            "deepseek-v3.2-thinking",
+            "qwen3.5-int4",
+            "deepseek-v4-pro",
+            "deepseek-v4-pro-thinking",
+            "deepseek-thinking",
+            "command-a",
+            "mistral-medium-3.5",
             "gpt-oss-120b",
-            "qwen3-coder-next",
             "gemma4",
         ],
     },

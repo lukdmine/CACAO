@@ -7,6 +7,14 @@ const NODE_HEIGHT = 120;
 const ROOT_NODE_WIDTH = 280;
 const ROOT_NODE_HEIGHT = 140;
 
+// React Flow's `animated` edge is the dashed marching line, and it should mean "this
+// branch is still working". A branch that has spawned sub-strategies is done with its own
+// iterations — the children carry the work now, and their own edges animate. `stopped` is
+// idle for the same reason. Anything else (running, or an iteration status the API
+// surfaces onto a running branch: implementing/configuring/profiling/proposing/deciding)
+// is genuinely in flight.
+const SETTLED_STATUSES = new Set(['success', 'failed', 'branching', 'stopped']);
+
 /**
  * Convert our flat TreeNode[] into React Flow nodes + edges with dagre layout.
  */
@@ -35,7 +43,7 @@ export function buildTreeLayout(treeNodes: TreeNode[]): { nodes: Node[]; edges: 
                 source: node.parentId,
                 target: node.id,
                 type: 'smoothstep',
-                animated: node.status !== 'success' && node.status !== 'failed',
+                animated: !SETTLED_STATUSES.has(node.status),
                 style: { stroke: '#71717a', strokeWidth: 2 },
             });
         }

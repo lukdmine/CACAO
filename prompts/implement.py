@@ -56,9 +56,11 @@ OUT of the signature.
 // BLOCK_Y    - Block size in Y dimension (threads per block)
 // TILE_SIZE  - Tile size for shared memory caching
 // =============================================================================
-// PROBLEM SCALARS (the -D macros listed in inputs.hpp's `defines` string)
-// =============================================================================
-// M, N, K   - Matrix dimensions (compile-time constants)
+// PROBLEM SCALARS — read the scalar contract below the inputs.hpp listing. It
+// says, for THIS problem, which scalars are -D macros (usable by name) and which
+// are runtime arguments (which MUST appear in the signature). This example shows
+// the macro form; if your problem lists runtime scalars, they go in the signature
+// instead — referencing them by name would not compile.
 // =============================================================================
 
 extern "C" __global__ void kernel(
@@ -66,7 +68,8 @@ extern "C" __global__ void kernel(
     const float* __restrict__ B,
     float* __restrict__ C)
 {
-    // Both parameters and scalars are compile-time constants!
+    // Tuning parameters are always compile-time macros. Problem scalars are only
+    // compile-time constants when the contract lists them as -D macros.
     __shared__ float tileA[TILE_SIZE][TILE_SIZE];
     __shared__ float tileB[TILE_SIZE][TILE_SIZE];
 
@@ -97,9 +100,15 @@ extern "C" __global__ void kernel(
     if ctx.get("inputs_hpp"):
         parts.append(
             "## Inputs (inputs.hpp) — the input/output buffers your kernels consume/produce "
-            "(you'll bind kernel args to these by name next):\n```cpp\n"
+            "(you'll bind kernel args to these by name next).\n"
+            "**This file is compiled into the host driver, NOT into your kernel.** NVRTC "
+            "compiles kernels.cu on its own, so nothing declared here — including every "
+            "`inline constexpr` — is visible to a kernel unless it is a `-D` macro or an "
+            "argument. See the scalar contract below.\n```cpp\n"
             f"{ctx['inputs_hpp']}\n```"
         )
+    if ctx.get("scalar_contract"):
+        parts.append(ctx["scalar_contract"])
     if ctx.get("ref_kernel"):
         parts.append(
             f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
