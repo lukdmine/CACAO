@@ -154,7 +154,7 @@ def _cpu_reference_call(spec: InputsSpec, target: BufferSpec, func: str) -> list
     return lines
 
 
-def _python_reference_call(spec: InputsSpec, target: BufferSpec) -> list:
+def _python_reference_call(spec: InputsSpec, target: BufferSpec, function_name: str) -> list:
     """SetReferenceComputation lambda: dump input buffers to binary files, invoke
     utils.python_ref_runner, and read the result back into the validated buffer.
 
@@ -176,6 +176,7 @@ def _python_reference_call(spec: InputsSpec, target: BufferSpec) -> list:
     lines.append(
         f'        if (std::system("python3 -m utils.python_ref_runner'
         f" --inputs inputs.yaml --ref ref.py"
+        f" --function {function_name}"
         f' --target {target.name} --output cacao_ref_{target.name}.bin") != 0)'
     )
     lines.append(
@@ -364,7 +365,7 @@ def generate_inputs_hpp(spec: InputsSpec, reference: dict = None) -> str:
             "    // skips SetReferenceKernel when the problem's reference is python)."
         )
         for target in spec.validated:
-            out += _python_reference_call(spec, target)
+            out += _python_reference_call(spec, target, reference["function"])
     out.append("    return in;")
     out.append("}")
 

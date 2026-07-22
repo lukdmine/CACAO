@@ -8,6 +8,7 @@ cacao_ref_<target>.bin for the C++ lambda to read back.
 Usage:
     python3 -m utils.python_ref_runner \
         --inputs inputs.yaml --ref ref.py \
+        --function gemm_reference \
         --target mat_c --output cacao_ref_mat_c.bin
 """
 
@@ -23,16 +24,28 @@ import yaml
 _DTYPE_MAP = {"float": np.float32, "int": np.int32}
 
 
-def _load_ref_function(ref_path: Path) -> callable:
-    """Load the python reference file and return its solitary public callable.
+def _load_ref_function(ref_path: Path, function_name: str | None = None) -> callable:
+    """Load the python reference file and return the requested callable.
 
-    Convention: ref.py exposes ONE top-level function (the reference).
-    It may also expose type stubs or helpers; we pick the first callable that is
-    not dunder and not imported from another module."""
+    If ``function_name`` is given, look it up by name and verify it is callable
+    and defined in ref.py. Otherwise fall back to the first non-dunder callable
+    that is not imported from another module, preserving backwards-compatible
+    direct CLI use.
+    """
 
     spec = importlib.util.spec_from_file_location("ref", ref_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+
+    if function_name:
+        obj = getattr(mod, function_name, None)
+        if callable(obj) and getattr(obj, "__module__", None) == "ref":
+            return obj
+        raise RuntimeError(
+            f"Reference function '{function_name}' not found in {ref_path}. "
+            f"Ensure ref.py defines a top-level callable named '{function_name}'."
+        )
+
     for name in dir(mod):
         if name.startswith("_"):
             continue
@@ -52,7 +65,9 @@ def _eval_size(size_expr: str, scalars: dict) -> int:
     return int(eval(size_expr, {"__builtins__": {}}, ns))
 
 
-def run(inputs_yaml: Path, ref_py: Path, target: str, output: Path) -> None:
+def run(
+    inputs_yaml: Path, ref_py: Path, target: str, output: Path, function_name: str | None = None
+) -> None:
     spec = yaml.safe_load(inputs_yaml.read_text())
     args = spec.get("args", [])
 
@@ -101,8 +116,7 @@ def run(inputs_yaml: Path, ref_py: Path, target: str, output: Path) -> None:
     if target_entry is None:
         raise ValueError(f"Target buffer '{target}' not found in inputs.yaml args.")
 
-    # Check if the ref uses a different function name via the problem.yaml reference
-    ref_func = _load_ref_function(ref_py)
+    ref_func = _load_ref_function(ref_py, function_name)
 
     result = ref_func(scalars, buffers)
     if not isinstance(result, np.ndarray):
@@ -124,6 +138,9 @@ def main() -> int:
     )
     p.add_argument("--inputs", required=True, help="path to inputs.yaml")
     p.add_argument("--ref", required=True, help="path to ref.py")
+    p.add_argument(
+        "--function", default=None, help="name of the reference function in ref.py"
+    )
     p.add_argument("--target", required=True, help="buffer name to validate")
     p.add_argument("--output", required=True, help="output binary file path")
     args = p.parse_args()
@@ -133,6 +150,7 @@ def main() -> int:
         ref_py=Path(args.ref),
         target=args.target,
         output=Path(args.output),
+        function_name=args.function,
     )
     return 0
 
