@@ -304,11 +304,11 @@ class TrackedLLM:
                     )
 
                     if finish_reason == "length":
-                        # Thinking models (e.g. glm-5.2 behind a ~48k server cap that
-                        # overrides max_tokens) can spend the whole budget on reasoning
-                        # and emit zero content. Retrying the identical prompt re-runs
-                        # the same risk, so append an explicit brevity instruction —
-                        # the retry prompt differs, steering the model to answer.
+                        # Thinking models (e.g. glm-5.2 behind a ~48k server cap) can
+                        # spend the whole budget on reasoning and emit zero content.
+                        # Retrying the identical prompt re-runs the same risk, so
+                        # append an explicit brevity instruction — the retry prompt
+                        # differs, steering the model to answer.
                         log(
                             "Response hit the token cap with no usable content "
                             "(reasoning consumed the budget). Retrying with a "
@@ -575,35 +575,26 @@ MODEL_CONFIGS = {
     "default": {
         "creative_temperature": 0.3,
         "precise_temperature": 0.0,
-        "max_tokens": None,
     },
     "qwen": {
         "creative_temperature": 1.0,
         "precise_temperature": 0.7,
-        "max_tokens": None,
     },
     "deepseek": {
         "creative_temperature": 0.4,
         "precise_temperature": 0.0,
-        "max_tokens": 64000,
     },
     "claude": {
         "creative_temperature": 0.3,
         "precise_temperature": 0.0,
-        "max_tokens": None,
     },
     "kimi": {
         "creative_temperature": 1.0,
         "precise_temperature": 0.6,
-        # NOTE: max_tokens is currently not honored by the cerit proxy for kimi-k2.6 —
-        # the server caps responses at ~32k regardless of what we send. Use
-        # CERIT_KIMI_THINKING_BUDGET above to control reasoning length instead.
-        "max_tokens": 96000,
     },
     "glm": {
         "creative_temperature": 1.0,
         "precise_temperature": 0.7,
-        "max_tokens": 64000,
     },
 }
 
@@ -741,9 +732,7 @@ def set_model(model: str):
     _llm_precise = None
 
 
-def _create_llm(
-    provider: str, model: str, temperature: float, max_tokens: Optional[int] = None
-):
+def _create_llm(provider: str, model: str, temperature: float):
     """Create an LLM instance for the specified provider."""
     if provider == "openai":
         from langchain_openai import ChatOpenAI
@@ -756,22 +745,16 @@ def _create_llm(
             kwargs["use_responses_api"] = True
         else:
             kwargs["temperature"] = temperature
-        if max_tokens:
-            kwargs["max_tokens"] = max_tokens
         base_llm = ChatOpenAI(**kwargs)
     elif provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
         kwargs = {"model": model, "temperature": temperature}
-        if max_tokens:
-            kwargs["max_tokens"] = max_tokens
         base_llm = ChatAnthropic(**kwargs)
     elif provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         kwargs = {"model": model, "temperature": temperature}
-        if max_tokens:
-            kwargs["max_output_tokens"] = max_tokens
         base_llm = ChatGoogleGenerativeAI(**kwargs)
     elif provider == "cerit":
         from langchain_openai import ChatOpenAI
@@ -785,8 +768,6 @@ def _create_llm(
             "base_url": base_url,
             "api_key": api_key,
         }
-        if max_tokens:
-            kwargs["max_tokens"] = max_tokens
         base_llm = ChatOpenAI(**kwargs)
     else:
         raise ValueError(f"Unknown provider: {provider}")
@@ -801,9 +782,7 @@ def get_llm_creative():
         provider = get_provider()
         model = _current_model or get_default_model()
         config = _get_model_config(model)
-        _llm_creative = _create_llm(
-            provider, model, config["creative_temperature"], config.get("max_tokens")
-        )
+        _llm_creative = _create_llm(provider, model, config["creative_temperature"])
     return _llm_creative
 
 
@@ -814,9 +793,7 @@ def get_llm_precise():
         provider = get_provider()
         model = _current_model or get_default_model()
         config = _get_model_config(model)
-        _llm_precise = _create_llm(
-            provider, model, config["precise_temperature"], config.get("max_tokens")
-        )
+        _llm_precise = _create_llm(provider, model, config["precise_temperature"])
     return _llm_precise
 
 
