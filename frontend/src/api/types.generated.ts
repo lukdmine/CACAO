@@ -78,13 +78,16 @@ export interface StrategyInfo {
   key_parameters: string[];
 }
 
+export interface BranchConfig {
+  max_iter: number;
+}
+
 export interface BranchManifest {
   strategy: StrategyInfo;
   plan: string;
   branch_depth: number;
   path_iters_consumed: number;
   current_iter: number;
-  max_iter: number;
   status: string;
   best_time_us?: number | null;
   speedup?: number | null;

@@ -99,15 +99,18 @@ cli.py
 
 ### State Architecture
 
-State is split into three typed Pydantic models:
+State is split into three typed Pydantic models, plus one input file:
 
 | File | Model | Purpose |
 |------|-------|---------|
 | `output/context.json` | `Context` | Shared problem data (written once, read by all branches) |
 | `output/branches/<name>/branch.json` | `BranchManifest` | Branch identity, control, aggregated results |
+| `output/branches/<name>/branch_config.json` | `BranchConfig` | Settings the frontend owns (`max_iter`) — API writes, worker only reads |
 | `output/branches/<name>/iter_N/state.json` | `IterState` | Per-iteration work products (kernel, params, results, decision) |
 
 Nodes receive a `WorkingState` (composed from all three), then the worker decomposes it back after each step. See `state/types.py` for full field definitions.
+
+**One writer per file.** The worker holds `BranchManifest` in memory for the duration of a node — an LLM call or a tuner run — and rewrites `branch.json` wholesale afterwards. So anything the user can edit while a branch runs must live in `branch_config.json`, which the worker never writes: a setting kept on the manifest gets reverted by that write minutes later. The worker picks the file up in `_compose_working_state`, alongside the fresh reads of `problem.yaml` and the reference kernel.
 
 ### Iteration Status Machine
 
@@ -134,7 +137,8 @@ problems/<name>/output/
 ├── final_results.json             # best result summary
 └── branches/
     └── <strategy_name>/
-        ├── branch.json            # BranchManifest
+        ├── branch.json            # BranchManifest (worker-owned)
+        ├── branch_config.json     # BranchConfig (frontend-owned)
         ├── iter1/
         │   ├── state.json         # IterState
         │   ├── kernels.cu         # generated kernel(s)

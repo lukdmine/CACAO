@@ -23,9 +23,11 @@ from utils.files import create_branch_dir
 from utils.log import log
 from state import (
     MainState,
+    BranchConfig,
     BranchManifest,
     Context,
     save_context,
+    save_branch_config,
     save_branch_manifest,
     load_branch_manifest,
     read_requeue,
@@ -221,11 +223,12 @@ def _init_branch(
         branch_depth=depth,
         path_iters_consumed=path_iters_consumed,
         current_iter=1,
-        max_iter=max_iter,
         status="initialized",
     )
 
-    # Save to disk so the worker can pick it up
+    # Save to disk so the worker can pick it up. The budget goes in its own
+    # file: from here on the frontend owns it and the worker only reads it.
+    save_branch_config(branch_path, BranchConfig(max_iter=max_iter))
     save_branch_manifest(branch_path, manifest)
 
     log(f"Initialized branch at {branch_path} (max_iter={max_iter})", "SUCCESS")

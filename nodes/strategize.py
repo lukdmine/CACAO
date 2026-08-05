@@ -54,6 +54,15 @@ async def strategize_node(state: MainState) -> MainState:
             }
         ]
         log("Using fallback single strategy", "WARN")
-        save_json(get_output_dir() / "strategies.json", state.strategies)
+        # Same shape as the success path above: this used to write the bare list,
+        # and every reader assumes the mapping — a run that fell back here served
+        # a 500 from /tree for the rest of its life.
+        save_json(
+            get_output_dir() / "strategies.json",
+            {
+                "strategies": state.strategies,
+                "reasoning": "Strategize returned no strategies; using the built-in fallback.",
+            },
+        )
 
     return state

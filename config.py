@@ -512,15 +512,6 @@ def set_problem_dir(path: Path):
 # auto-detection. Leave as None to let .env / available API keys decide.
 LLM_PROVIDER: Optional[Literal["openai", "anthropic", "gemini", "cerit"]] = None
 
-# NOTE: !!! NOT USED RIGHT NOW !!!
-# Reasoning-token cap for cerit kimi-k2.6 — the only model on cerit's vLLM cluster with
-# --enable-custom-logit-processor turned on. Sent alongside custom_logit_processor:"true"
-# so the server-side KimiK26ThinkingBudgetLogitProcessor forces </think> emission once
-# exceeded. Without the cap, kimi can think past max_tokens and return empty content with
-# reasoning_content full — the proposal-empty failure mode. Other cerit models reject the
-# processor flag with HTTP 400, so the helper gates on this exact model name.
-CERIT_KIMI_THINKING_BUDGET: int = 27000
-
 # ===== Model defaults for each provider =====
 MODELS = {
     "openai": {
@@ -556,6 +547,7 @@ MODELS = {
             "glm-5.2",
             "kimi-k2.6",
             "kimi-k2.7",
+            "kimi-k3",
             "qwen3.5",
             "qwen3.5-122b",
             "qwen3.5-int4",
