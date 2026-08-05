@@ -237,10 +237,18 @@ def get_tree(
 
     # Only the count is used (in the root node's hypothesis line), so the
     # strategy bodies never leave the server.
+    #
+    # Both shapes are accepted: strategize's fallback path wrote a bare list
+    # rather than the {"strategies": [...]} mapping, and those files are already
+    # on disk. Assuming the mapping cost the whole endpoint a 500 — the frontend
+    # rendered nothing for the problem — over a decorative counter.
     num_strategies = 0
     strategies_path = output_dir / "strategies.json"
     if strategies_path.exists():
-        num_strategies = len(load_json(strategies_path).get("strategies", []))
+        data = load_json(strategies_path)
+        entries = data.get("strategies", []) if isinstance(data, dict) else data
+        if isinstance(entries, list):
+            num_strategies = len(entries)
 
     seen: set[str] = set()
     with _iter_cache_lock:
