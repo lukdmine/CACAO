@@ -297,9 +297,8 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
 
             # On iteration complete: advance or finish
             if current_status == "deciding":
-                if iter_state.next_status in ("success", "failed", "branching"):
-                    manifest.status = iter_state.next_status
-                else:
+                manifest.status = iter_state.next_status
+                if iter_state.next_status not in ("success", "failed", "branching"):
                     # Start new iteration
                     manifest.current_iter += 1
 
