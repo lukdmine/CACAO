@@ -126,7 +126,7 @@ def main():
     print(f"  Output file: {OUTPUT_FILE}")
 
     # Import backend models
-    from state.types import Context, BranchManifest, IterState, MainState, BranchResult, SubStrategyDict, StrategyInfo
+    from state.types import Context, BranchConfig, BranchManifest, IterState, MainState, BranchResult, SubStrategyDict, StrategyInfo
     from models.strategy import Strategy, StrategizeOutput
     from models.decision import OptimizationDecision, ErrorAnalysis, SubStrategy as SubStrategyPydantic
 
@@ -186,6 +186,8 @@ def main():
     sections.append(pydantic_to_ts(Context))
     sections.append("")
     sections.append(pydantic_to_ts(StrategyInfo))
+    sections.append("")
+    sections.append(pydantic_to_ts(BranchConfig))
     sections.append("")
     sections.append(pydantic_to_ts(BranchManifest))
     sections.append("")

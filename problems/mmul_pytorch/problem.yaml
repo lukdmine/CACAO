@@ -1,0 +1,17 @@
+name: GEMM (PyTorch Reference)
+description: 'General matrix-matrix multiply C = A @ B. The LLM-optimized CUDA kernel is validated against a PyTorch GPU reference (ref.py uses torch.matmul on CUDA).'
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: kSizeM
+  y: kSizeN
+  z: '1'
+reference:
+  type: python
+  function: gemm_reference
+  file: ref.py
+validation:
+  tolerance: 1.0
+tuning:
+  duration_s: 100

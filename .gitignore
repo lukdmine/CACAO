@@ -236,3 +236,8 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Generated I/O boundary headers. inputs.yaml is the source of truth; utils/inputs.py
+# regenerates inputs.hpp at the start of every run (cli.py, api/helpers.py), and the
+# python-reference variants bake in the generating machine's interpreter and repo path.
+problems/*/inputs.hpp

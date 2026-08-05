@@ -60,6 +60,7 @@ def change_decision(name: str, branch_id: str, req: ChangeDecisionRequest):
         revert_branch_on_disk,
         continue_branch_on_disk,
         write_requeue,
+        load_branch_config,
         load_branch_manifest,
     )
 
@@ -120,12 +121,11 @@ def change_decision(name: str, branch_id: str, req: ChangeDecisionRequest):
         from api.schemas import RunConfig
 
         gpu_index = _get_gpu_index(get_problem_dir(name))
-        # Re-read the (possibly bumped) manifest so we use its max_iter
-        updated_manifest = load_branch_manifest(branch_path)
+        # Re-read the (possibly lifted) budget so the resumed run inherits it
         start_resume(
             name,
             get_problem_dir(name),
-            RunConfig(max_iter=updated_manifest.max_iter),
+            RunConfig(max_iter=load_branch_config(branch_path).max_iter),
             gpu_index,
         )
         return {
@@ -141,17 +141,22 @@ def change_decision(name: str, branch_id: str, req: ChangeDecisionRequest):
 def configure_branch(name: str, branch_id: str, req: BranchConfigRequest):
     """Update branch configuration (e.g. max_iter).
 
-    Writes directly to branch.json — the worker re-reads config fields
-    from disk before each node, so no control signal is needed.
+    Writes branch_config.json, which nothing but this endpoint ever writes. The
+    worker reads it fresh when it composes the state for each node, so the new
+    budget takes effect from the next node onwards with no signal needed.
+
+    This deliberately does not touch branch.json: the worker holds that manifest
+    in memory for the duration of a node and rewrites it wholesale afterwards,
+    so a setting written there was reverted a few minutes later, every time.
     """
+    from state import load_branch_config, save_branch_config
+
     branch_path = resolve_branch_path(name, branch_id)
 
-    manifest = load_json(branch_path / "branch.json")
+    config = load_branch_config(branch_path)
     if req.max_iter is not None:
-        manifest["max_iter"] = req.max_iter
-    from state.persistence import _atomic_write_json
-
-    _atomic_write_json(branch_path / "branch.json", manifest)
+        config.max_iter = req.max_iter
+    save_branch_config(branch_path, config)
 
     return {"status": "configured", "branch": branch_id}
 

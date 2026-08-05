@@ -6,6 +6,9 @@ Three cleanly separated types:
 - BranchManifest: thin branch identity and control (branch.json)
 - IterState: per-iteration work products and status (iter_N/state.json)
 
+Plus one input type:
+- BranchConfig: frontend-owned knobs the worker only reads (branch_config.json)
+
 Also retained:
 - MainState: minimal state for the launcher (analyze, strategize, dispatch)
 - BranchResult: summary of a completed branch
@@ -55,11 +58,28 @@ class StrategyInfo(BaseModel):
     key_parameters: List[str] = Field(default_factory=list)
 
 
+class BranchConfig(BaseModel):
+    """
+    Frontend-owned branch settings, stored as ``branch_config.json``.
+
+    Deliberately its own file rather than fields on ``BranchManifest``: the API
+    writes this, the worker only ever reads it. The manifest cannot hold it,
+    because the worker keeps that model in memory across a whole node — an LLM
+    call or a tuner run, minutes at a time — and rewrites it wholesale
+    afterwards, which reverted anything the API had edited in the meantime.
+    One writer per file, so there is nothing to race.
+    """
+
+    max_iter: int
+
+
 class BranchManifest(BaseModel):
     """
     Thin branch manifest stored as ``branch.json``.
 
-    Contains identity, control, and aggregated results.
+    Contains identity, control, and aggregated results — everything here is
+    produced by the worker, which is its only writer. Settings the user edits
+    live in ``BranchConfig`` instead.
     No work products — those live in ``iter_N/state.json``.
     """
 
@@ -73,7 +93,6 @@ class BranchManifest(BaseModel):
         0  # Total iterations used by ancestors (path budget mode)
     )
     current_iter: int = 1
-    max_iter: int
     status: str = (
         "initialized"  # initialized | running | success | failed | branching | stopped
     )
@@ -121,13 +140,16 @@ class WorkingState(Context, BranchManifest, IterState):
     Unified view composed of Context, BranchManifest, and IterState.
     Used exclusively as the input/output type for optimization nodes.
 
-    ``problem_yaml`` and ``ref_kernel`` are read fresh from disk by the
-    worker each iteration — never persisted or cached.
+    ``problem_yaml``, ``ref_kernel`` and ``max_iter`` are read fresh from disk
+    by the worker each iteration — never persisted or cached. ``max_iter`` has
+    no default on purpose: a compose that forgot to supply it should fail
+    validation loudly rather than hand the nodes a budget of zero.
     """
 
     problem_yaml: str = ""  # populated from source file by worker
     ref_kernel: str = ""  # populated from source file by worker
     branch_path: str = ""  # set at runtime by worker, not persisted
+    max_iter: int  # read from branch_config.json by worker, not persisted here
     sub_strategies: Optional[List[dict]] = None  # passed from decide node to master
 
 

@@ -547,6 +547,7 @@ MODELS = {
             "glm-5.2",
             "kimi-k2.6",
             "kimi-k2.7",
+            "kimi-k3",
             "qwen3.5",
             "qwen3.5-122b",
             "qwen3.5-int4",
