@@ -6,9 +6,10 @@ element-wise against this reference's output.
 
 PyTorch is an OPTIONAL dependency: only problems whose ref.py imports torch
 need it installed. Install into the interpreter that runs the reference (the
-ktt conda env):
-    /home/u550615/miniconda3/envs/ktt/bin/pip install torch \\
-        --index-url https://download.pytorch.org/whl/cu124
+ktt conda env). PyPI's Linux wheels bundle their own CUDA runtime, so:
+    python -m pip install torch
+(to pin a specific bundled CUDA instead:
+    python -m pip install torch --index-url https://download.pytorch.org/whl/cu124)
 
 The reference is split into two functions so CACAO can time just the GPU op:
 
@@ -24,9 +25,8 @@ try:
 except ImportError as e:
     raise ImportError(
         "ref.py needs PyTorch, an optional dependency. Install it into the "
-        "interpreter that runs the reference (the ktt conda env):\n"
-        "  /home/u550615/miniconda3/envs/ktt/bin/pip install torch "
-        "--index-url https://download.pytorch.org/whl/cu124"
+        "interpreter that runs the reference (e.g. the ktt conda env):\n"
+        "  python -m pip install torch"
     ) from e
 
 

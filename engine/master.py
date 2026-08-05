@@ -232,12 +232,94 @@ def _init_branch(
     return branch_path
 
 
+# Module-level loader executed by ``python3 -c`` in _preflight_python_reference.
+# Mirrors utils.python_ref_runner.load_ref_module so module-level import errors
+# (e.g. missing torch) surface exactly as they will during tuning.
+_REF_LOADER_SNIPPET = (
+    "import importlib.util,sys;"
+    "spec=importlib.util.spec_from_file_location('ref',sys.argv[1]);"
+    "mod=importlib.util.module_from_spec(spec);"
+    "spec.loader.exec_module(mod)"
+)
+
+
+async def _preflight_python_reference(problem_yaml: str) -> bool:
+    """Fail fast when a ``reference.type: python`` ref.py cannot be imported.
+
+    The C++ driver computes the reference by invoking
+    ``python3 -m utils.python_ref_runner`` once per evaluated config, so a
+    missing ref.py dependency (typically the optional ``torch``) would
+    otherwise surface only as every tuning config failing validation — after
+    the LLM iterations were already spent. This loads ref.py module-level in a
+    ``python3`` subprocess (the same interpreter the driver lambda will use)
+    before any LLM work. Returns False (abort) on failure, True otherwise.
+    Silent no-op for non-python references.
+    """
+    import yaml as _yaml
+
+    from utils.cuda_env import get_subprocess_env
+
+    try:
+        cfg = _yaml.safe_load(problem_yaml) or {}
+    except Exception:
+        return True
+    ref = cfg.get("reference") or {}
+    if str(ref.get("type", "cuda")).lower() != "python":
+        return True
+
+    problem_dir = _cfg.get_problem_dir()
+    ref_path = problem_dir / ref.get("file", "ref.py")
+    if not ref_path.exists():
+        log(f"Python reference not found at {ref_path}", "ERROR")
+        return False
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "python3",
+            "-c",
+            _REF_LOADER_SNIPPET,
+            str(ref_path),
+            cwd=str(problem_dir),
+            env=get_subprocess_env(),
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=120)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            log(f"Python reference import check timed out on {ref_path}", "ERROR")
+            return False
+    except FileNotFoundError:
+        log(
+            "python3 not found on PATH — a python reference cannot run "
+            "(the driver invokes python3 -m utils.python_ref_runner)",
+            "ERROR",
+        )
+        return False
+
+    if proc.returncode != 0:
+        log(
+            f"Python reference {ref_path} failed to import:\n"
+            f"{stderr_b.decode(errors='replace').strip()}",
+            "ERROR",
+        )
+        return False
+    log(f"Python reference {ref_path.name} imports cleanly", "SUCCESS")
+    return True
+
+
 async def run_optimization_engine(
     problem_yaml: str, ref_kernel: str, resume_states: list = None
 ):
     """
     Main entry point for optimization execution.
     """
+    if not await _preflight_python_reference(problem_yaml):
+        log("Aborting run: fix the reference issue above and retry.", "ERROR")
+        return
+
     print("\n" + "=" * 60)
     print("  PHASE 1: Analysis & Strategy")
     print("=" * 60)

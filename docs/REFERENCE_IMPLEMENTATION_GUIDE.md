@@ -126,6 +126,62 @@ void reference(const float* x, float* y) {
 
 Here `N` is a compile-time constant injected via `-DN=1024`.
 
+## Python Reference Rules
+
+For `reference.type: python`:
+
+```yaml
+reference:
+  type: python
+  file: ref.py
+  function: reference
+```
+
+Unlike CUDA/`cpu_c`, the Python ABI passes everything by name. `ref.py` must define the referenced function as:
+
+```python
+def reference(scalars, buffers):
+    # scalars: {name: value}
+    # buffers: {name: flat np.ndarray} — read/readwrite hold the real inputs,
+    #          write buffers are zeros
+    ...
+    return result  # np.ndarray with exactly the validated buffer's element count
+```
+
+Rules:
+- return one flat result matching the validated buffer's element count and order (e.g. row-major for matrices)
+- anything with `.cpu().numpy()` (e.g. a torch tensor) is accepted and converted automatically
+- keep it simple and correct; validation runs it once per evaluated config
+
+How it runs: `inputs.hpp` registers one KTT `SetReferenceComputation` per validated
+buffer; the driver's lambda dumps the input buffers to `cacao_in_<name>.bin` and
+invokes `python3 -m utils.python_ref_runner`, which loads `ref.py`, calls the
+function, and writes the result back for KTT to compare.
+
+Optional dependencies: `numpy` and `pyyaml` are always available (engine deps).
+Anything else `ref.py` imports (e.g. `torch`, see `problems/mmul_pytorch`) is an
+optional dependency of that problem only — plain `python -m pip install torch`
+is enough (PyPI's Linux wheels bundle their own CUDA runtime; the system CUDA
+toolkit version is irrelevant to torch). At engine start, `ref.py` is imported in
+a `python3` subprocess; if the import fails, the run aborts immediately with the
+error instead of wasting LLM iterations on configs that all fail validation.
+
+Optional GPU-only timing (`prepare_input`): if `ref.py` also defines
+
+```python
+def prepare_input(scalars, buffers):  # H2D transfer + setup — NOT timed
+    ...
+```
+
+then the reference function takes `prepared` instead of `(scalars, buffers)` and
+`utils/torch_ref_timer` can time just the device op with `torch.cuda.Event`
+(min over several single calls), excluding transfers. Without `prepare_input`,
+validation still works unchanged, but the reference time falls back to KTT's
+coarse wall clock of the entire runner process (Python startup + imports +
+H2D + kernel + D2H) — for a torch reference that is dominated by `import torch`
+(~seconds), so every reported speedup becomes meaningless. Always define
+`prepare_input` for GPU references; CPU/numpy references can skip it.
+
 ## Mapping from `problem.yaml`
 
 Given:

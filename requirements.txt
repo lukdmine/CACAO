@@ -20,3 +20,11 @@ langchain-google-genai>=1.0.0
 fastapi>=0.104.0
 uvicorn>=0.24.0
 watchfiles>=1.0.0  # Required for uvicorn --reload exclude support
+
+# --- Optional ---
+# PyTorch is NOT required by the engine. Only problems whose ref.py imports it
+# (reference.type: python with a GPU reference, e.g. problems/mmul_pytorch)
+# need it. Plain PyPI wheels on Linux x86_64 bundle their own CUDA runtime
+# (nvidia-*-cu12 wheels), so no CUDA toolkit version match is needed:
+#   python -m pip install torch
+# (to pin a specific bundled CUDA instead: --index-url https://download.pytorch.org/whl/cu124)

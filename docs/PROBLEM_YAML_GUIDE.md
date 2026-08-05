@@ -187,11 +187,20 @@ reference:
   function: averages_reference
 ```
 
+### Python reference
+
+```yaml
+reference:
+  type: python
+  file: ref.py
+  function: gemm_reference
+```
+
 ### Supported fields
 
 | Field | Required | Type | Allowed values / behavior |
 |---|---|---|---|
-| `type` | no | string | `cuda` or `cpu_c`; defaults to `cuda` |
+| `type` | no | string | `cuda`, `cpu_c`, or `python`; defaults to `cuda` |
 | `file` | yes | string | Path to reference source |
 | `function` | yes | string | Reference function name |
 | `block_x` | CUDA only | int | Optional, defaults to `8` |
@@ -207,6 +216,12 @@ reference:
   - `file` should point to a C or C++ source file such as `.c`, `.cc`, `.cpp`, or `.cxx`.
   - The source is compiled into a shared object at runtime.
   - The function must be exported with `extern "C"` if using C++.
+- `type: python`
+  - `file` should point to a Python file, usually `ref.py`, defining `function(scalars, buffers)`.
+  - `scalars` is a dict of scalar name → value; `buffers` is a dict of buffer name → flat `np.ndarray` (read/readwrite buffers hold the real input data, write buffers are zeros).
+  - The return value (a `np.ndarray`, or anything with `.cpu().numpy()` such as a torch tensor) must have exactly as many elements as the validated buffer.
+  - Third-party imports in `ref.py` (e.g. `torch`, see `problems/mmul_pytorch`) are optional dependencies of that problem only — they are never needed by the engine itself. Install with plain `python -m pip install torch` (PyPI's Linux wheels bundle their own CUDA runtime). The engine imports `ref.py` in a `python3` subprocess at startup and aborts the run with the import error if it fails.
+  - An optional `prepare_input(scalars, buffers)` splits setup (e.g. host→device transfer) from the reference function, which then takes `prepared` instead. It is only needed for precise GPU-only reference timing; validation works without it, but the reference time then falls back to KTT's coarse wall clock of the whole Python process (startup + imports included), making speedup numbers meaningless — GPU references should always define it.
 
 ### CPU reference ABI
 
