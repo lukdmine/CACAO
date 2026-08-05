@@ -10,6 +10,7 @@ todo
 text/
 ktt-mcp/
 data/
+.env.karolina
 
 # Internal working notes (not for submission)
 AUDIT.md
