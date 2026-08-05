@@ -112,6 +112,41 @@ def reference_build_extras(problem_dir) -> tuple[list, list]:
     return sources, flags
 
 
+def compile_dump_inputs(
+    dump_cpp: Path,
+    out_binary: Path,
+    problem_dir: Path,
+    repo_root: Path = REPO_ROOT,
+    timeout: float = 60.0,
+) -> BuildResult:
+    """Compile the standalone input-dump tool (utils/inputs.generate_dump_inputs_cpp).
+
+    Includes inputs.hpp (from ``problem_dir``) so the ``cacao_ref::h_*`` statics
+    build the real input data at static-init. No ktt::Tuner is instantiated and
+    no KTT symbols are called, but libktt.so is linked to resolve anything Ktt.h
+    pulls in transitively. Run the binary with cwd = the desired output dir.
+    """
+    cmd = [
+        "g++",
+        "-std=c++17",
+        "-m64",
+        "-O3",
+        f"-I{repo_root / 'KTT' / 'Source'}",
+        f"-I{problem_dir}",
+        str(dump_cpp),
+        str(repo_root / "libktt.so"),
+        f"-Wl,-rpath,{repo_root}",
+        "-o",
+        str(out_binary),
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return BuildResult(False, None, f"compile timed out after {timeout:.0f}s", cmd)
+    ok = proc.returncode == 0 and out_binary.exists()
+    return BuildResult(ok, out_binary if ok else None, proc.stderr, cmd)
+
+
 def compile_framework(
     iter_dir,
     repo_root: Path = REPO_ROOT,

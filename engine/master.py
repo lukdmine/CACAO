@@ -10,6 +10,7 @@ per branch.
 """
 
 import asyncio
+import re
 from pathlib import Path
 
 import config as _cfg
@@ -29,6 +30,154 @@ from state import (
     load_branch_manifest,
     read_requeue,
 )
+
+
+async def _time_python_reference_once(problem_dir: Path, output_dir: Path) -> None:
+    """Time a python reference's GPU op once, up-front, on the real inputs.
+
+    For ``reference.type: python`` only: compiles+runs a standalone dump tool
+    (which includes inputs.hpp, so the ``cacao_ref::h_*`` statics build the real,
+    deterministic input data) to materialize ``cacao_in_<name>.bin``, then runs
+    ``utils.torch_ref_timer`` — it loads ref.py, calls ``prepare_input`` (H2D,
+    not timed), and times the reference function via ``torch.cuda.Event`` (min
+    over a few single-call runs). The result (µs) is persisted to
+    reference_time.json (first-write-wins), so every iteration's speedup uses
+    this precise GPU-only value instead of KTT's coarse wall-clock time.
+
+    Silent no-op for non-python references and on any failure (no torch/CUDA, no
+    ``prepare_input``, compile error): KTT's coarse post-tune time remains the
+    fallback, written by run_node's existing parse path. Skipped on resume when
+    reference_time.json already exists.
+    """
+    import sys
+    import yaml as _yaml
+
+    from utils.inputs import generate_dump_inputs_cpp, load_inputs_spec
+    from utils.build import compile_dump_inputs
+    from utils.results import load_reference_time, save_reference_time
+    from utils.cuda_env import get_subprocess_env
+    from utils.gpu_lock import acquire_gpu_lock
+
+    if load_reference_time(output_dir) is not None:
+        return  # resume: already timed (first-write-wins persists it)
+
+    problem_dir = Path(problem_dir).resolve()
+    output_dir = Path(output_dir).resolve()
+
+    try:
+        cfg = _yaml.safe_load((problem_dir / "problem.yaml").read_text()) or {}
+    except Exception:
+        return
+    ref = cfg.get("reference") or {}
+    if str(ref.get("type", "cuda")).lower() != "python":
+        return
+    ref_file = ref.get("file", "ref.py")
+    ref_function = ref.get("function", "")
+
+    timing_dir = output_dir / "_ref_timing"
+    timing_dir.mkdir(parents=True, exist_ok=True)
+    dump_cpp = timing_dir / "dump_inputs.cpp"
+    dump_bin = timing_dir / "dump_inputs"
+
+    try:
+        spec = load_inputs_spec(problem_dir / "inputs.yaml")
+        dump_cpp.write_text(generate_dump_inputs_cpp(spec))
+    except Exception as e:
+        log(f"reference timing: could not generate dump_inputs.cpp: {e}", "WARN")
+        return
+
+    build = compile_dump_inputs(dump_cpp, dump_bin, problem_dir)
+    if not build.ok:
+        log(
+            f"reference timing: dump_inputs compile failed — "
+            f"falling back to KTT coarse time: {build.stderr}",
+            "WARN",
+        )
+        return
+
+    async with acquire_gpu_lock():
+        # Dump the real inputs (cwd = timing_dir so the .bin land there).
+        try:
+            dump_proc = await asyncio.create_subprocess_exec(
+                str(dump_bin),
+                cwd=str(timing_dir),
+                env=get_subprocess_env(),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, stderr_b = await asyncio.wait_for(
+                    dump_proc.communicate(), timeout=300
+                )
+            except asyncio.TimeoutError:
+                log("reference timing: dump_inputs timed out", "WARN")
+                dump_proc.kill()
+                await dump_proc.wait()
+                return
+            if dump_proc.returncode != 0:
+                log(
+                    f"reference timing: dump_inputs run failed — "
+                    f"falling back to KTT coarse time: {stderr_b.decode(errors='replace')}",
+                    "WARN",
+                )
+                return
+        except Exception as e:
+            log(f"reference timing: dump_inputs run error: {e}", "WARN")
+            return
+
+        timer_cmd = [
+            sys.executable,
+            "-m",
+            "utils.torch_ref_timer",
+            "--inputs",
+            str(problem_dir / "inputs.yaml"),
+            "--ref",
+            str(problem_dir / ref_file),
+            "--function",
+            ref_function,
+            "--inputs-dir",
+            str(timing_dir),
+        ]
+        try:
+            timer_proc = await asyncio.create_subprocess_exec(
+                *timer_cmd,
+                cwd=str(problem_dir),
+                env=get_subprocess_env(),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    timer_proc.communicate(), timeout=300
+                )
+            except asyncio.TimeoutError:
+                log("reference timing: torch_ref_timer timed out", "WARN")
+                timer_proc.kill()
+                await timer_proc.wait()
+                return
+        except Exception as e:
+            log(f"reference timing: torch_ref_timer error: {e}", "WARN")
+            return
+
+        if timer_proc.returncode != 0:
+            log(
+                f"reference timing skipped (torch_ref_timer exit "
+                f"{timer_proc.returncode}) — falling back to KTT coarse time: "
+                f"{stderr_b.decode(errors='replace').strip()}",
+                "WARN",
+            )
+            return
+
+    # Parse outside the GPU lock: matching + persistence don't touch the GPU.
+    out = stdout_b.decode(errors="replace")
+    m = re.search(r"^CACAO_REF_TIME_US=([0-9.]+)$", out, re.MULTILINE)
+    if not m:
+        log(f"reference timing: unparseable timer output {out[:200]!r}", "WARN")
+        return
+    us = float(m.group(1))
+
+    save_reference_time(output_dir, us)
+    log(f"Reference time (precise, GPU-only): {us:.2f} µs", "SUCCESS")
 
 
 def _init_branch(
@@ -161,6 +310,13 @@ async def run_optimization_engine(
     print("\n" + "=" * 60)
     print("  PHASE 2: Parallel Branch Execution")
     print("=" * 60)
+
+    # Precise GPU-only reference timing for python refs: once, up-front, on the
+    # real inputs. Non-python refs and any failure fall back to KTT's coarse
+    # post-tune time. No-op on resume (reference_time.json already exists).
+    from config import get_problem_dir
+
+    await _time_python_reference_once(get_problem_dir(), get_output_dir())
 
     # No lock guards `busy` or the exit check: every read/write below sits
     # between awaits, which is atomic under asyncio's cooperative scheduler.
