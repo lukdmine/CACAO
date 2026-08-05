@@ -21,22 +21,27 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-_DTYPE_MAP = {"float": np.float32, "int": np.int32}
+DTYPE_MAP = {"float": np.float32, "int": np.int32}
 
 
-def _load_ref_function(ref_path: Path, function_name: str | None = None) -> callable:
-    """Load the python reference file and return the requested callable.
+def load_ref_module(ref_path: Path):
+    """Load ref.py as a module and return it (executes module-level code)."""
+    spec = importlib.util.spec_from_file_location("ref", ref_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _resolve_ref_function(
+    mod, ref_path: Path, function_name: str | None = None
+) -> callable:
+    """Resolve the reference callable from an already-loaded module.
 
     If ``function_name`` is given, look it up by name and verify it is callable
     and defined in ref.py. Otherwise fall back to the first non-dunder callable
     that is not imported from another module, preserving backwards-compatible
     direct CLI use.
     """
-
-    spec = importlib.util.spec_from_file_location("ref", ref_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-
     if function_name:
         obj = getattr(mod, function_name, None)
         if callable(obj) and getattr(obj, "__module__", None) == "ref":
@@ -58,67 +63,81 @@ def _load_ref_function(ref_path: Path, function_name: str | None = None) -> call
     )
 
 
-def _eval_size(size_expr: str, scalars: dict) -> int:
+def _load_ref_function(ref_path: Path, function_name: str | None = None) -> callable:
+    """Load the python reference file and return the requested callable."""
+    return _resolve_ref_function(load_ref_module(ref_path), ref_path, function_name)
+
+
+def eval_size(size_expr: str, scalars: dict) -> int:
     """Evaluate a size expression like 'kSizeM * kSizeK' using scalar values."""
     # Only allow simple arithmetic and known scalar names
     ns = {**scalars}
     return int(eval(size_expr, {"__builtins__": {}}, ns))
 
 
+def load_inputs(inputs_yaml: Path, bin_dir: Path) -> tuple[dict, dict, dict]:
+    """Load (scalars, buffers, meta) from inputs.yaml + cacao_in_<name>.bin files.
+
+    The .bin files are written beforehand under ``bin_dir`` — by the C++ driver
+    during tuning (its cwd; per-iteration validation path) or by the standalone
+    dump tool (reference-timing path, see utils.inputs.generate_dump_inputs_cpp).
+    read/readwrite buffers hold the real dumped data, write buffers are zeros;
+    meta maps buffer name -> {"dtype", "size"} so callers can validate results.
+    """
+    spec = yaml.safe_load(Path(inputs_yaml).read_text()) or {}
+    args = spec.get("args", [])
+    scalars = {a["name"]: a["value"] for a in args if a["kind"] == "scalar"}
+    buffers = {}
+    meta = {}
+    for a in args:
+        if a["kind"] != "buffer":
+            continue
+        name = a["name"]
+        dtype = DTYPE_MAP[a["dtype"]]
+        size = eval_size(a["size"], scalars)
+        if a.get("access", "read") in ("read", "readwrite"):
+            in_file = bin_dir / f"cacao_in_{name}.bin"
+            if not in_file.exists():
+                raise FileNotFoundError(
+                    f"{in_file} not found for read-buffer '{name}'. It is written "
+                    "beforehand by the C++ driver or the standalone dump tool."
+                )
+            raw = in_file.read_bytes()
+            arr = np.frombuffer(raw, dtype=dtype).copy()
+            if len(arr) != size:
+                raise RuntimeError(
+                    f"Buffer '{name}': expected {size} elements of {dtype.__name__} "
+                    f"({size * np.dtype(dtype).itemsize} bytes) but "
+                    f"{in_file} is {len(raw)} bytes ({len(arr)} elements)."
+                )
+            buffers[name] = arr
+        else:
+            buffers[name] = np.zeros(size, dtype=dtype)
+        meta[name] = {"dtype": dtype, "size": size}
+    return scalars, buffers, meta
+
+
 def run(
     inputs_yaml: Path, ref_py: Path, target: str, output: Path, function_name: str | None = None
 ) -> None:
-    spec = yaml.safe_load(inputs_yaml.read_text())
-    args = spec.get("args", [])
-
-    scalars = {}
-    buffers = {}
-    sizes = {}
-    dtypes = {}
-    accesses = {}
-    target_entry = None
-
-    for a in args:
-        if a["kind"] == "scalar":
-            scalars[a["name"]] = a["value"]
-        elif a["kind"] == "buffer":
-            sizes[a["name"]] = a["size"]
-            dtypes[a["name"]] = a["dtype"]
-            accesses[a["name"]] = a["access"]
-
-    # Load input buffers from binary files written by the C++ lambda
-    for name, access in accesses.items():
-        dtype = _DTYPE_MAP[dtypes[name]]
-        size = _eval_size(sizes[name], scalars)
-        if access in ("read", "readwrite"):
-            in_file = Path(f"cacao_in_{name}.bin")
-            if in_file.exists():
-                raw = in_file.read_bytes()
-                arr = np.frombuffer(raw, dtype=dtype).copy()
-                if len(arr) != size:
-                    raise RuntimeError(
-                        f"Buffer '{name}': expected {size} elements of {dtype.__name__} "
-                        f"({size * np.dtype(dtype).itemsize} bytes) but "
-                        f"cacao_in_{name}.bin is {len(raw)} bytes ({len(arr)} elements)."
-                    )
-                buffers[name] = arr
-            else:
-                raise FileNotFoundError(
-                    f"cacao_in_{name}.bin not found for read-buffer '{name}'. "
-                    "The C++ driver should write this file before invoking the runner."
-                )
-        else:
-            buffers[name] = np.zeros(size, dtype=dtype)
-
-        if name == target:
-            target_entry = {"name": name, "dtype": dtype, "size": size}
-
-    if target_entry is None:
+    # The C++ lambda dumps the bins into the driver's cwd, which is our cwd.
+    scalars, buffers, meta = load_inputs(inputs_yaml, Path("."))
+    if target not in meta:
         raise ValueError(f"Target buffer '{target}' not found in inputs.yaml args.")
+    target_entry = {"name": target, **meta[target]}
 
-    ref_func = _load_ref_function(ref_py, function_name)
+    mod = load_ref_module(ref_py)
+    ref_func = _resolve_ref_function(mod, ref_py, function_name)
+    prepare = getattr(mod, "prepare_input", None)
 
-    result = ref_func(scalars, buffers)
+    if prepare is not None:
+        prepared = prepare(scalars, buffers)
+        result = ref_func(prepared)
+        if hasattr(result, "cpu"):  # device tensor -> host numpy
+            result = result.cpu().numpy()
+    else:
+        result = ref_func(scalars, buffers)
+
     if not isinstance(result, np.ndarray):
         result = np.asarray(result, dtype=target_entry["dtype"])
 
