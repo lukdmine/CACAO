@@ -19,6 +19,7 @@ from nodes.decide import decide_node
 from config import get_problem_dir
 from utils.log import log
 from state import (
+    load_branch_config,
     load_branch_manifest,
     save_branch_manifest,
     load_iter_state_if_exists,
@@ -69,8 +70,11 @@ def _compose_working_state(
 ) -> WorkingState:
     """Assemble a unified model view for nodes from the three Pydantic models.
 
-    Source files (problem.yaml, reference kernel) are always read fresh
-    from disk so that user edits propagate immediately.
+    Source files (problem.yaml, reference kernel) and branch_config.json are
+    always read fresh from disk so that user edits propagate immediately. The
+    manifest cannot carry max_iter for that: this worker rewrites branch.json
+    after every node from a model it has held since the branch started, so a
+    value the API wrote mid-node was reverted before anything read it.
     """
     working_dict = {}
     working_dict.update(context.model_dump())
@@ -79,6 +83,7 @@ def _compose_working_state(
     working_dict["branch_path"] = str(branch_path)
     working_dict["problem_yaml"] = _read_fresh_problem_yaml(context.gpu_info)
     working_dict["ref_kernel"] = _read_fresh_ref_kernel()
+    working_dict["max_iter"] = load_branch_config(branch_path).max_iter
 
     return WorkingState.model_validate(working_dict)
 
@@ -230,13 +235,6 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
                     prev_state = load_iter_state_if_exists(branch_path, iter_num - 1)
                 iter_state = create_initial_iter_state(iter_num, prev_state)
                 save_iter_state(branch_path, iter_num, iter_state)
-
-            # Re-read config fields from disk (API writes them directly)
-            try:
-                disk_manifest = load_branch_manifest(branch_path)
-                manifest.max_iter = disk_manifest.max_iter
-            except Exception as e:
-                log(f"Failed to reload manifest for {strategy_name}: {e}", "WARN")
 
             # Check for control signals before each node
             signal = read_control_signal(branch_path)

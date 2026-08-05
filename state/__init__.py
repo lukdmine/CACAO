@@ -2,8 +2,8 @@
 State management for the CUDA Agentic Optimizer.
 
 Provides:
-  - **types** – ``MainState``, ``Context``, ``BranchManifest``, ``IterState``, ``BranchResult``, ``SubStrategyDict``
-  - **persistence** – save/load for context, branch manifests, and iteration states
+  - **types** – ``MainState``, ``Context``, ``BranchConfig``, ``BranchManifest``, ``IterState``, ``BranchResult``, ``SubStrategyDict``
+  - **persistence** – save/load for context, branch config, branch manifests, and iteration states
   - **control** – file-based control signals, re-queue, and branch revert
   - **history** – LLM prompt formatting for iteration history and parent context
 """
@@ -12,6 +12,7 @@ Provides:
 from state.types import (
     MainState,
     Context,
+    BranchConfig,
     BranchManifest,
     IterState,
     BranchResult,
@@ -25,6 +26,9 @@ from state.types import (
 from state.persistence import (
     save_context,
     load_context_for_branch,
+    save_branch_config,
+    load_branch_config,
+    grant_one_more_iteration,
     save_branch_manifest,
     load_branch_manifest,
     save_iter_state,
@@ -57,6 +61,7 @@ __all__ = [
     # Types
     "MainState",
     "Context",
+    "BranchConfig",
     "BranchManifest",
     "IterState",
     "BranchResult",
@@ -67,6 +72,9 @@ __all__ = [
     # Persistence
     "save_context",
     "load_context_for_branch",
+    "save_branch_config",
+    "load_branch_config",
+    "grant_one_more_iteration",
     "save_branch_manifest",
     "load_branch_manifest",
     "save_iter_state",

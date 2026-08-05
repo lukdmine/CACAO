@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from state.persistence import (
+    grant_one_more_iteration,
     load_branch_manifest,
     save_branch_manifest,
     load_iter_state,
@@ -140,8 +141,7 @@ def revert_branch_on_disk(
     manifest.status = "running"
     manifest.pre_stop_status = None
 
-    if manifest.current_iter >= manifest.max_iter:
-        manifest.max_iter = manifest.current_iter + 1
+    grant_one_more_iteration(branch_path, manifest.current_iter)
 
     _inject_user_message(iter_state, message)
     # Re-run propose → decide so the agent reconsiders with fresh analysis
@@ -173,8 +173,8 @@ def continue_branch_on_disk(
     Re-open a dead branch (success/failed/branching) so it continues
     from its current iteration without deleting any work.
 
-    Sets status to ``running``, bumps ``max_iter`` if needed, and
-    optionally appends a user message to the current iteration.
+    Sets status to ``running``, lifts the iteration budget if the branch has
+    exhausted it, and optionally appends a user message to the current iteration.
     """
     branch_path = Path(branch_path)
     manifest = load_branch_manifest(branch_path)
@@ -188,8 +188,7 @@ def continue_branch_on_disk(
     manifest.status = "running"
     manifest.pre_stop_status = None
 
-    if manifest.current_iter >= manifest.max_iter:
-        manifest.max_iter = manifest.current_iter + 1
+    grant_one_more_iteration(branch_path, manifest.current_iter)
 
     iter_state = load_iter_state(branch_path, manifest.current_iter)
     if message:

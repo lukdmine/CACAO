@@ -1,10 +1,12 @@
-"""Load/save helpers for Context, BranchManifest, and IterState."""
+"""Load/save helpers for Context, BranchConfig, BranchManifest, and IterState."""
 
 import json
 from pathlib import Path
 from typing import Optional
 
-from state.types import Context, BranchManifest, IterState
+from pydantic import ValidationError
+
+from state.types import Context, BranchConfig, BranchManifest, IterState
 
 
 # --- Atomic JSON write helper ---
@@ -46,6 +48,62 @@ def load_context_for_branch(branch_path: Path) -> Context:
                 return Context.model_validate(json.load(f))
         path = path.parent
     raise FileNotFoundError(f"No context.json found above {branch_path}")
+
+
+# --- Branch config (branch_dir/branch_config.json) ---
+
+# Fallback for a branch that has neither a config file nor a legacy manifest
+# field. Unreachable for a branch created by any version of this code — the
+# manifest required max_iter before the field moved out — but a live run should
+# degrade to the default rather than crash on a malformed directory.
+_MAX_ITER_FALLBACK = 5
+
+
+def save_branch_config(branch_path: Path, config: BranchConfig):
+    """Save frontend-owned branch settings to ``branch_config.json``."""
+    _atomic_write_json(
+        Path(branch_path) / "branch_config.json", config.model_dump()
+    )
+
+
+def load_branch_config(branch_path: Path) -> BranchConfig:
+    """Load ``branch_config.json``, falling back to the legacy manifest field.
+
+    Runs that started before ``max_iter`` moved out of the manifest have no
+    config file, so ``branch.json`` is read instead — a resumed pre-existing run
+    keeps the budget it was started with rather than silently resetting.
+    """
+    branch_path = Path(branch_path)
+    try:
+        with (branch_path / "branch_config.json").open("r") as f:
+            return BranchConfig.model_validate(json.load(f))
+    except (OSError, json.JSONDecodeError, ValidationError):
+        pass
+
+    try:
+        with (branch_path / "branch.json").open("r") as f:
+            legacy = json.load(f).get("max_iter")
+    except (OSError, json.JSONDecodeError):
+        legacy = None
+
+    return BranchConfig(
+        max_iter=legacy if isinstance(legacy, int) else _MAX_ITER_FALLBACK
+    )
+
+
+def grant_one_more_iteration(branch_path: Path, current_iter: int) -> BranchConfig:
+    """Raise ``max_iter`` just enough to let an exhausted branch run again.
+
+    Reviving a branch that stopped because it hit its budget needs the budget
+    lifted, or decide_node terminates it again immediately. A user who already
+    raised the limit past ``current_iter`` keeps their value — the whole point
+    of the config file being theirs to set.
+    """
+    config = load_branch_config(branch_path)
+    if current_iter >= config.max_iter:
+        config.max_iter = current_iter + 1
+        save_branch_config(branch_path, config)
+    return config
 
 
 # --- Branch Manifest (branch_dir/branch.json) ---

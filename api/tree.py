@@ -98,6 +98,10 @@ def _fingerprint(problem_dir: Path, name: str) -> str:
     branches_dir = output_dir / "branches"
     if branches_dir.is_dir():
         paths.extend(sorted(branches_dir.rglob("branch.json")))
+        # branch_config.json is the only file the API itself writes, so leaving
+        # it out would answer 304 to the very poll that should have shown the
+        # user their own edit.
+        paths.extend(sorted(branches_dir.rglob("branch_config.json")))
         paths.extend(sorted(branches_dir.rglob("iter*/state.json")))
 
     for p in paths:
@@ -111,6 +115,7 @@ def _fingerprint(problem_dir: Path, name: str) -> str:
 
 def _scan_branches(branches_dir: Path, name: str, seen: set[str]) -> list[dict]:
     """Recursively scan branch directories and collect branch.json + iter states."""
+    from state import load_branch_config
     from utils.results import get_results_summary, load_reference_time
 
     output_dir = branches_dir.parent
@@ -130,6 +135,8 @@ def _scan_branches(branches_dir: Path, name: str, seen: set[str]) -> list[dict]:
 
         manifest = load_json(branch_file)
         manifest["branch_path"] = str(entry)  # derive from filesystem, not persisted
+        # max_iter lives in branch_config.json, not the manifest — see BranchConfig.
+        manifest["max_iter"] = load_branch_config(entry).max_iter
 
         # Load all iteration states
         iters = []
