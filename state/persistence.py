@@ -1,12 +1,15 @@
 """Load/save helpers for Context, BranchConfig, BranchManifest, and IterState."""
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional
 
 from pydantic import ValidationError
 
 from state.types import Context, BranchConfig, BranchManifest, IterState
+
+logger = logging.getLogger(__name__)
 
 
 # --- Atomic JSON write helper ---
@@ -52,10 +55,9 @@ def load_context_for_branch(branch_path: Path) -> Context:
 
 # --- Branch config (branch_dir/branch_config.json) ---
 
-# Fallback for a branch that has neither a config file nor a legacy manifest
-# field. Unreachable for a branch created by any version of this code — the
-# manifest required max_iter before the field moved out — but a live run should
-# degrade to the default rather than crash on a malformed directory.
+# Last resort for a branch with no config file and no legacy manifest field.
+# Reaching it means a branch runs on a budget nobody chose, which silently
+# truncates it, so it is logged rather than applied quietly.
 _MAX_ITER_FALLBACK = 5
 
 
@@ -66,12 +68,45 @@ def save_branch_config(branch_path: Path, config: BranchConfig):
     )
 
 
+def _migrate_legacy_max_iter(branch_path: Path) -> Optional[BranchConfig]:
+    """Move a pre-split ``max_iter`` out of ``branch.json`` into its own file.
+
+    Returns the migrated config, or None if there was nothing to migrate.
+
+    Reading the legacy field is not enough on its own: ``BranchManifest`` no
+    longer declares ``max_iter``, so the next ``save_branch_manifest`` writes a
+    dict without it and the value is gone for good. The migration therefore has
+    to persist, and has to happen before that save — see its call site there.
+    """
+    branch_path = Path(branch_path)
+    if (branch_path / "branch_config.json").exists():
+        return None
+
+    try:
+        with (branch_path / "branch.json").open("r") as f:
+            legacy = json.load(f).get("max_iter")
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if not isinstance(legacy, int):
+        return None
+
+    config = BranchConfig(max_iter=legacy)
+    try:
+        save_branch_config(branch_path, config)
+    except OSError as e:
+        # Read-only or vanished directory: still report the budget we found.
+        logger.warning("Could not migrate max_iter for %s: %s", branch_path, e)
+    return config
+
+
 def load_branch_config(branch_path: Path) -> BranchConfig:
-    """Load ``branch_config.json``, falling back to the legacy manifest field.
+    """Load ``branch_config.json``, migrating a legacy manifest field if needed.
 
     Runs that started before ``max_iter`` moved out of the manifest have no
-    config file, so ``branch.json`` is read instead — a resumed pre-existing run
-    keeps the budget it was started with rather than silently resetting.
+    config file, so ``branch.json`` is read and migrated — a resumed
+    pre-existing run keeps the budget it was started with rather than silently
+    resetting to the default.
     """
     branch_path = Path(branch_path)
     try:
@@ -80,15 +115,17 @@ def load_branch_config(branch_path: Path) -> BranchConfig:
     except (OSError, json.JSONDecodeError, ValidationError):
         pass
 
-    try:
-        with (branch_path / "branch.json").open("r") as f:
-            legacy = json.load(f).get("max_iter")
-    except (OSError, json.JSONDecodeError):
-        legacy = None
+    migrated = _migrate_legacy_max_iter(branch_path)
+    if migrated is not None:
+        return migrated
 
-    return BranchConfig(
-        max_iter=legacy if isinstance(legacy, int) else _MAX_ITER_FALLBACK
+    logger.warning(
+        "No max_iter for %s (neither branch_config.json nor a legacy manifest "
+        "field) — falling back to %d, which may cut the branch short",
+        branch_path,
+        _MAX_ITER_FALLBACK,
     )
+    return BranchConfig(max_iter=_MAX_ITER_FALLBACK)
 
 
 def grant_one_more_iteration(branch_path: Path, current_iter: int) -> BranchConfig:
@@ -110,9 +147,17 @@ def grant_one_more_iteration(branch_path: Path, current_iter: int) -> BranchConf
 
 
 def save_branch_manifest(branch_path: Path, manifest: BranchManifest):
-    """Save branch manifest to ``branch.json``."""
+    """Save branch manifest to ``branch.json``.
+
+    This write is what destroys a legacy ``max_iter``: the field is no longer on
+    the model, so it silently drops out of the file. Rescue it into its own file
+    first — some save sites (utils/resume.py, for one) run before anything has
+    read the config, so migrating only on read is too late.
+    """
+    branch_path = Path(branch_path)
+    _migrate_legacy_max_iter(branch_path)
     _atomic_write_json(
-        Path(branch_path) / "branch.json", manifest.model_dump(exclude_none=True)
+        branch_path / "branch.json", manifest.model_dump(exclude_none=True)
     )
 
 
