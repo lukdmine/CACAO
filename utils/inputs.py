@@ -81,7 +81,12 @@ def _size_expr(spec: InputsSpec, expr: str) -> str:
 
 def _cpp_escape(text: str) -> str:
     """Escape a string for inclusion in a C++ string literal (path baking)."""
-    return text.replace("\\", "\\\\").replace('"', '\\"')
+    return (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
 
 
 def _file_path(problem_dir, buf: BufferSpec) -> str:
@@ -91,7 +96,7 @@ def _file_path(problem_dir, buf: BufferSpec) -> str:
     header is display-only and a relative path is fine."""
     rel = PurePosixPath(buf.file_name)
     if problem_dir is None:
-        return f"inputs/{rel}" if rel.parent == PurePosixPath(".") else str(rel)
+        return str(PurePosixPath(INPUTS_SUBDIR) / rel)
     return str(Path(problem_dir).resolve() / INPUTS_SUBDIR / rel)
 
 
@@ -384,8 +389,8 @@ def generate_inputs_hpp(spec: InputsSpec, reference: dict = None, problem_dir=No
     python = _is_python_reference(reference)
     ref = cpu or python
     # init=file generators read the problem's inputs/ dir and throw on open/size/read
-    # failure — independent of the reference type (guarded headers, so a python
-    # reference pulling the same includes is fine).
+    # failure — independent of the reference type (a python reference already pulls
+    # both includes, so they are skipped for it).
     file_init = any(b.init == "file" for b in spec.buffers)
 
     out: list[str] = [
@@ -406,7 +411,7 @@ def generate_inputs_hpp(spec: InputsSpec, reference: dict = None, problem_dir=No
         out.append("#include <fstream>")
         out.append("#include <cstring>")
         out.append("#include <stdexcept>")  # the reference lambda throws on failure
-    if file_init:
+    if file_init and not python:
         out.append("#include <fstream>")
         out.append("#include <stdexcept>")
     out += [f"#include {h}" for h in spec.headers]

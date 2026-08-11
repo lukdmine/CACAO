@@ -1,5 +1,6 @@
 """Problem CRUD endpoints."""
 
+import os
 import re
 import shutil
 
@@ -346,9 +347,9 @@ async def upload_input_file(name: str, buffer_name: str, request: Request):
 
     # Belt and braces: the model already rejects absolute paths and '..', but the
     # resolved path staying under inputs/ is what makes this endpoint safe.
-    inputs_dir = problem_dir / INPUTS_SUBDIR
+    inputs_dir = (problem_dir / INPUTS_SUBDIR).resolve()
     path = (inputs_dir / buf.file_name).resolve()
-    if not path.is_relative_to(inputs_dir.resolve()):
+    if not path.is_relative_to(inputs_dir):
         raise HTTPException(
             status_code=400, detail="file_name escapes the inputs/ directory"
         )
@@ -363,23 +364,34 @@ async def upload_input_file(name: str, buffer_name: str, request: Request):
         )
     want = elems * np.dtype(DTYPE_MAP[buf.dtype]).itemsize
 
-    inputs_dir.mkdir(exist_ok=True)
+    # path.parent (not inputs_dir): file_name may name a subdirectory.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a .part file and rename on success: an existing good binary survives
+    # a rejected upload, and os.replace (same fs) is atomic — no torn reads.
+    tmp = path.parent / (path.name + ".part")
     got = 0
     too_big = False
-    with path.open("wb") as f:
-        async for chunk in request.stream():
-            got += len(chunk)
-            if got > want:
-                too_big = True
-                break
-            f.write(chunk)
+    try:
+        with tmp.open("wb") as f:
+            async for chunk in request.stream():
+                got += len(chunk)
+                if got > want:
+                    too_big = True
+                    break
+                f.write(chunk)
+    except Exception:
+        # A disconnect or cancelled request must not leave a partial binary behind —
+        # it would fail the driver's byte-count check minutes into a run.
+        tmp.unlink(missing_ok=True)
+        raise
     if got != want:
-        path.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
         raise HTTPException(
             status_code=400,
             detail=f"Buffer '{buffer_name}' expects {want} bytes ({elems} {buf.dtype}"
             f" elements) but the upload {'exceeds that' if too_big else f'has {got} bytes'}",
         )
+    os.replace(tmp, path)
 
     return {
         "status": "uploaded",

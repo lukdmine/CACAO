@@ -315,6 +315,11 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 try {
                     await uploadProblemInput(res.name, a.name, f);
                     uploaded.push(a.name);
+                    // Keep the Edit-mode status truthful while the dialog stays open.
+                    setServerInputFiles((prev) => ({
+                        ...prev,
+                        [a.name]: { file_name: a.file_name ?? '', exists: true, bytes: f.size },
+                    }));
                 } catch (err) {
                     uploadWarnings.push(
                         `'${a.name}': ${err instanceof Error ? err.message : String(err)}`
