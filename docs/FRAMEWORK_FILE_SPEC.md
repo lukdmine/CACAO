@@ -143,11 +143,16 @@ Everything is direct KTT + stdlib; there is no `cacao::` namespace.
 ### 6.1 The form generates `inputs.hpp`
 
 The create-problem form presents a table; each row is one input (name, dtype,
-access, size, `validate`, and an `init`: preset `random{min,max}` / `zeros`, or a
-**custom** generator body). An optional **shared-setup** block handles
-coupled/derived inputs (a sparse-CSR triple, a matrix + its transpose). The form
-emits `inputs.hpp` **directly** — there is no separate YAML input spec. (A
-raw-editor escape hatch lets power users edit `inputs.hpp` verbatim.)
+access, size, `validate`, and an `init`: preset `random{min,max}` / `zeros`, a
+**custom** generator body, or **file**). With `init: file` + `file_name`, the
+generator reads a raw little-endian binary of the buffer dtype from
+`problems/<slug>/inputs/<file_name>`; the upload endpoint
+(`POST /api/problems/{name}/inputs/{buffer}`) places it there and the byte count
+must equal `size * sizeof(dtype)` — checked at upload, again at driver start. An
+optional **shared-setup** block handles coupled/derived inputs (a sparse-CSR
+triple, a matrix + its transpose). The form emits `inputs.hpp` **directly** —
+there is no separate YAML input spec. (A raw-editor escape hatch lets power
+users edit `inputs.hpp` verbatim.)
 
 ### 6.2 `inputs.hpp` shape (the boundary contract)
 

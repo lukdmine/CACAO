@@ -535,23 +535,25 @@ def load_inputs_spec(path: Path) -> InputsSpec:
     return InputsSpec.model_validate(yaml.safe_load(Path(path).read_text()) or {})
 
 
-def check_input_files(problem_dir, spec: InputsSpec) -> None:
-    """Verify every init=file buffer's binary exists under inputs/.
+def check_input_files(problem_dir, spec: InputsSpec) -> list:
+    """List the init=file buffers whose binary is missing under inputs/.
 
-    Failing here — at problem save or run start — beats the driver aborting at
-    static-init minutes later with an std::runtime_error dug out of a log.
-    The compiled generator still re-checks: the file can be deleted after this.
+    Callers decide the severity: the save flow reports these as warnings (the UI
+    uploads right after saving); the run-start flow must treat any as fatal —
+    better than the driver aborting at static-init minutes later with an
+    std::runtime_error dug out of a log.
     """
     problem_dir = Path(problem_dir)
+    missing = []
     for b in spec.buffers:
-        if b.init == "file":
-            path = problem_dir / INPUTS_SUBDIR / b.file_name
-            if not path.is_file():
-                raise FileNotFoundError(
-                    f"Buffer '{b.name}' has init=file but {path} does not exist — "
-                    f"put the binary ({b.size} {b.dtype} elements, raw "
-                    f"little-endian) in the problem's {INPUTS_SUBDIR}/ directory."
-                )
+        if b.init == "file" and not (problem_dir / INPUTS_SUBDIR / b.file_name).is_file():
+            missing.append(
+                f"buffer '{b.name}' (init=file): "
+                f"{problem_dir / INPUTS_SUBDIR / b.file_name} does not exist — put or "
+                f"upload the binary ({b.size} {b.dtype} elements, raw "
+                f"little-endian) in the problem's {INPUTS_SUBDIR}/ directory"
+            )
+    return missing
 
 
 def ensure_inputs_hpp(problem_dir) -> Path:
@@ -587,21 +589,24 @@ def ensure_inputs_hpp(problem_dir) -> Path:
         reference = (_yaml.safe_load(problem_yaml.read_text()) or {}).get("reference")
 
     spec = load_inputs_spec(inputs_yaml)
-    check_input_files(problem_dir, spec)
+    missing = check_input_files(problem_dir, spec)
+    if missing:
+        raise FileNotFoundError("Missing input files: " + "; ".join(missing))
     out = problem_dir / "inputs.hpp"
     out.write_text(generate_inputs_hpp(spec, reference, problem_dir))
     return out
 
 
-def write_inputs(problem_dir: Path, spec: InputsSpec, reference: dict = None) -> None:
+def write_inputs(problem_dir: Path, spec: InputsSpec, reference: dict = None) -> list:
     """Persist the canonical spec and the generated header side by side.
 
     ``reference`` (the problem.yaml reference mapping) is required for cpu_c
     problems — it shapes the generated header; omitting it yields a CUDA-reference
     header. Callers that regenerate inputs.hpp must pass the problem's reference.
 
-    Raises FileNotFoundError if an init=file buffer's binary is missing from the
-    problem's inputs/ directory.
+    Returns warnings for init=file buffers whose binary is missing — reported,
+    never blocking: the UI uploads binaries right after saving, and
+    ensure_inputs_hpp hard-fails at run start if they never arrived.
     """
     problem_dir = Path(problem_dir)
     problem_dir.joinpath("inputs.yaml").write_text(
@@ -609,7 +614,7 @@ def write_inputs(problem_dir: Path, spec: InputsSpec, reference: dict = None) ->
             spec.model_dump(by_alias=True, exclude_none=True), sort_keys=False
         )
     )
-    check_input_files(problem_dir, spec)
     problem_dir.joinpath("inputs.hpp").write_text(
         generate_inputs_hpp(spec, reference, problem_dir)
     )
+    return check_input_files(problem_dir, spec)
