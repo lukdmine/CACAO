@@ -99,6 +99,7 @@ export interface IterState {
   iter_num: number;
   status: string;
   next_status?: string | null;
+  authoring_scope: "full" | "config_only";
   mode: "fresh" | "retry" | "followup";
   kernel_code: string;
   framework_cpp: string;

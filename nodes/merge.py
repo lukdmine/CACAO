@@ -130,7 +130,7 @@ def print_iteration_timeline(branches_dir: Path) -> None:
             state_path = iter_dir / "state.json"
             if state_path.exists():
                 try:
-                    s = _json.loads(state_path.read_text())
+                    s = _json.loads(state_path.read_text(encoding="utf-8"))
                     action = (s.get("decision") or {}).get("action", "?")
                 except Exception:
                     pass

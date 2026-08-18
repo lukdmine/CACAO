@@ -9,6 +9,7 @@ from typing import List
 import yaml
 
 from nodes.plan import plan_node
+from nodes.author import author_node
 from nodes.implement import implement_node
 from nodes.configure import configure_node
 from nodes.run import run_node
@@ -45,7 +46,7 @@ from state import (
 def _read_fresh_problem_yaml(gpu_info: dict | None) -> str:
     """Re-read problem.yaml from source and apply cached GPU enrichment."""
     problem_dir = get_problem_dir()
-    with open(problem_dir / "problem.yaml") as f:
+    with open(problem_dir / "problem.yaml", encoding="utf-8") as f:
         raw = f.read()
     if gpu_info:
         config = yaml.safe_load(raw)
@@ -57,11 +58,11 @@ def _read_fresh_problem_yaml(gpu_info: dict | None) -> str:
 def _read_fresh_ref_kernel() -> str:
     """Re-read the reference kernel source from the problem directory."""
     problem_dir = get_problem_dir()
-    with open(problem_dir / "problem.yaml") as f:
+    with open(problem_dir / "problem.yaml", encoding="utf-8") as f:
         config = yaml.safe_load(f)
     ref_file = config.get("reference", {}).get("file", "")
     if ref_file:
-        return (problem_dir / ref_file).read_text()
+        return (problem_dir / ref_file).read_text(encoding="utf-8")
     return ""
 
 
@@ -86,6 +87,25 @@ def _compose_working_state(
     working_dict["max_iter"] = load_branch_config(branch_path).max_iter
 
     return WorkingState.model_validate(working_dict)
+
+
+def _dispatch_status(iter_state: IterState) -> str:
+    """Which node runs for this iteration's status.
+
+    decide.py still emits "implementing" and "configuring"; the merged authoring step
+    answers for both when AGENTIC_STEPS is on. Translating here rather than in decide
+    keeps that prompt and its schema untouched, and lets an output directory written
+    before the merge resume from whichever status it stopped at.
+
+    The scope distinction the two statuses carried is not lost: it rides on
+    IterState.authoring_scope, set alongside the status in create_initial_iter_state.
+    """
+    import config as _cfg
+
+    status = iter_state.status
+    if getattr(_cfg, "AGENTIC_STEPS", False) and status in ("implementing", "configuring"):
+        return "authoring"
+    return status
 
 
 def _decompose_to_iter_state(working: WorkingState) -> IterState:
@@ -243,13 +263,15 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
                 if manifest.status == "stopped":
                     await _wait_for_resume(manifest, iter_state, branch_path)
                 continue
-            current_status = iter_state.status
+            current_status = _dispatch_status(iter_state)
 
             # Compose working state for the node
             working = _compose_working_state(context, manifest, iter_state, branch_path)
 
             if current_status == "planning":
                 working = await plan_node(working)
+            elif current_status == "authoring":
+                working = await author_node(working)
             elif current_status == "implementing":
                 working = await implement_node(working)
             elif current_status == "configuring":

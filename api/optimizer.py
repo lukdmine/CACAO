@@ -89,7 +89,8 @@ def _run_target(
                     "model": cfg._current_model,
                     "provider": cfg.get_provider(),
                 }
-            )
+            ),
+            encoding="utf-8",
         )
 
         # Re-write PID file after clean_output_dir
@@ -98,7 +99,7 @@ def _run_target(
         log_path = problem_dir / "output" / "run.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with log_path.open("w") as log_file:
+        with log_path.open("w", encoding="utf-8") as log_file:
             old_stdout, old_stderr = sys.stdout, sys.stderr
             sys.stdout = TeeWriter(old_stdout, log_file)
             sys.stderr = TeeWriter(old_stderr, log_file)
@@ -137,7 +138,7 @@ def _resume_target(
 
         write_pid_file(problem_dir, os.getpid())
 
-        with log_path.open("a") as log_file:
+        with log_path.open("a", encoding="utf-8") as log_file:
             old_stdout, old_stderr = sys.stdout, sys.stderr
             sys.stdout = TeeWriter(old_stdout, log_file)
             sys.stderr = TeeWriter(old_stderr, log_file)
@@ -171,7 +172,8 @@ def _resume_target(
                             "model": cfg._current_model,
                             "provider": cfg.get_provider(),
                         }
-                    )
+                    ),
+                    encoding="utf-8",
                 )
 
                 problem_yaml, ref_kernel = load_problem_inputs(problem_dir)
@@ -285,7 +287,7 @@ def stop_problem(name: str):
 
     log_path = problem_dir / "output" / "run.log"
     if log_path.exists():
-        with log_path.open("a") as f:
+        with log_path.open("a", encoding="utf-8") as f:
             f.write("\n\n[STOPPED] Optimization stopped by user.\n")
 
     return {"status": "stopped", "problem": name}

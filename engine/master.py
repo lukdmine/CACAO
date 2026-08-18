@@ -67,7 +67,7 @@ async def _time_python_reference_once(problem_dir: Path, output_dir: Path) -> No
     output_dir = Path(output_dir).resolve()
 
     try:
-        cfg = _yaml.safe_load((problem_dir / "problem.yaml").read_text()) or {}
+        cfg = _yaml.safe_load((problem_dir / "problem.yaml").read_text(encoding="utf-8")) or {}
     except Exception:
         return
     ref = cfg.get("reference") or {}
@@ -83,7 +83,7 @@ async def _time_python_reference_once(problem_dir: Path, output_dir: Path) -> No
 
     try:
         spec = load_inputs_spec(problem_dir / "inputs.yaml")
-        dump_cpp.write_text(generate_dump_inputs_cpp(spec))
+        dump_cpp.write_text(generate_dump_inputs_cpp(spec), encoding="utf-8")
     except Exception as e:
         log(f"reference timing: could not generate dump_inputs.cpp: {e}", "WARN")
         return

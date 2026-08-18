@@ -160,14 +160,18 @@ def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
     }
     if req.tuning is not None:
         data["tuning"] = req.tuning.model_dump()
+    # Omitted entirely when empty so problem.yaml does not grow a `rules: {text: [],
+    # forbid: []}` stanza on every problem that has none.
+    if req.rules is not None and not req.rules.is_empty():
+        data["rules"] = req.rules.model_dump(exclude_none=True)
     return data
 
 
 def _write_problem_files(problem_dir, problem_data, req: CreateProblemRequest):
     """Write problem.yaml, the reference source, and the inputs.yaml/inputs.hpp pair."""
-    with (problem_dir / "problem.yaml").open("w") as f:
+    with (problem_dir / "problem.yaml").open("w", encoding="utf-8") as f:
         yaml.dump(problem_data, f, default_flow_style=False, sort_keys=False)
-    (problem_dir / _REFERENCE_FILE[req.reference_type]).write_text(_reference_source(req))
+    (problem_dir / _REFERENCE_FILE[req.reference_type]).write_text(_reference_source(req), encoding="utf-8")
     # The reference drives codegen: cpu_c needs its extern "C" declaration, host input
     # copies, and a SetReferenceComputation per validated buffer; python needs a lambda
     # that dumps the buffers and shells out to the runner.
@@ -324,7 +328,7 @@ def get_logs(name: str, tail: int = 200):
     if not log_path.exists():
         return {"log": "", "lines": 0}
 
-    lines = log_path.read_text(errors="replace").splitlines()
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     total = len(lines)
     tail_lines = lines[-tail:] if tail < total else lines
     return {"log": "\n".join(tail_lines), "lines": total, "truncated": total > tail}
@@ -344,19 +348,19 @@ def get_problem(name: str):
     ref_kernel = ""
     ref_kernel_path = problem_dir / "ref_kernel.cu"
     if ref_kernel_path.exists():
-        ref_kernel = ref_kernel_path.read_text()
+        ref_kernel = ref_kernel_path.read_text(encoding="utf-8")
 
     ref_cpu = ""
     ref_cpu_path = problem_dir / "ref_cpu.c"
     if ref_cpu_path.exists():
-        ref_cpu = ref_cpu_path.read_text()
+        ref_cpu = ref_cpu_path.read_text(encoding="utf-8")
 
     # Without this, opening Edit on a python problem and saving would write an empty
     # ref.py — the same way the boundary used to be wiped.
     ref_python = ""
     ref_python_path = problem_dir / _REFERENCE_FILE["python"]
     if ref_python_path.exists():
-        ref_python = ref_python_path.read_text()
+        ref_python = ref_python_path.read_text(encoding="utf-8")
 
     # The structured boundary, not the generated C++. Reloading the spec is what makes
     # Edit lossless: the form never has to reconstruct its state from inputs.hpp.

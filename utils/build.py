@@ -88,7 +88,7 @@ def reference_build_extras(problem_dir) -> tuple[list, list]:
 
     problem_dir = Path(problem_dir)
     try:
-        cfg = yaml.safe_load((problem_dir / "problem.yaml").read_text()) or {}
+        cfg = yaml.safe_load((problem_dir / "problem.yaml").read_text(encoding="utf-8")) or {}
     except Exception:
         return [], []
     ref = cfg.get("reference") or {}
@@ -140,7 +140,7 @@ def compile_dump_inputs(
         str(out_binary),
     ]
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return BuildResult(False, None, f"compile timed out after {timeout:.0f}s", cmd)
     ok = proc.returncode == 0 and out_binary.exists()
@@ -174,7 +174,7 @@ def compile_framework(
         obj = iter_dir / f"{src.stem}.o"
         obj_cmd = object_command(src, obj, repo_root, extra_flags)
         try:
-            proc = subprocess.run(obj_cmd, capture_output=True, text=True, timeout=timeout)
+            proc = subprocess.run(obj_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
         except subprocess.TimeoutExpired:
             return BuildResult(False, None, f"compile timed out after {timeout:.0f}s", obj_cmd)
         if proc.returncode != 0 or not obj.exists():
@@ -183,7 +183,7 @@ def compile_framework(
 
     cmd = compile_command(framework_cpp, out_binary, repo_root, extra_objects)
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return BuildResult(False, None, f"compile timed out after {timeout:.0f}s", cmd)
 

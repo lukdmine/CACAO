@@ -1,0 +1,116 @@
+headers: []
+shared_setup: ''
+args:
+# ---- Qwen3.8-27B GDN shape, straight from the published config.json ----
+#   linear_num_key_heads 16, linear_num_value_heads 48, linear_key/value_head_dim 128.
+#   kT is one problem's sequence length; per BENCHMARK_LANDSCAPE 4.4 a second length
+#   needs a second problem directory.
+- kind: scalar
+  name: kT
+  dtype: int
+  value: 8192
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kHk
+  dtype: int
+  value: 16
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kHv
+  dtype: int
+  value: 48
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kD
+  dtype: int
+  value: 128
+  placements:
+  - host
+  - runtime
+
+# q and k are L2-normalised INSIDE the kernel (the model sets use_qk_l2norm_in_kernel),
+# so only their direction survives and the input range is arbitrary. [-1, 1] uniform.
+- kind: buffer
+  name: q
+  dtype: float
+  size: kT * kHk * kD
+  access: read
+  init: random
+  min: -1
+  max: 1
+  validate: false
+- kind: buffer
+  name: k
+  dtype: float
+  size: kT * kHk * kD
+  access: read
+  init: random
+  min: -1
+  max: 1
+  validate: false
+- kind: buffer
+  name: v
+  dtype: float
+  size: kT * kHv * kD
+  access: read
+  init: random
+  min: -1
+  max: 1
+  validate: false
+
+# g is a per-token LOG decay and must be <= 0. The range is load-bearing, not cosmetic:
+# it was chosen by measurement (see problem.yaml). [-0.0025, 0] is a per-token decay of
+# ~0.9975, matching the slow decay these models are initialised with. Stronger decay
+# (e.g. [-0.1, 0]) makes the state forget within a single chunk, which shrinks the
+# outputs to O(0.006), collapses the dynamic range, and — the real problem — makes a
+# kernel that drops carried history numerically indistinguishable from a correct one.
+- kind: buffer
+  name: g
+  dtype: float
+  size: kT * kHv
+  access: read
+  init: random
+  min: -0.0025
+  max: 0
+  validate: false
+# beta is the delta-rule write strength, a sigmoid output in (0, 1).
+- kind: buffer
+  name: beta
+  dtype: float
+  size: kT * kHv
+  access: read
+  init: random
+  min: 0
+  max: 1
+  validate: false
+
+# o is the validated output, checked at EVERY token. That matters: it is what makes the
+# obvious cheats fail. Dropping the carried state halfway through measures 0.120 against
+# an |o|max of 0.167 (a 72% error), and skipping the inter-chunk term entirely measures
+# 0.168 — both ~1000x the tolerance.
+- kind: buffer
+  name: o
+  dtype: float
+  size: kT * kHv * kD
+  access: write
+  init: zeros
+  validate: true
+# The final recurrent state. NOT validated — utils/python_ref_runner invokes the
+# reference once per target and gives the callable no way to tell which target was
+# asked for, so a second validated buffer cannot be expressed. This is sufficient
+# rather than lax: o at chunk i consumes the state left by chunk i-1, so any error in
+# the recurrence corrupts every later chunk of o. Only the final write after the last
+# chunk is uncovered, which is why problem.yaml carries a text rule requiring it.
+- kind: buffer
+  name: state
+  dtype: float
+  size: kHv * kD * kD
+  access: write
+  init: zeros
+  validate: false

@@ -198,7 +198,7 @@ class TokenTracker:
             "total_tokens": self.total_tokens,
         }
         try:
-            tmp.write_text(json.dumps(data))
+            tmp.write_text(json.dumps(data), encoding="utf-8")
             tmp.replace(path)
         except BaseException:
             tmp.unlink(missing_ok=True)
@@ -212,7 +212,7 @@ class TokenTracker:
         if not path.exists():
             return
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             self.api_calls = data.get("api_calls", 0)
             self.prompt_tokens = data.get("prompt_tokens", 0)
             self.completion_tokens = data.get("completion_tokens", 0)
@@ -259,6 +259,13 @@ class TrackedLLM:
             try:
                 response = await self._llm.ainvoke(*args, **kwargs)
                 global_tracker.add(response)
+
+                # A tool-call response carries its payload in tool_calls and leaves
+                # content empty by construction. It must return before the emptiness
+                # check below, which would otherwise treat every single tool call as a
+                # failed generation and burn five retries with backoff on it.
+                if getattr(response, "tool_calls", None):
+                    return response
 
                 content = getattr(response, "content", None) or ""
                 # Responses API returns content as a list of blocks.
@@ -379,6 +386,14 @@ class TrackedLLM:
     def with_structured_output(self, schema):
         structured_llm = self._llm.with_structured_output(schema)
         return TrackedStructuredLLM(structured_llm, self._llm, schema)
+
+    def bind_tools(self, tools, **kwargs):
+        """Bind tools, keeping retry and token tracking around the bound model.
+
+        Raises whatever the provider raises when it has no tool support — the agentic
+        loop treats that as a signal to fall back rather than something to retry.
+        """
+        return TrackedLLM(self._llm.bind_tools(tools, **kwargs))
 
 
 class TrackedStructuredLLM:
@@ -553,6 +568,8 @@ MODELS = {
             "qwen3.5-int4",
             "deepseek-v4-pro",
             "deepseek-v4-pro-thinking",
+            "deepseek-v4-flash",
+            "deepseek-v4-flash-thinking",
             "deepseek-thinking",
             "command-a",
             "mistral-medium-3.5",
@@ -615,6 +632,25 @@ HISTORY_ITERS = 2  # Number of past iterations to include in LLM context (None =
 INCLUDE_BEST_SO_FAR = (
     True  # Include best-performing iteration's kernel + config in LLM context
 )
+
+# ===== Agentic Steps =====
+# When True, implement+configure run as one tool loop (nodes/author.py) that can
+# compile-check and fix before the iteration is spent. False restores the two
+# single-shot calls; the loop also falls back to them on its own whenever a provider
+# cannot drive tools, so this flag is a kill switch, not the only safety net.
+AGENTIC_STEPS = True
+# Tool calls allowed in one authoring step — a runaway guard, not a working limit.
+# Recorded steps run a median of 12 calls; at 25 three of 72 were cut off mid-fix and
+# ten more came within five calls of it. A step stopped here still costs the iteration.
+STEP_TOOL_BUDGET = 50
+# How much of a sibling branch a step may read. Parallel branches are parallel *bets*;
+# a branch that can read the current leader's kernel converges on it and the run buys
+# one attempt instead of four. So no level exposes another branch's code.
+#   "errors" — index + iteration log + recorded failure analyses (default)
+#   "log"    — index + iteration log
+#   "index"  — the one-line-per-branch header only
+#   "off"    — nothing about other branches
+CROSS_BRANCH_ACCESS = "errors"
 
 
 @dataclass(frozen=True)

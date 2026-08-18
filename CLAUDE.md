@@ -89,8 +89,10 @@ cli.py
        ├─ nodes/strategize.py  # LLM: generate N parallel optimization strategies
        └─ engine/worker.py     # Phase 2: per-branch loop (4 parallel async coroutines)
             ├─ nodes/plan.py         # LLM: detailed implementation plan
-            ├─ nodes/implement.py    # LLM: write kernels.cu
-            ├─ nodes/configure.py    # LLM: fill framework.cpp regions (KTT C++ driver)
+            ├─ nodes/author.py       # LLM tool loop: kernels.cu + framework regions, with compile check
+            │    └─ falls back to ↓ when the provider can't drive tools
+            ├─ nodes/implement.py    # LLM: write kernels.cu          (single-shot fallback)
+            ├─ nodes/configure.py    # LLM: fill framework.cpp regions (single-shot fallback)
             ├─ nodes/run.py          # subprocess: run pyktt tuner, get timing
             ├─ nodes/profile.py      # subprocess: run ncu profiler
             ├─ nodes/propose.py      # LLM: analyze results, propose next changes
@@ -122,6 +124,82 @@ After `deciding`, `next_status` on the manifest drives the branch-level outcome:
 - `retry` → increment `current_iter`, new iteration starts at `implementing` with the previous decision/feedback/run_output carried over (fix_errors prompt); `configuring` if `skip_implement`
 - `branch` → master spawns sub-strategies (up to `MAX_BRANCH_DEPTH`)
 - `stop/success/failed` → terminal
+
+**`implementing` and `configuring` are dispatch aliases now.** With `AGENTIC_STEPS`
+on, `engine/worker.py:_dispatch_status` routes both to `nodes/author.py`, which does
+the work of both in one tool loop. `decide.py` and its prompt still emit the old
+statuses and are untouched; the scope distinction rides on `IterState.authoring_scope`
+(`skip_implement` → `"config_only"`). Nothing writes `authoring` to disk, so state
+files and the frontend see the same statuses they always did.
+
+### Agentic Authoring Step
+
+`nodes/author.py` runs the kernel and its driver regions as one tool loop instead of
+two single-shot calls. It exists because a compile error otherwise costs a full
+iteration — four LLM calls and one of the user's `max_iter` slots — and because the
+kernel cannot be NVRTC-compiled without the `#define`s the params region declares, so
+checking it before `configure` runs is impossible.
+
+| Piece | Where |
+|---|---|
+| Loop driver, budget, `step_trace.jsonl` | `agentic/loop.py` |
+| Tool schemas + dispatch + preconditions | `agentic/tools.py` |
+| Staged workspace (`.staging/`, commit on `end_step`) | `agentic/workspace.py` |
+| Offline replay of a recorded step | `agentic/replay.py` |
+| NVRTC check (ctypes → `libnvrtc.so`) | `utils/nvrtc.py` |
+| `results.json` queries | `utils/landscape.py` |
+| Cross-branch reads | `state/crossbranch.py` |
+| Per-problem kernel rules | `utils/rules.py` |
+
+The LLM owns four files — `kernels.cu` plus `region_kernels.cpp` / `region_params.cpp`
+/ `region_launcher.cpp` — and never the framework skeleton, which is spliced by
+`assemble_framework_cpp` as before. `utils/framework.extract_regions` is its inverse,
+used to seed a step from an iteration that predates the region files.
+
+Knobs in `config.py`:
+- `AGENTIC_STEPS` — kill switch back to the two single-shot calls.
+- `STEP_TOOL_BUDGET` — tool calls per step (50); a runaway guard, median use is 12.
+- `CROSS_BRANCH_ACCESS` — `errors` / `log` / `index` / `off`. **No level exposes
+  another branch's kernel or framework regions.** Parallel branches are parallel bets;
+  a branch that can read the leader's code converges on it. Failure analyses prune dead
+  ends without supplying a solution, which is the only sharing that pays.
+
+The loop falls back to `implement_node` + `configure_node` when the model emits no
+tool calls on turn 1, the provider errors, or the budget runs out with files missing.
+Worst case is the previous behaviour.
+
+**`bind_tools` never raises.** For every provider here it attaches the schemas locally
+and returns — cerit is `ChatOpenAI` with a custom `base_url`, so a server without tool
+support is only discovered by calling it. `agentic/capability.py` remembers that
+verdict per `(provider, model)` for the run and skips the loop after two consecutive
+capability failures, so the discovery cost is paid once instead of on every iteration
+of all four branches. A completed step clears the count. The registry is process-global,
+so tests reset it via an autouse fixture.
+
+**Watch out:** a tool-call response has empty `content` by construction. `TrackedLLM.ainvoke`
+returns early on `response.tool_calls` — without that, its empty-content retry path
+fires five times with backoff on every single tool call.
+
+### Kernel Rules
+
+`problem.yaml` takes a `rules:` block constraining what a kernel may do — the
+mechanism that stops a branch winning by quietly dropping to fp16 accumulation, which
+still validates whenever `validation.tolerance` is loose enough. `text` rules go in the
+prompt; `forbid` regexes are checked before the compiler runs and fail the check. See
+`docs/PROBLEM_YAML_GUIDE.md`.
+
+### Tests
+
+```bash
+conda activate ktt
+python -m pytest tests/ -q                       # 148 tests, ~9 s
+python -m pytest tests/ -m "not integration" -q  # skip the real g++/NVRTC link
+```
+
+No live LLM calls: `agentic/replay.ScriptedLLM` drives the loop deterministically, and
+the same class replays a recorded `step_trace.jsonl`. The `integration` marker covers
+the real toolchain — it links the driver against `libktt.so` and NVRTC-compiles
+recorded kernels whose real outcome is known.
 
 ### LLM Provider Configuration
 

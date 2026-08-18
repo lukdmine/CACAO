@@ -104,14 +104,14 @@ def save_output(path: Path, content: str, filename: Optional[str] = None) -> Pat
         path = path / filename
 
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    path.write_text(content, encoding="utf-8")
     return path
 
 
 def save_json(path: Path, data: dict) -> Path:
     """Save data as JSON."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, default=str)
     return path
 
@@ -119,14 +119,14 @@ def save_json(path: Path, data: dict) -> Path:
 def load_file(path: Path) -> str:
     """Load a file if it exists, return empty string otherwise."""
     if path.exists():
-        return path.read_text()
+        return path.read_text(encoding="utf-8")
     return ""
 
 
 def load_json(path: Path) -> Optional[dict]:
     """Load a JSON file if it exists."""
     if path.exists():
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     return None
 

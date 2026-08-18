@@ -166,7 +166,7 @@ async def profile_node(state: WorkingState) -> WorkingState:
     problem_dir = get_problem_dir()
     gpu_index, ref_file = 0, "ref_kernel.cu"
     try:
-        with open(problem_dir / "problem.yaml") as f:
+        with open(problem_dir / "problem.yaml", encoding="utf-8") as f:
             cfg_yaml = yaml.safe_load(f) or {}
         gpu_index = cfg_yaml.get("gpu", {}).get("index", 0)
         ref_file = (cfg_yaml.get("reference") or {}).get("file", ref_file)

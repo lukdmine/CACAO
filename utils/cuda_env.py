@@ -109,7 +109,7 @@ def _find_cuda_path_from_modules() -> Optional[Path]:
         result = subprocess.run(
             ["bash", "-c", "module list 2>&1"],
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=5,
         )
         # Check if any cuda module is loaded
@@ -122,7 +122,7 @@ def _find_cuda_path_from_modules() -> Optional[Path]:
                     "module show cuda 2>&1 | grep -i 'CUDA_PATH\\|CUDA_HOME\\|prepend-path.*PATH'",
                 ],
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 timeout=5,
             )
             for line in result2.stdout.splitlines():
@@ -179,7 +179,7 @@ def _load_config_file(project_root: Path) -> dict:
     config_path = project_root / "cuda_env.yaml"
     if config_path.exists():
         try:
-            with open(config_path) as f:
+            with open(config_path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
             return data
         except Exception:
@@ -394,7 +394,7 @@ def save_config(env: CudaEnv, project_root: Path):
         data["cuda_include"] = str(env.cuda_include)
 
     config_path = project_root / "cuda_env.yaml"
-    with open(config_path, "w") as f:
+    with open(config_path, "w", encoding="utf-8") as f:
         yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
 

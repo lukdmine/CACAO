@@ -39,7 +39,7 @@ def write_pid_file(problem_dir: Path, pid: int):
     """Write optimizer PID to output/run.pid."""
     pid_file = problem_dir / "output" / "run.pid"
     pid_file.parent.mkdir(parents=True, exist_ok=True)
-    pid_file.write_text(str(pid))
+    pid_file.write_text(str(pid), encoding="utf-8")
 
 
 def remove_pid_file(problem_dir: Path):
@@ -53,7 +53,7 @@ def _pid_file_alive(problem_dir: Path) -> bool:
     if not pid_file.exists():
         return False
     try:
-        pid = int(pid_file.read_text().strip())
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
         os.kill(pid, 0)  # signal 0 = existence check
         return True
     except (ValueError, ProcessLookupError, PermissionError, OSError):
@@ -127,7 +127,7 @@ def terminate_run(name: str, problem_dir: Path):
         pid_file = problem_dir / "output" / "run.pid"
         if pid_file.exists():
             try:
-                pid = int(pid_file.read_text().strip())
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
                 pgid = os.getpgid(pid)
                 os.killpg(pgid, signal.SIGTERM)
             except (ValueError, ProcessLookupError, PermissionError, OSError):
@@ -191,7 +191,7 @@ def terminate_all_optimizers():
     if PROBLEMS_DIR.is_dir():
         for pid_file in PROBLEMS_DIR.rglob("output/run.pid"):
             try:
-                pid = int(pid_file.read_text().strip())
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
                 pgid = os.getpgid(pid)
                 os.killpg(pgid, signal.SIGTERM)
             except (ValueError, ProcessLookupError, PermissionError, OSError):
@@ -207,13 +207,13 @@ def get_problem_dir(name: str) -> Path:
 
 
 def load_yaml(path: Path) -> dict:
-    with path.open("r") as f:
+    with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 def load_json(path: Path) -> dict:
     try:
-        with path.open("r") as f:
+        with path.open("r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, FileNotFoundError):
         return {}

@@ -45,7 +45,7 @@ def _query_nvidia_smi_gpus() -> list[dict]:
             ],
             check=True,
             capture_output=True,
-            text=True,
+            text=True, encoding="utf-8", errors="replace",
             timeout=10,
         )
 
@@ -151,7 +151,7 @@ def get_gpu_details(device_index: int = 0) -> Optional[Dict[str, Any]]:
         cu_file = tmpdir_path / "dummy.cu"
         exe_file = tmpdir_path / "dummy"
 
-        cu_file.write_text(DUMMY_KERNEL_CODE)
+        cu_file.write_text(DUMMY_KERNEL_CODE, encoding="utf-8")
 
         # 1. Compile dummy kernel
         cuda_env = get_env()
@@ -163,7 +163,7 @@ def get_gpu_details(device_index: int = 0) -> Optional[Dict[str, Any]]:
                 [str(cuda_env.nvcc), "-o", str(exe_file), str(cu_file)],
                 check=True,
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
             )
         except subprocess.CalledProcessError as e:
             log(
@@ -204,7 +204,7 @@ def get_gpu_details(device_index: int = 0) -> Optional[Dict[str, Any]]:
                 ncu_cmd,
                 check=False,  # We handle errors manually
                 capture_output=True,
-                text=True,
+                text=True, encoding="utf-8", errors="replace",
                 env=env,
                 timeout=30,  # Should be very fast
             )

@@ -78,6 +78,7 @@ validation:
 | `grid` | yes | mapping | Base problem dimensions, not the tuned launch config |
 | `vectors` | yes | list | Vector buffers used by the kernel/reference |
 | `validation` | yes | mapping | Validation tolerance |
+| `rules` | no | list or mapping | Constraints on what a kernel is allowed to do (see [`rules`](#rules)) |
 
 ---
 
@@ -479,6 +480,61 @@ validation:
   - `1e-6` for strict integer-derived float outputs
   - `1e-3` for moderate floating-point tolerance
   - `0.05` for looser comparisons
+
+---
+
+## `rules`
+
+Constraints on *how* the kernel may be written, as opposed to what it must compute.
+
+The reference implementation defines correctness, not intent. A kernel that drops to
+fp16 accumulation, or swaps a real reduction for tensor cores, is faster and still
+validates whenever `validation.tolerance` is loose enough — and the run reports a
+speedup that does not mean what it looks like. Rules are where you say so.
+
+```yaml
+rules:
+  text:
+    - "Accumulate in fp32. Reduced-precision accumulation is not a valid optimization."
+  forbid:
+    - pattern: "wmma::|mma\\.sync"
+      reason: "tensor cores change the numerics this problem measures"
+    - pattern: "\\b__half\\b|nv_bfloat16"
+      reason: "fp16/bf16 storage is not permitted"
+```
+
+| Field | Required | Type | Meaning |
+|---|---|---|---|
+| `text` | no | list of strings | Stated in every prompt that writes or judges a kernel. Guidance the model applies to cases you did not enumerate. |
+| `forbid` | no | list | Regular expressions checked against `kernels.cu` at compile time. |
+| `forbid[].pattern` | yes | string (regex) | Matched against the kernel source. |
+| `forbid[].reason` | no | string | Shown to the model when it matches. Worth writing — it turns a rejection into a correction. |
+
+### Shorthand
+
+A bare list is `text`:
+
+```yaml
+rules:
+  - "Do not use tensor cores."
+```
+
+### How they are enforced
+
+`text` rules are prompt-level. `forbid` patterns have teeth: they are checked before
+the compiler runs, and a match fails the iteration's compilation check regardless of
+correctness or speed. Anything you actually care about belongs in `forbid` — a rule
+that is only asked for is a rule that loses to a speedup.
+
+Both kinds appear in the prompt, including the patterns. A model that knows a check
+exists writes conforming code the first time instead of discovering the constraint
+through a failed compile.
+
+### Notes
+
+- Patterns are Python regular expressions. Escape backslashes for YAML (`"\\b"`).
+- An invalid pattern is logged and skipped rather than taking the run down.
+- Rules are re-read from `problem.yaml` every iteration, so editing them mid-run works.
 
 ---
 

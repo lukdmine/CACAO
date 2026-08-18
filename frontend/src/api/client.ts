@@ -1,4 +1,19 @@
-const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://127.0.0.1:8003';
+const DEFAULT_API_PORT = 8003;
+
+// An explicit VITE_API_BASE always wins; otherwise the backend is assumed to sit on
+// DEFAULT_API_PORT of whatever host served this page. Hardcoding 127.0.0.1 breaks as
+// soon as the page is opened over a LAN or WSL address, because the browser then has
+// to cross from a private origin into loopback — which Chrome's local-network rules
+// and VPN loopback interception both refuse.
+function resolveApiBase(): string {
+    const configured = import.meta.env.VITE_API_BASE;
+    if (configured) return configured;
+    if (typeof window === 'undefined') return `http://127.0.0.1:${DEFAULT_API_PORT}`;
+    const { protocol, hostname } = window.location;
+    return `${protocol}//${hostname}:${DEFAULT_API_PORT}`;
+}
+
+const API_BASE = resolveApiBase();
 /**
  * Typed fetch wrapper for the backend API.
  */
@@ -157,6 +172,16 @@ export interface InputsSpec {
     args: ArgSpec[];
 }
 
+export interface ForbidRule {
+    pattern: string;
+    reason: string;
+}
+
+export interface RulesSpec {
+    text: string[];
+    forbid: ForbidRule[];
+}
+
 export interface CreateProblemData {
     slug: string;
     name: string;
@@ -167,6 +192,9 @@ export interface CreateProblemData {
     tuning?: {
         duration_s: number;
     };
+    // Constraints on what a kernel may do. `forbid` patterns are checked before the
+    // compiler and fail the iteration; see utils/rules.py.
+    rules?: RulesSpec;
     // All three run. They differ in what the reference receives:
     //   cuda   — a kernel over the boundary (buffers + runtime scalars), bound by position
     //   cpu_c  — a C function taking every buffer as a pointer, scalars as -D macros

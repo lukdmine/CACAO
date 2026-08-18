@@ -129,7 +129,7 @@ def check_prerequisites(problem_dir: Path):
 
     # Check configured reference source file
     try:
-        problem_config = yaml.safe_load(problem_path.read_text()) or {}
+        problem_config = yaml.safe_load(problem_path.read_text(encoding="utf-8")) or {}
     except Exception as e:
         log(f"Failed to parse problem.yaml: {e}", "ERROR")
         return False
@@ -329,7 +329,7 @@ async def main():
     log(f"Logging to {log_path}")
 
     log("Starting Queue Execution Engine...")
-    with log_path.open(log_mode) as _log_file:
+    with log_path.open(log_mode, encoding="utf-8") as _log_file:
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout = TeeWriter(old_stdout, _log_file)
         sys.stderr = TeeWriter(old_stderr, _log_file)

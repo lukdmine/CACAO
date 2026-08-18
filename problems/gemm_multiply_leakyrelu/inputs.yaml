@@ -1,0 +1,79 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: kBatch
+  dtype: int
+  value: 1024
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kIn
+  dtype: int
+  value: 8192
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kOut
+  dtype: int
+  value: 8192
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: multiplier
+  dtype: float
+  value: 2.0
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: negative_slope
+  dtype: float
+  value: 0.1
+  placements:
+  - host
+  - runtime
+# torch.rand -> uniform [0, 1). KernelBench's get_inputs() uses rand, not randn.
+- kind: buffer
+  name: x
+  dtype: float
+  size: kBatch * kIn
+  access: read
+  init: random
+  min: 0
+  max: 1
+  validate: false
+# nn.Linear's default init is U(-1/sqrt(fan_in), +1/sqrt(fan_in)) for BOTH weight and
+# bias; fan_in = kIn = 8192, so the bound is 1/sqrt(8192) = 0.011048543. Matching it
+# here keeps the numerics in the range the module was designed for — uniform [-2, 2]
+# weights (mmul's choice) would drive an 8192-deep dot product straight to inf.
+# The driver writes these exact bytes to cacao_in_*.bin and ref.py loads them into the
+# module, so the reference and the kernel always see identical weights.
+- kind: buffer
+  name: gemm_weight
+  dtype: float
+  size: kOut * kIn
+  access: read
+  init: random
+  min: -0.011048543
+  max: 0.011048543
+  validate: false
+- kind: buffer
+  name: gemm_bias
+  dtype: float
+  size: kOut
+  access: read
+  init: random
+  min: -0.011048543
+  max: 0.011048543
+  validate: false
+- kind: buffer
+  name: out
+  dtype: float
+  size: kBatch * kOut
+  access: write
+  init: zeros
+  validate: true

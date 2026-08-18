@@ -84,7 +84,7 @@ def load_inputs(inputs_yaml: Path, bin_dir: Path) -> tuple[dict, dict, dict]:
     read/readwrite buffers hold the real dumped data, write buffers are zeros;
     meta maps buffer name -> {"dtype", "size"} so callers can validate results.
     """
-    spec = yaml.safe_load(Path(inputs_yaml).read_text()) or {}
+    spec = yaml.safe_load(Path(inputs_yaml).read_text(encoding="utf-8")) or {}
     args = spec.get("args", [])
     scalars = {a["name"]: a["value"] for a in args if a["kind"] == "scalar"}
     buffers = {}
