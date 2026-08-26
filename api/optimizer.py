@@ -54,7 +54,7 @@ def _run_target(
         import config as cfg
         from config import OptimizerConfig, init_from_config
         from engine.master import run_optimization_engine
-        from utils.files import clean_output_dir
+        from utils.files import archive_output_dir
 
         try:
             os.setsid()
@@ -76,7 +76,7 @@ def _run_target(
         cfg.check_api_key()
 
         problem_yaml, ref_kernel = load_problem_inputs(problem_dir)
-        clean_output_dir()
+        archive_output_dir()
 
         # Write run metadata so the server can report the correct model/provider
         import json as _json
@@ -93,7 +93,7 @@ def _run_target(
             encoding="utf-8",
         )
 
-        # Re-write PID file after clean_output_dir
+        # Re-write PID file after archive_output_dir
         write_pid_file(problem_dir, os.getpid())
 
         log_path = problem_dir / "output" / "run.log"

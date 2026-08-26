@@ -5,10 +5,12 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Input } from '@/components/ui/input';
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { formatTime } from '@/utils/statusColors';
 import { runProblem, resumeProblem, stopProblem } from '@/api/client';
 import { refreshTree } from '@/api/hooks';
 import { toast } from 'sonner';
-import { Play, RotateCcw, PanelLeft, Cpu, Wifi, WifiOff, Square, Loader2, Coins, Timer } from 'lucide-react';
+import { Play, RotateCcw, PanelLeft, Cpu, Wifi, WifiOff, Square, Loader2, Coins, Timer, Archive } from 'lucide-react';
 
 export function Toolbar() {
     const activeProblem = useAppStore((s) => s.activeProblem);
@@ -30,6 +32,7 @@ export function Toolbar() {
 
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isStopping, setIsStopping] = useState(false);
+    const [confirmRerun, setConfirmRerun] = useState(false);
 
     // Timeout override is tagged by the problem it was entered for, so switching
     // problems automatically reverts the input to that problem's yaml default —
@@ -42,6 +45,10 @@ export function Toolbar() {
 
     const branchCount = treeNodes.filter((n) => n.id !== 'root').length;
     const hasExistingRun = branchCount > 0;
+    const existingBest = treeNodes.reduce<number | null>(
+        (best, n) => (n.best_time_us != null && (best == null || n.best_time_us < best) ? n.best_time_us : best),
+        null,
+    );
 
     const parsedTimeout = (() => {
         const t = timeoutDisplay.trim();
@@ -57,8 +64,20 @@ export function Toolbar() {
         ...(sendTimeout && { timeout: parsedTimeout }),
     };
 
-    async function handleRun() {
+    // A rerun starts from nothing. The backend archives the previous run rather than
+    // deleting it, but the branches still stop where they are, so it is worth one
+    // deliberate click — Rerun and Resume sit next to each other and mean opposite things.
+    function handleRunClick() {
+        if (hasExistingRun) {
+            setConfirmRerun(true);
+            return;
+        }
+        void startRun();
+    }
+
+    async function startRun() {
         if (!activeProblem || isSubmitting) return;
+        setConfirmRerun(false);
         setIsSubmitting(true);
         try {
             await runProblem(activeProblem, runConfig);
@@ -158,7 +177,7 @@ export function Toolbar() {
                     <Button
                         size="sm"
                         className="text-xs h-7"
-                        onClick={handleRun}
+                        onClick={handleRunClick}
                         disabled={isSubmitting || !connected}
                     >
                         {hasExistingRun ? <RotateCcw size={12} className="mr-1" /> : <Play size={12} className="mr-1" />}
@@ -252,6 +271,64 @@ export function Toolbar() {
                     )}
                 </div>
             </div>
+
+            <Dialog open={confirmRerun} onOpenChange={setConfirmRerun}>
+                <DialogContent className="sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Start over from scratch?</DialogTitle>
+                        <DialogDescription asChild>
+                            <div className="space-y-3 text-sm">
+                                <p>
+                                    <span className="font-medium text-foreground">{activeProblem}</span> already has{' '}
+                                    <span className="font-medium text-foreground">{branchCount}</span> branch
+                                    {branchCount === 1 ? '' : 'es'}
+                                    {existingBest != null && (
+                                        <>
+                                            {' '}with a best of{' '}
+                                            <span className="font-mono font-medium text-foreground">
+                                                {formatTime(existingBest)}
+                                            </span>
+                                        </>
+                                    )}
+                                    . A rerun discards all of it and begins again from analysis.
+                                </p>
+                                <p className="flex items-start gap-2 text-muted-foreground">
+                                    <Archive size={14} className="mt-0.5 shrink-0" />
+                                    <span>
+                                        The existing run is moved to{' '}
+                                        <span className="font-mono">archive/output_N</span> rather than deleted, so it
+                                        can be recovered from disk.
+                                    </span>
+                                </p>
+                                <p>
+                                    To carry on where these branches stopped, use{' '}
+                                    <span className="font-medium text-foreground">Resume</span> instead.
+                                </p>
+                            </div>
+                        </DialogDescription>
+                    </DialogHeader>
+                    <DialogFooter className="gap-2 sm:gap-2">
+                        <Button variant="outline" size="sm" onClick={() => setConfirmRerun(false)}>
+                            Cancel
+                        </Button>
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                                setConfirmRerun(false);
+                                void handleResume();
+                            }}
+                        >
+                            <Play size={12} className="mr-1" />
+                            Resume instead
+                        </Button>
+                        <Button variant="destructive" size="sm" onClick={() => void startRun()}>
+                            <RotateCcw size={12} className="mr-1" />
+                            Rerun from scratch
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }

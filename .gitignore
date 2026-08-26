@@ -1,5 +1,6 @@
 KTT/
 output/
+archive/
 experiments/
 results.json*
 results_profile.json*

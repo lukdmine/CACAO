@@ -29,6 +29,7 @@ python cli.py --dir problems/mmul
 python cli.py --dir problems/mmul --resume       # resume interrupted run
 python cli.py --dir problems/mmul --max-iter 3 --max-depth 1
 python cli.py --dir problems/mmul --best         # show results without running
+python cli.py --dir problems/mmul --prune-archives  # shrink archive/output_* on disk
 
 # Start the FastAPI backend server (for frontend)
 python server.py              # http://localhost:8003
@@ -209,7 +210,7 @@ prompt; `forbid` regexes are checked before the compiler runs and fail the check
 
 ```bash
 conda activate ktt
-python -m pytest tests/ -q                       # 185 tests, ~13 s
+python -m pytest tests/ -q                       # 200 tests, ~14 s
 python -m pytest tests/ -m "not integration" -q  # skip the real g++/NVRTC link
 ```
 
@@ -228,6 +229,19 @@ Provider is set via `LLM_PROVIDER` in `config.py` (default: `"claude"`). Auto-de
 Supported providers: `openai`, `anthropic`, `gemini`, `cerit` (OpenAI-compatible endpoint).
 
 ### Output Directory Layout
+
+A fresh run **archives** the previous one instead of deleting it —
+`utils/files.archive_output_dir` renames `output/` to `archive/output_N` (N = highest
+existing + 1) and starts with an empty `output/`, carrying `reference_time.json`
+across. It used to `rmtree`; the frontend's Run button and `cli.py` without `--resume`
+both land there and neither asked first, which cost a 23-hour run. A rename is O(1) at
+any size, so there is no cost argument for deleting. A directory with no `branches/`
+never held work and is removed rather than numbered.
+
+`python cli.py --dir <problem> --prune-archives` strips only regenerable files from
+archived runs (`cacao_*.bin`, `driver`, `__pycache__`, `.staging`) — ~99% of an
+archive's size. Kernels, driver regions, results, decisions and step traces are never
+touched, and `output/` is never touched. Nothing prunes automatically.
 
 ```
 problems/<name>/output/
