@@ -1,6 +1,6 @@
 # CACAO — CUDA Agentic Coding Autotuning Optimizer
 
-CACAO is an LLM-driven system that searches for fast CUDA kernel implementations across multiple strategy branches in parallel. Given a problem specification (`problem.yaml`) and a reference implementation (a CUDA kernel or a sequential C/C++ function), the agent iteratively writes a CUDA kernel and a tuning parameter space, lets the [KTT](https://github.com/HiPerCoRe/KTT) autotuner search that space, profiles the best configuration with NVIDIA NCU, and uses the timings + profiler counters to propose the next iteration.
+CACAO is an LLM-driven system that searches for fast CUDA kernel implementations across multiple strategy branches in parallel. Given a problem specification (`problem.yaml` + `inputs.yaml`) and a reference implementation (a CUDA kernel, a sequential C function, or a Python function), the agent iteratively writes a CUDA kernel and a tuning parameter space, lets the [KTT](https://github.com/HiPerCoRe/KTT) autotuner search that space, profiles the best configuration with NVIDIA NCU, and uses the timings + profiler counters to propose the next iteration.
 
 ## Quick Start
 
@@ -20,9 +20,15 @@ python cli.py --dir problems/mmul
 python cli.py --dir problems/mmul --resume         # resume an interrupted run
 python cli.py --dir problems/mmul --max-iter 5 --max-depth 2
 python cli.py --dir problems/mmul --best           # show results without running
+python cli.py --dir problems/mmul --prune-archives # shrink archived runs on disk
 ```
 
 `--dir` may be relative or absolute — the optimizer can be invoked from any working directory.
+
+A fresh run **archives** the previous one rather than deleting it: `output/` is renamed
+to `archive/output_N` and the run starts with an empty `output/`. Nothing prunes
+automatically; `--prune-archives` strips only regenerable files (tuner input dumps,
+compiled drivers) from `archive/`, never from `output/`, and never kernels or results.
 
 ## Smoke test
 
@@ -63,23 +69,34 @@ engine/master.py                    # Phase 1: analyze -> strategize -> dispatch
     |
 engine/worker.py                    # Phase 2: per-branch optimization loop
     |-- nodes/plan.py               # LLM: detailed implementation plan
-    |-- nodes/implement.py          # LLM: write optimized kernel.cu
-    |-- nodes/configure.py          # LLM: write KTT tuning params
+    |-- nodes/author.py             # LLM tool loop: kernel + driver regions, compile-checked
+    |     \-- nodes/implement.py    # LLM: write kernels.cu          (AGENTIC_STEPS=False only)
+    |     \-- nodes/configure.py    # LLM: fill framework.cpp regions (AGENTIC_STEPS=False only)
     |-- nodes/run.py                # subprocess: compile + run the KTT C++ driver
     |-- nodes/profile.py            # subprocess: run NCU profiler
     |-- nodes/propose.py            # LLM: analyze results, propose changes
     |-- nodes/decide.py             # LLM: continue / retry / branch / stop
 ```
 
+When every branch is done, `cli.py` writes `output/final_results.json` — the best
+configuration and a per-branch summary. `nodes/merge.py` rebuilds the same summary
+from what is already on disk and backs `--best`.
+
+`author.py` runs the kernel and its KTT driver regions as one tool loop with an NVRTC
+compile check inside the step, so a compile error costs a retry rather than a whole
+iteration. `implement.py` + `configure.py` are the two single-shot calls it replaced;
+`AGENTIC_STEPS=False` in `config.py` is the only thing that selects them.
+
 ### State Model
 
-State is split into three typed Pydantic models:
+State is split into typed Pydantic models, one writer per file:
 
 | File | Model | Purpose |
 |------|-------|---------|
 | `output/context.json` | `Context` | Shared problem data (written once) |
-| `output/branches/<name>/branch.json` | `BranchManifest` | Branch identity, control, results |
-| `output/branches/<name>/iter_N/state.json` | `IterState` | Per-iteration work products |
+| `output/branches/<name>/branch.json` | `BranchManifest` | Branch identity, control, results (worker-owned) |
+| `output/branches/<name>/branch_config.json` | `BranchConfig` | Settings the UI owns (`max_iter`); the worker only reads it |
+| `output/branches/<name>/iterN/state.json` | `IterState` | Per-iteration work products |
 
 Each iteration progresses: `planning -> implementing -> configuring -> running -> profiling -> proposing -> deciding -> decided`
 
@@ -101,38 +118,13 @@ The model is set via `--model`; otherwise the provider's default model is used (
 ## Adding a Problem
 
 Create a directory under `problems/` with:
-- `problem.yaml` — kernel interface, scalars, vectors, validation tolerance
-- One reference: either `ref_kernel.cu` (CUDA reference kernel) or `ref_cpu.c` (sequential C/C++ reference, compiled at runtime via GCC)
+- `problem.yaml` — GPU index, grid, reference, validation tolerance, and an optional `rules:` block constraining what a kernel may do
+- `inputs.yaml` — the I/O boundary (scalars, buffers, which buffers are validated); `inputs.hpp` is generated from it
+- One reference: `ref_kernel.cu` (CUDA), `ref_cpu.c` (a C function linked into the driver), or `ref.py` (Python, e.g. a torch or numpy oracle)
 
 See [docs/PROBLEM_YAML_GUIDE.md](docs/PROBLEM_YAML_GUIDE.md) and [docs/REFERENCE_IMPLEMENTATION_GUIDE.md](docs/REFERENCE_IMPLEMENTATION_GUIDE.md) for format details.
 
 Or use the web UI's "New Problem" dialog.
-
-## Project Structure
-
-```
-cuda-agentic-optimizer/
-|-- cli.py                  # CLI entry point
-|-- server.py               # FastAPI server entry point
-|-- config.py               # LLM providers, constants, token tracking
-|-- requirements.txt        # Python dependencies
-|-- libktt.so -> KTT/...    # Symlink to KTT core library (pinned to v2.3.1)
-|
-|-- engine/                 # Orchestration (master + worker)
-|-- nodes/                  # LLM and subprocess nodes (10 nodes)
-|-- state/                  # Pydantic models, persistence, control
-|-- models/                 # Structured output schemas
-|-- utils/                  # GPU info, logging, file I/O, resume
-|-- api/                    # FastAPI server modules
-|-- prompts/                # LLM prompt templates (one per node)
-|-- problems/               # Problem definitions (problem.yaml + ref_kernel.cu)
-|
-|-- frontend/               # React + Vite + TypeScript + shadcn/ui
-|-- KTT/                    # Kernel Tuning Toolkit (build dependency)
-|-- docs/                   # Problem format guides
-|
-|-- SETUP.md                # First-time setup guide
-```
 
 ## License
 
