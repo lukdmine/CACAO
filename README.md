@@ -65,7 +65,7 @@ engine/worker.py                    # Phase 2: per-branch optimization loop
     |-- nodes/plan.py               # LLM: detailed implementation plan
     |-- nodes/implement.py          # LLM: write optimized kernel.cu
     |-- nodes/configure.py          # LLM: write KTT tuning params
-    |-- nodes/run.py                # subprocess: run pyktt autotuner
+    |-- nodes/run.py                # subprocess: compile + run the KTT C++ driver
     |-- nodes/profile.py            # subprocess: run NCU profiler
     |-- nodes/propose.py            # LLM: analyze results, propose changes
     |-- nodes/decide.py             # LLM: continue / retry / branch / stop
@@ -115,9 +115,7 @@ cuda-agentic-optimizer/
 |-- cli.py                  # CLI entry point
 |-- server.py               # FastAPI server entry point
 |-- config.py               # LLM providers, constants, token tracking
-|-- tuner.py                # Python KTT tuner (pyktt bindings)
 |-- requirements.txt        # Python dependencies
-|-- pyktt.so -> KTT/...     # Symlink to KTT Python bindings
 |-- libktt.so -> KTT/...    # Symlink to KTT core library
 |
 |-- engine/                 # Orchestration (master + worker)

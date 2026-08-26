@@ -1,5 +1,5 @@
 # CUDA Agentic Optimizer Requirements
-# Python 3.10 required for pyktt compatibility
+# Python 3.10 — what the setup script provisions and the only version tested
 
 numpy>=1.24.0
 pyyaml>=6.0
