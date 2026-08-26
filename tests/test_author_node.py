@@ -1,8 +1,10 @@
 """The authoring node's contract with the rest of the pipeline.
 
-Chiefly: that every way the loop can fail lands on the two single-shot calls this node
-replaced. That fallback is the reason the change is safe to turn on, so it is tested
-per trigger rather than in aggregate.
+Chiefly: that every way the step can fail is visible. A failed step ends the iteration
+and hands decide a diagnosis; it does not re-run the work through the two single-shot
+calls and report success. That silent path is what let a run lose its tool loop for
+twenty iterations while every state file downstream looked healthy, so each way of
+failing is tested for what it tells the branch rather than in aggregate.
 """
 
 import textwrap
@@ -11,9 +13,8 @@ import pytest
 
 import config as _cfg
 import nodes.author as author_mod
-from agentic.loop import StepOutcome, StepResult
 from agentic.replay import ScriptedLLM
-from state.types import Context, IterState, StrategyInfo, WorkingState
+from state.types import StrategyInfo, WorkingState
 
 PROBLEM_YAML = textwrap.dedent(
     """\
@@ -194,11 +195,12 @@ async def test_prompt_is_saved_and_stays_small(env, monkeypatch):
     assert len(prompt) < 20_000, f"prompt grew to {len(prompt)} bytes"
 
 
-# -- fallback, one test per trigger ---------------------------------------
+# -- failing, one test per way the step can end empty-handed ---------------
 
 
 @pytest.fixture
 def spy_legacy(monkeypatch):
+    """Catches any surviving route into the single-shot calls."""
     calls = []
 
     async def fake_legacy(state):
@@ -210,21 +212,63 @@ def spy_legacy(monkeypatch):
     return calls
 
 
-async def test_falls_back_when_the_provider_cannot_bind_tools(env, monkeypatch, spy_legacy):
+async def test_a_provider_that_cannot_bind_tools_fails_the_iteration(env, monkeypatch, spy_legacy):
     monkeypatch.setattr(
         author_mod, "get_llm_precise", lambda: ScriptedLLM([], bind_error=NotImplementedError())
     )
     state = await author_mod.author_node(make_state(env))
-    assert spy_legacy == ["fresh"] and state.status == "running"
+
+    assert spy_legacy == []
+    assert state.status == "deciding"
+    assert "rejected the tool schemas" in state.run_output
 
 
-async def test_falls_back_when_the_model_does_not_call_tools(env, monkeypatch, spy_legacy):
-    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(["just prose"]))
-    await author_mod.author_node(make_state(env))
-    assert spy_legacy == ["fresh"]
+async def test_a_model_that_will_not_call_tools_fails_the_iteration(env, monkeypatch, spy_legacy):
+    # Prose, nudged, prose again.
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(["just prose", "still prose"]))
+    state = await author_mod.author_node(make_state(env))
+
+    assert spy_legacy == []
+    assert state.status == "deciding"
+    assert "never called a tool" in state.run_output
+    assert "still prose" in state.run_output, "decide needs to see what the model said"
 
 
-async def test_falls_back_when_the_budget_runs_out_with_files_missing(env, monkeypatch, spy_legacy):
+async def test_a_persistently_truncated_step_fails_with_the_reason(env, monkeypatch, spy_legacy):
+    """The failure that started this: the branch has to be told the model ran out of
+    room to answer, because the fix is to ask for less, not to change the strategy."""
+    monkeypatch.setattr(_cfg, "STEP_TRUNCATION_RETRIES", 2)
+    monkeypatch.setattr(
+        author_mod,
+        "get_llm_precise",
+        lambda: script([{"text": "I'll write the kernel now.", "finish_reason": "length"}] * 8),
+    )
+    state = await author_mod.author_node(make_state(env))
+
+    assert spy_legacy == []
+    assert state.status == "deciding"
+    assert "cut off at its output token limit 3 time(s)" in state.run_output
+    assert "ask for less in one go" in state.run_output
+    assert "failure to generate code, not a failure of the strategy" in state.run_output
+
+
+async def test_the_budget_running_out_with_files_missing_fails_the_iteration(env, monkeypatch, spy_legacy):
+    monkeypatch.setattr(_cfg, "STEP_TOOL_BUDGET", 1)
+    monkeypatch.setattr(
+        author_mod,
+        "get_llm_precise",
+        lambda: script([[call("write_file", name="kernels.cu", content="// only one\n")]] * 5),
+    )
+    state = await author_mod.author_node(make_state(env))
+
+    assert spy_legacy == []
+    assert state.status == "deciding"
+    assert "missing" in state.run_output and "region_params.cpp" in state.run_output
+
+
+async def test_a_failed_step_commits_nothing(env, monkeypatch):
+    # A half-written workspace must not reach run_node: it would compile whatever
+    # happened to land and report the result as this iteration's.
     monkeypatch.setattr(_cfg, "STEP_TOOL_BUDGET", 1)
     monkeypatch.setattr(
         author_mod,
@@ -232,14 +276,37 @@ async def test_falls_back_when_the_budget_runs_out_with_files_missing(env, monke
         lambda: script([[call("write_file", name="kernels.cu", content="// only one\n")]] * 5),
     )
     await author_mod.author_node(make_state(env))
-    assert spy_legacy == ["fresh"]
+
+    iter_dir = env["branch"] / "iter1"
+    assert not (iter_dir / "kernels.cu").exists()
+    assert not (iter_dir / "framework.cpp").exists()
 
 
-async def test_falls_back_when_agentic_steps_is_disabled(env, monkeypatch, spy_legacy):
+async def test_a_failed_step_still_leaves_its_trace(env, monkeypatch):
+    # The trace is the only record of why the step failed; losing it on failure loses
+    # it exactly when it is wanted.
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(["prose", "prose"]))
+    await author_mod.author_node(make_state(env))
+    assert (env["branch"] / "iter1" / "step_trace.jsonl").exists()
+
+
+async def test_agentic_steps_off_is_the_only_route_to_the_single_shot_calls(env, monkeypatch, spy_legacy):
     monkeypatch.setattr(_cfg, "AGENTIC_STEPS", False)
     monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(HAPPY_TURNS))
     await author_mod.author_node(make_state(env))
     assert spy_legacy == ["fresh"]
+
+
+async def test_a_truncated_step_that_recovers_is_not_a_failure(env, monkeypatch):
+    _passing_check(monkeypatch)
+    monkeypatch.setattr(
+        author_mod,
+        "get_llm_precise",
+        lambda: script([{"text": "", "finish_reason": "length"}] + HAPPY_TURNS),
+    )
+    state = await author_mod.author_node(make_state(env))
+    assert state.status == "running"
+    assert (env["branch"] / "iter1" / "kernels.cu").exists()
 
 
 async def test_budget_exhausted_with_complete_files_routes_to_propose(env, monkeypatch):

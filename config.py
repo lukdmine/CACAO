@@ -636,13 +636,20 @@ INCLUDE_BEST_SO_FAR = (
 # ===== Agentic Steps =====
 # When True, implement+configure run as one tool loop (nodes/author.py) that can
 # compile-check and fix before the iteration is spent. False restores the two
-# single-shot calls; the loop also falls back to them on its own whenever a provider
-# cannot drive tools, so this flag is a kill switch, not the only safety net.
+# single-shot calls. This is the only way back to them: a step that cannot author its
+# files fails the iteration and tells decide why, rather than silently re-running the
+# work down a quieter path.
 AGENTIC_STEPS = True
 # Tool calls allowed in one authoring step — a runaway guard, not a working limit.
 # Recorded steps run a median of 12 calls; at 25 three of 72 were cut off mid-fix and
 # ten more came within five calls of it. A step stopped here still costs the iteration.
 STEP_TOOL_BUDGET = 50
+# How many times a reply cut off at the model's output token cap is corrected before
+# the step gives up. Thinking models spend the whole cap reasoning about a "write the
+# kernel" prompt and never reach the call; being told so is usually enough. The
+# correction escalates, so raising this past the number of distinct corrections
+# (agentic.loop._TRUNCATION_NUDGES) just repeats the last one.
+STEP_TRUNCATION_RETRIES = 3
 # How much of a sibling branch a step may read. Parallel branches are parallel *bets*;
 # a branch that can read the current leader's kernel converges on it and the run buys
 # one attempt instead of four. So no level exposes another branch's code.

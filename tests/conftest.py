@@ -63,21 +63,6 @@ def broken_kernel() -> str:
     return _require(COV_BRANCH / "iter9" / "kernels.cu").read_text(encoding="utf-8")
 
 
-@pytest.fixture(autouse=True)
-def isolate_capability_registry():
-    """Reset the provider tool-capability verdicts around every test.
-
-    The registry is process-global on purpose — one run, one verdict per provider — so
-    without this a test that exercises a fallback disables the loop for every test
-    that runs after it.
-    """
-    from agentic import capability
-
-    capability.reset()
-    yield
-    capability.reset()
-
-
 @pytest.fixture
 def workspace(tmp_path):
     from agentic.workspace import Workspace

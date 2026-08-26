@@ -21,8 +21,10 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 
 from langchain_core.messages import AIMessage
 
-# One turn is either a list of tool calls or a plain text reply (no tool calls).
-Turn = Union[List[Dict[str, Any]], str]
+# One turn is a list of tool calls, a plain text reply (no tool calls), or a dict
+# describing a reply in more detail — ``{"text": ..., "finish_reason": "length"}`` is
+# how a turn cut off at the provider's token cap is scripted.
+Turn = Union[List[Dict[str, Any]], str, Dict[str, Any]]
 
 
 class ScriptedLLM:
@@ -31,6 +33,11 @@ class ScriptedLLM:
     Mirrors only what the loop uses: ``bind_tools`` and ``ainvoke``. Once the script
     runs out it keeps returning a bare text message, which the loop treats as "no tool
     calls" — the same thing a real model does when it stops driving.
+
+    A dict turn carries the response metadata a plain string cannot. The truncation the
+    loop now corrects for is invisible in the content alone — the tell is
+    ``finish_reason``, and a turn cut off at the cap is written
+    ``{"text": "", "finish_reason": "length"}``.
     """
 
     def __init__(self, turns: Iterable[Turn], *, bind_error: Optional[Exception] = None):
@@ -55,6 +62,23 @@ class ScriptedLLM:
         turn = self.turns.pop(0)
         if isinstance(turn, str):
             return AIMessage(content=turn)
+        if isinstance(turn, dict):
+            if "tool" in turn or "name" in turn:
+                # A tool-call turn is a *list* of calls. A bare call dict would fall
+                # through as a reply with no content and no stated reason, which the
+                # loop reads as a truncation — a mis-scripted test would pass while
+                # exercising something else entirely.
+                raise ValueError(
+                    f"tool-call turn must be a list of calls, got a bare dict: {turn!r}"
+                )
+            metadata = {}
+            if turn.get("finish_reason"):
+                metadata["finish_reason"] = turn["finish_reason"]
+            return AIMessage(
+                content=turn.get("text", ""),
+                response_metadata=metadata,
+                additional_kwargs=turn.get("additional_kwargs") or {},
+            )
 
         tool_calls = []
         for i, call in enumerate(turn):
@@ -126,6 +150,19 @@ def summarize_trace(trace_path) -> str:
                 lines.append(f"  [turn {record.get('turn')}] said: {text[:110]}")
             if record.get("reasoning"):
                 lines.append(f"  [turn {record.get('turn')}] reasoning: {len(record['reasoning'])} chars")
+            if record.get("finish_reason") == "length":
+                lines.append(f"  [turn {record.get('turn')}] ^ cut off at the output token cap")
+        elif event == "truncation_nudge":
+            lines.append(
+                f"  [turn {record.get('turn')}] told it was cut off "
+                f"(correction {record.get('attempt')})"
+            )
+        elif event == "stall_nudge":
+            lines.append(f"  [turn {record.get('turn')}] stalled — nudged")
+        elif event == "truncated":
+            lines.append(
+                f"gave up after {record.get('truncations')} replies cut off at the token cap"
+            )
         elif event == "completed":
             lines.append(
                 f"completed after {record.get('tool_calls')} calls / "

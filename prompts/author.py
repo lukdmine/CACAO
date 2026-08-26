@@ -47,6 +47,13 @@ includes, `main()`, validation, the searcher, or the tuning loop. In scope: `tun
 `Inputs in` (use `in.<name>`), `ndRange`, `kernelFile`.
 
 ## How to work
+
+Open with a tool call, not a plan. Prose before the first call buys nothing, and a
+reply that spends its whole token allowance thinking gets cut off before the call
+lands — nothing is written and the turn is wasted. You have many turns and a large
+tool budget, so keep each reply small: one file per `write_file` is fine, and a
+targeted `edit_file` is better than a rewrite.
+
 1. `check_compilation()` compiles the driver with g++ and the kernel with NVRTC,
    exactly as the tuner will. Use it — a failure here costs nothing, the same
    failure after `end_step` costs a whole iteration.

@@ -90,9 +90,9 @@ cli.py
        └─ engine/worker.py     # Phase 2: per-branch loop (4 parallel async coroutines)
             ├─ nodes/plan.py         # LLM: detailed implementation plan
             ├─ nodes/author.py       # LLM tool loop: kernels.cu + framework regions, with compile check
-            │    └─ falls back to ↓ when the provider can't drive tools
-            ├─ nodes/implement.py    # LLM: write kernels.cu          (single-shot fallback)
-            ├─ nodes/configure.py    # LLM: fill framework.cpp regions (single-shot fallback)
+            │    └─ used unless AGENTIC_STEPS=False, which selects ↓ instead
+            ├─ nodes/implement.py    # LLM: write kernels.cu          (AGENTIC_STEPS=False only)
+            ├─ nodes/configure.py    # LLM: fill framework.cpp regions (AGENTIC_STEPS=False only)
             ├─ nodes/run.py          # subprocess: run pyktt tuner, get timing
             ├─ nodes/profile.py      # subprocess: run ncu profiler
             ├─ nodes/propose.py      # LLM: analyze results, propose next changes
@@ -157,24 +157,41 @@ The LLM owns four files — `kernels.cu` plus `region_kernels.cpp` / `region_par
 used to seed a step from an iteration that predates the region files.
 
 Knobs in `config.py`:
-- `AGENTIC_STEPS` — kill switch back to the two single-shot calls.
+- `AGENTIC_STEPS` — kill switch back to the two single-shot calls. The only route to
+  them; nothing selects them at runtime.
 - `STEP_TOOL_BUDGET` — tool calls per step (50); a runaway guard, median use is 12.
+- `STEP_TRUNCATION_RETRIES` — truncated replies corrected before the step gives up (3).
 - `CROSS_BRANCH_ACCESS` — `errors` / `log` / `index` / `off`. **No level exposes
   another branch's kernel or framework regions.** Parallel branches are parallel bets;
   a branch that can read the leader's code converges on it. Failure analyses prune dead
   ends without supplying a solution, which is the only sharing that pays.
 
-The loop falls back to `implement_node` + `configure_node` when the model emits no
-tool calls on turn 1, the provider errors, or the budget runs out with files missing.
-Worst case is the previous behaviour.
+**A turn with no tool call is corrected, not surrendered to.** There are two of them
+and they need opposite advice:
+
+- **Truncation** — the reply hit the provider's output token cap before reaching a
+  call. `agentic.loop._was_truncated` spots it from `finish_reason` (or from a reply
+  with no content, no call and no stated reason). The model is told it was cut off and
+  given an escalating correction (`_TRUNCATION_NUDGES`) that shrinks the unit of work.
+  After `STEP_TRUNCATION_RETRIES` the step ends `TRUNCATED`.
+- **A stall** — real prose, no call. One nudge, as before.
+
+This matters because thinking models spend the whole cap reasoning about a "write the
+kernel" prompt: on a 23-hour gdn_chunk_gen run, kimi-k3 did it 6 times in 17 steps,
+and because the loop read every one as "this provider cannot use tools", two
+consecutive hits took the tool loop offline for the remaining 33 authoring steps.
+
+**A step that cannot author its files fails the iteration.** `nodes/author._fail_iteration`
+writes an `[AUTHORING FAILED]` diagnosis to `run_output` and routes to `deciding` —
+the same route `implement_node` takes when its call comes back empty, and `decide`
+already reads it as a generation failure and retries with a smaller ask. Nothing
+re-runs the work through the single-shot calls: the silent path made a broken step
+look identical to a working one everywhere downstream.
 
 **`bind_tools` never raises.** For every provider here it attaches the schemas locally
 and returns — cerit is `ChatOpenAI` with a custom `base_url`, so a server without tool
-support is only discovered by calling it. `agentic/capability.py` remembers that
-verdict per `(provider, model)` for the run and skips the loop after two consecutive
-capability failures, so the discovery cost is paid once instead of on every iteration
-of all four branches. A completed step clears the count. The registry is process-global,
-so tests reset it via an autouse fixture.
+support is only discovered by calling it. It surfaces as `BIND_UNSUPPORTED`, which
+fails the iteration like any other aborted step.
 
 **Watch out:** a tool-call response has empty `content` by construction. `TrackedLLM.ainvoke`
 returns early on `response.tool_calls` — without that, its empty-content retry path
@@ -192,14 +209,17 @@ prompt; `forbid` regexes are checked before the compiler runs and fail the check
 
 ```bash
 conda activate ktt
-python -m pytest tests/ -q                       # 148 tests, ~9 s
+python -m pytest tests/ -q                       # 185 tests, ~13 s
 python -m pytest tests/ -m "not integration" -q  # skip the real g++/NVRTC link
 ```
 
 No live LLM calls: `agentic/replay.ScriptedLLM` drives the loop deterministically, and
-the same class replays a recorded `step_trace.jsonl`. The `integration` marker covers
-the real toolchain — it links the driver against `libktt.so` and NVRTC-compiles
-recorded kernels whose real outcome is known.
+the same class replays a recorded `step_trace.jsonl`. A scripted turn is a list of
+tool calls, a string (prose, no calls), or a dict carrying response metadata —
+`{"text": ..., "finish_reason": "length"}` is how a truncated reply is scripted.
+
+The `integration` marker covers the real toolchain — it links the driver against
+`libktt.so` and NVRTC-compiles recorded kernels whose real outcome is known.
 
 ### LLM Provider Configuration
 

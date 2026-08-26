@@ -187,7 +187,7 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "initialized": {"running", "failed"},
     # "implementing" and "configuring" stay valid alongside "authoring": output
     # directories written before the merge resume from whichever status they stopped at,
-    # and the fallback path inside author_node is those two nodes, which set them.
+    # and AGENTIC_STEPS=False runs those two nodes, which set them.
     "planning": {"authoring", "implementing", "deciding"},
     # proposing: the step ended without a passing compile check, so the tuner run is
     # skipped and the failure goes straight to analysis — the same route run.py takes

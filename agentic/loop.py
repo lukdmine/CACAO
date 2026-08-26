@@ -1,9 +1,22 @@
 """The agentic step loop.
 
 Drives one step: bind the tools, call the model, execute what it asks for, repeat
-until it ends the step or the budget runs out. Every outcome other than COMPLETED is
-something the caller can fall back from, so a provider that cannot do multi-turn tool
-use degrades to the previous single-shot path instead of failing the branch.
+until it ends the step or the budget runs out.
+
+A turn that produces no tool call is not the end of the step. The model is told what
+went wrong and gets another turn, because the two ways a turn comes back empty need
+different corrections and neither of them means the provider cannot use tools:
+
+  * cut off at the output token cap — the model reasoned until it ran out of room and
+    never reached the call. It is told so, and told to stop planning in prose. A
+    thinking model given a "write the whole kernel" prompt does this often enough that
+    swallowing it silently cost a 23-hour run its tool loop after two consecutive hits.
+  * a stall — real prose, no call. One nudge, as before; repeating it turns a confused
+    model into a bill.
+
+When the corrections run out the step ends and the caller fails the iteration. Nothing
+degrades to a quieter path: a step that could not author its files is a fact the branch
+has to see, not one to paper over.
 
 Every tool call is appended to a trace file as it happens, with full arguments, so a
 live run can be replayed offline (see agentic/replay.py) rather than re-run.
@@ -34,26 +47,72 @@ _NUDGE = (
     "(which requires a passing check_compilation)."
 )
 
+# Sent when a turn was cut off at the output token cap before it reached a tool call.
+# Escalating, because the corrections are not interchangeable: the first asks for the
+# behaviour change that usually suffices, the later ones shrink the unit of work until
+# whatever the model was trying to emit fits inside one reply.
+_TRUNCATION_NUDGES = (
+    "Your previous reply was cut off at the output token limit before you produced a "
+    "tool call, so nothing was written. Do not plan, explain or summarise in prose "
+    "first — your next reply must open with a tool call.",
+    "Cut off again. Reduce the size of the reply: call write_file for ONE file only, "
+    "or use edit_file to change just the part that differs. You have as many turns as "
+    "you need — the files do not have to be written in a single reply.",
+    "Cut off again. Emit the smallest useful call you can: a single edit_file on one "
+    "region, or read_file to reorient. Anything committed now is better than another "
+    "truncated reply.",
+)
+
+# How many truncated turns are corrected before the step gives up. Three, because the
+# correction escalates and the third is qualitatively different from the first; a model
+# that cannot answer inside its own cap after that is not going to.
+TRUNCATION_RETRIES = 3
+
 
 class StepOutcome(str, Enum):
     COMPLETED = "completed"
     NO_TOOL_CALLS = "no_tool_calls"
+    TRUNCATED = "truncated"
     BIND_UNSUPPORTED = "bind_unsupported"
     BUDGET_EXHAUSTED = "budget_exhausted"
     LLM_ERROR = "llm_error"
 
     @property
-    def should_fall_back(self) -> bool:
-        """Whether the caller should run the single-shot path instead.
+    def aborted(self) -> bool:
+        """Whether the step ended before the model could author anything.
 
-        BUDGET_EXHAUSTED is excluded: whether it is recoverable depends on whether the
-        files ended up complete, which only the caller can see.
+        BUDGET_EXHAUSTED is excluded: the model drove the loop and may well have
+        finished the files before running out of calls, which only the caller can see.
         """
         return self in (
             StepOutcome.NO_TOOL_CALLS,
+            StepOutcome.TRUNCATED,
             StepOutcome.BIND_UNSUPPORTED,
             StepOutcome.LLM_ERROR,
         )
+
+    @property
+    def diagnosis(self) -> str:
+        """What to tell the branch when a step ends on this outcome."""
+        return {
+            StepOutcome.NO_TOOL_CALLS: (
+                "the model answered in prose and never called a tool, so no kernel or "
+                "driver region was written"
+            ),
+            StepOutcome.TRUNCATED: (
+                "the model was cut off at its output token limit on every reply and "
+                "never reached a tool call, so nothing was written. It is spending the "
+                "whole reply budget reasoning before it acts"
+            ),
+            StepOutcome.BIND_UNSUPPORTED: (
+                "the provider rejected the tool schemas, so the authoring step could "
+                "not run at all"
+            ),
+            StepOutcome.LLM_ERROR: "the provider errored during the authoring step",
+            StepOutcome.BUDGET_EXHAUSTED: (
+                "the step ran out of tool calls before the files were complete"
+            ),
+        }.get(self, self.value)
 
 
 @dataclass
@@ -64,6 +123,7 @@ class StepResult:
     summary: str = ""
     error: str = ""
     text: str = ""
+    truncations: int = 0
     tools_used: Dict[str, int] = field(default_factory=dict)
 
     @property
@@ -115,6 +175,32 @@ def _normalize_tool_calls(message: AIMessage) -> List[Dict[str, Any]]:
     return out
 
 
+def _finish_reason(message: AIMessage) -> str:
+    """Why the provider stopped generating, or "" when it did not say.
+
+    ``length`` is the one that matters: it separates a model that chose not to call a
+    tool from one that never got the chance. This loop read both as the former until a
+    run lost its tool loop to the difference.
+    """
+    metadata = getattr(message, "response_metadata", None) or {}
+    reason = metadata.get("finish_reason") or metadata.get("stop_reason") or ""
+    return str(reason)
+
+
+def _was_truncated(message: AIMessage, content: str) -> bool:
+    """Whether an empty-handed turn was cut off rather than declined.
+
+    An explicit ``length`` is the reliable signal. A reply with no content, no tool
+    call and no stated reason gets the same treatment: on the providers seen here it
+    is the same event with the metadata missing, and the correction — be shorter, call
+    a tool directly — is the right advice either way.
+    """
+    reason = _finish_reason(message)
+    if reason in ("length", "max_tokens", "MAX_TOKENS"):
+        return True
+    return not reason and not content.strip()
+
+
 async def run_agentic_step(
     llm,
     system_message: str,
@@ -124,12 +210,16 @@ async def run_agentic_step(
     budget: int = 50,
     trace_path: Optional[Path] = None,
     schemas: Optional[List[type]] = None,
+    truncation_retries: int = TRUNCATION_RETRIES,
 ) -> StepResult:
-    """Run one authoring step to completion, budget exhaustion, or a fallback signal.
+    """Run one authoring step to completion, budget exhaustion, or an aborted outcome.
 
     ``schemas`` is what gets bound. Callers pass the set that can actually return
     something for this step (see agentic.tools.schemas_for); the module default exists
     for the replay harness and tests.
+
+    ``truncation_retries`` is how many times a reply cut off at the token cap is
+    corrected before the step gives up on the model reaching a tool call.
     """
     try:
         bound = llm.bind_tools(schemas if schemas is not None else SCHEMAS)
@@ -146,6 +236,7 @@ async def run_agentic_step(
     ]
     result = StepResult(StepOutcome.BUDGET_EXHAUSTED)
     nudged = False
+    truncations = 0
 
     while result.tool_calls < budget:
         result.turns += 1
@@ -168,6 +259,7 @@ async def run_agentic_step(
         # The model's own text and reasoning, so the trace is a complete record of the
         # step rather than only what it called.
         reasoning = (getattr(ai, "additional_kwargs", None) or {}).get("reasoning_content")
+        finish_reason = _finish_reason(ai)
         if content or reasoning:
             trace.write(
                 {
@@ -175,17 +267,64 @@ async def run_agentic_step(
                     "turn": result.turns,
                     "text": content,
                     "reasoning": reasoning or "",
+                    "finish_reason": finish_reason,
                     "tools": [c["name"] for c in calls],
                 }
             )
         if not calls:
-            # No tool call on the first turn means the model is not driving the loop at
-            # all — the caller's single-shot path will do better than a nudge war.
-            if result.turns == 1 or nudged:
+            # A turn that reached no tool call is corrected, not surrendered to. Which
+            # correction depends on why: a model cut off mid-thought needs to be told
+            # to be shorter, and telling it to "call more tools" instead is advice for
+            # a problem it does not have.
+            if _was_truncated(ai, content):
+                truncations += 1
+                result.truncations = truncations
+                if truncations > truncation_retries:
+                    trace.write(
+                        {
+                            "event": "truncated",
+                            "turn": result.turns,
+                            "truncations": truncations,
+                        }
+                    )
+                    log(
+                        f"Model cut off at its token limit {truncations}x without "
+                        "reaching a tool call — ending the step",
+                        "ERROR",
+                    )
+                    result.outcome = StepOutcome.TRUNCATED
+                    result.error = (
+                        f"reply cut off at the output token limit {truncations} times "
+                        f"(finish_reason={finish_reason or 'unreported'})"
+                    )
+                    return result
+                nudge = _TRUNCATION_NUDGES[
+                    min(truncations, len(_TRUNCATION_NUDGES)) - 1
+                ]
+                log(
+                    f"Turn {result.turns} was cut off at the token limit "
+                    f"(finish_reason={finish_reason or 'unreported'}) — telling the "
+                    f"model and retrying ({truncations}/{truncation_retries})",
+                    "WARN",
+                )
+                trace.write(
+                    {
+                        "event": "truncation_nudge",
+                        "turn": result.turns,
+                        "attempt": truncations,
+                        "text": nudge,
+                    }
+                )
+                messages.append(HumanMessage(content=nudge))
+                continue
+
+            # Real prose and no call: the model stalled. One nudge, as ever.
+            if nudged:
                 trace.write({"event": "no_tool_calls", "turn": result.turns})
                 result.outcome = StepOutcome.NO_TOOL_CALLS
                 return result
             nudged = True
+            trace.write({"event": "stall_nudge", "turn": result.turns})
             messages.append(HumanMessage(content=_NUDGE))
             continue
 

@@ -7,8 +7,12 @@ calls authoring two halves of that is a failure mode by construction. It is also
 only shape in which a compile check means anything, since the kernel cannot be
 NVRTC-compiled without the ``#define``s the params region declares.
 
-Both original nodes remain and are called verbatim whenever the loop cannot run, so
-the worst case here is the behaviour this replaced.
+A step that cannot author its files fails the iteration and routes to decide, which is
+what the branch already does with an implementation that comes back empty. It does not
+quietly re-run the work through the two single-shot calls: a run once lost its tool
+loop for its last 33 authoring steps that way, because the silent path made the
+failure look like a success to everything downstream. ``AGENTIC_STEPS`` remains as a deliberate
+switch back to those calls; nothing turns it off on your behalf.
 """
 
 from pathlib import Path
@@ -24,8 +28,7 @@ from utils.inputs import load_inputs_spec, scalar_contract_text
 from utils.log import log
 from utils.rules import parse_rules
 from state.types import WorkingState
-from agentic import capability
-from agentic.loop import StepOutcome, run_agentic_step
+from agentic.loop import StepResult, run_agentic_step
 from agentic.tools import Toolbox, schemas_for
 from agentic.workspace import ALL_FILES, REGION_KEYS, Workspace
 from nodes._llm_helper import build_prompt_context
@@ -184,6 +187,39 @@ async def _legacy(state: WorkingState) -> WorkingState:
     return await configure_node(state)
 
 
+def _fail_iteration(state: WorkingState, detail: str, result: StepResult) -> WorkingState:
+    """End the iteration on a step that produced nothing, and say why.
+
+    Routed to decide rather than propose: propose reads a kernel and its results to
+    suggest the next change, and neither exists here. This is the same route
+    implement_node takes when its single call comes back empty, and decide handles it
+    the same way — it reads the failure as a generation failure rather than a strategy
+    one and retries with a smaller ask.
+    """
+    log(f"Authoring step failed: {detail}", "ERROR")
+    lines = [
+        f"[AUTHORING FAILED] The authoring step produced no usable files: {detail}.",
+        "",
+        f"The step ran {result.turns} turn(s) and {result.tool_calls} tool call(s).",
+        "No kernel was compiled and no tuner run happened, so there are no results for "
+        "this iteration. This is a failure to generate code, not a failure of the "
+        "strategy — the previous iteration's kernel is still the branch's best.",
+    ]
+    if result.truncations:
+        lines += [
+            "",
+            f"The model's reply was cut off at its output token limit {result.truncations} "
+            "time(s) before it reached a tool call. It is reasoning until it runs out of "
+            "room to answer. The next attempt has to ask for less in one go: a single "
+            "targeted edit rather than a full rewrite.",
+        ]
+    if result.text:
+        lines += ["", "Last thing the model said before it stopped:", result.text.strip()[:1000]]
+    state.run_output = "\n".join(lines)
+    state.status = "deciding"
+    return state
+
+
 async def author_node(state: WorkingState) -> WorkingState:
     iteration = state.iter_num
     strategy = state.strategy
@@ -206,13 +242,6 @@ async def author_node(state: WorkingState) -> WorkingState:
 
     if not _cfg.AGENTIC_STEPS:
         log("AGENTIC_STEPS disabled — using single-shot implement + configure", "INFO")
-        return await _legacy(state)
-
-    # bind_tools is local for every provider here, so a provider that cannot drive the
-    # loop is only discovered by calling it. Without this the discovery cost is paid on
-    # every iteration of every branch.
-    if capability.should_skip_loop():
-        log("Provider cannot drive the tool loop (established earlier) — single-shot", "INFO")
         return await _legacy(state)
 
     # --- workspace ---
@@ -294,6 +323,7 @@ async def author_node(state: WorkingState) -> WorkingState:
         budget=getattr(_cfg, "STEP_TOOL_BUDGET", 50),
         trace_path=iter_dir / "step_trace.jsonl",
         schemas=schemas,
+        truncation_retries=getattr(_cfg, "STEP_TRUNCATION_RETRIES", 3),
     )
     log(
         f"Step {result.outcome.value}: {result.tool_calls} tool calls over "
@@ -301,32 +331,25 @@ async def author_node(state: WorkingState) -> WorkingState:
         f"{len(schemas)} tools bound (history={has_history}, siblings={has_siblings})"
     )
 
-    if result.outcome.should_fall_back:
+    if result.outcome.aborted:
+        detail = result.outcome.diagnosis
         if toolbox.internal_errors:
-            # The model drove the loop; a tool of ours raised and left it with nothing
-            # to converge on. Counting that as a capability failure would disable the
-            # loop for the whole run over our own bug.
-            log(
-                f"Step failed after {toolbox.internal_errors} internal tool error(s) — "
-                "not counting this against the provider",
-                "ERROR",
+            # A tool of ours raised and left the model with nothing to converge on.
+            # Worth saying out loud: the fix for that is here, not in the branch.
+            detail += (
+                f" (after {toolbox.internal_errors} internal tool error(s) — "
+                "an engine bug, not the model's)"
             )
-        else:
-            capability.record_failure(result.outcome.value)
-        log(f"Falling back to single-shot authoring ({result.outcome.value})", "WARN")
-        return await _legacy(state)
+        if result.error:
+            detail += f": {result.error}"
+        return _fail_iteration(state, detail, result)
 
     if not ws.complete():
-        # Budget exhausted with files still missing. Not a capability verdict — the
-        # model drove the loop, it just did not finish — so it does not count toward
-        # disabling the loop for the run.
-        log(
-            f"Step ended with files missing ({', '.join(ws.missing())}) — falling back",
-            "WARN",
+        return _fail_iteration(
+            state,
+            f"{result.outcome.diagnosis} — missing {', '.join(ws.missing())}",
+            result,
         )
-        return await _legacy(state)
-
-    capability.record_success()
 
     # --- commit ---
     written = ws.commit()
