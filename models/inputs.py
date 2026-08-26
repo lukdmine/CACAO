@@ -6,6 +6,7 @@ generated C++. See docs/superpowers/specs/2026-07-12-inputs-authoring-design.md.
 """
 
 import re
+from pathlib import PurePosixPath
 from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -56,10 +57,13 @@ class BufferSpec(BaseModel):
     dtype: Literal["int", "float"] = "float"
     size: str  # C++ expression over host-const scalars, e.g. "kSizeM * kSizeK"
     access: Literal["read", "write", "readwrite"] = "read"
-    init: Literal["random", "zeros", "custom"] = "random"
+    init: Literal["random", "zeros", "custom", "file"] = "random"
     min: Optional[Union[int, float]] = None  # random only
     max: Optional[Union[int, float]] = None  # random only
     body: Optional[str] = None  # custom only: verbatim C++, must return std::vector<dtype>
+    # file only: path relative to problems/<slug>/inputs/. Raw little-endian elements
+    # of dtype; byte count must equal size * sizeof(dtype) (checked at driver start).
+    file_name: Optional[str] = None
     validate_output: bool = Field(False, alias="validate")
 
     model_config = {"populate_by_name": True}
@@ -75,6 +79,20 @@ class BufferSpec(BaseModel):
     def check(self):
         if self.init == "custom" and not (self.body or "").strip():
             raise ValueError(f"Buffer '{self.name}' has init=custom but an empty body")
+        if self.init == "file":
+            if not (self.file_name or "").strip():
+                raise ValueError(
+                    f"Buffer '{self.name}' has init=file but an empty file_name"
+                )
+            parts = PurePosixPath(self.file_name).parts
+            if (
+                self.file_name.startswith("/")
+                or ".." in parts
+            ):
+                raise ValueError(
+                    f"Buffer '{self.name}': file_name '{self.file_name}' must be a "
+                    "relative path inside the problem's inputs/ directory"
+                )
         if self.init == "random" and self.min is not None and self.max is not None:
             if self.min > self.max:
                 raise ValueError(f"Buffer '{self.name}': random min > max")
