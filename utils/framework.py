@@ -9,8 +9,6 @@ which one is validated, arg order) lives in the user-owned ``inputs.hpp`` and is
 consumed at runtime via the ``Inputs`` struct returned by ``DefineInputs()``.
 Only compile-time/structural values are baked in here; runtime scalars
 (duration, tolerance, indices, paths) are passed as argv.
-
-See docs/FRAMEWORK_FILE_SPEC.md.
 """
 
 from __future__ import annotations

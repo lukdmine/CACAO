@@ -1,8 +1,7 @@
 """Pydantic model for the three LLM-authored framework-file regions.
 
 Used by configure_node to structure LLM output. The three bodies are spliced into
-the engine skeleton by utils.framework.assemble_framework_cpp(). See
-docs/FRAMEWORK_FILE_SPEC.md §9.
+the engine skeleton by utils.framework.assemble_framework_cpp().
 """
 
 from pydantic import BaseModel, Field

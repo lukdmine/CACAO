@@ -2,7 +2,7 @@
 
 Phase 2 of framework-file autotuning. Kept separate from run.py so it can be
 tested independently and reused once configure.py emits framework.cpp per
-iteration. Compile/link flags were locked in Phase 0 (see FRAMEWORK_FILE_SPEC §14):
+iteration. Compile/link flags were locked in Phase 0:
 the driver is host-compiled and linked against libktt.so; libcuda/libnvrtc come
 transitively, and no CUDA host includes are needed (NVRTC uses them at runtime).
 """
@@ -201,7 +201,7 @@ def driver_command(
     kernel_file,
     ref_file,
 ) -> list[str]:
-    """argv for a compiled framework driver (see FRAMEWORK_FILE_SPEC §14).
+    """argv for a compiled framework driver.
 
     KTT writes ``<output_base>.json``.
     """

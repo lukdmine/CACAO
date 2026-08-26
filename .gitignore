@@ -242,3 +242,5 @@ __marimo__/
 # regenerates inputs.hpp at the start of every run (cli.py, api/helpers.py), and the
 # python-reference variants bake in the generating machine's interpreter and repo path.
 problems/*/inputs.hpp
+
+docs/local/
