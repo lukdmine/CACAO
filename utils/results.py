@@ -255,6 +255,55 @@ def load_results(results_path: Path) -> Optional[dict]:
         return None
 
 
+def ensure_results_loadable(results_path: Path) -> bool:
+    """Make a results.json written by an older KTT readable by the current one.
+
+    KTT 2.3 added a ``Timestamp`` field to every serialised KernelResult and reads it
+    back with ``j.at("Timestamp")``, which throws — it does not default — so a file
+    written by 2.2 aborts ``Tuner::LoadResults`` with
+    ``[json.exception.out_of_range.403] key 'Timestamp' not found``.
+
+    Only the profile node loads a results.json back into KTT, and only ever the one
+    from its own iteration. That file is written by the same driver moments earlier on
+    a fresh run, so this is a no-op there; it matters when resuming a run tuned before
+    the KTT upgrade, where the file on disk predates the field.
+
+    An empty string is the right filler: the field is metadata KTT never interprets,
+    and inventing a timestamp would date the result to the migration rather than the
+    run. Returns True when the file was rewritten.
+    """
+    data = load_results(results_path)
+    if data is None:
+        return False
+
+    results = data.get("Results")
+    if not isinstance(results, list):
+        return False
+
+    patched = [r for r in results if isinstance(r, dict) and "Timestamp" not in r]
+    if not patched:
+        return False
+
+    for result in patched:
+        result["Timestamp"] = ""
+
+    try:
+        results_path.write_text(json.dumps(data), encoding="utf-8")
+    except OSError as e:
+        from utils.log import log
+
+        log(f"Could not migrate {results_path.name} for the current KTT: {e}", "WARN")
+        return False
+
+    from utils.log import log
+
+    log(
+        f"Migrated {results_path.name} for KTT 2.3 "
+        f"({len(patched)} result(s) had no Timestamp field)"
+    )
+    return True
+
+
 def check_results(results_path: Path) -> Tuple[bool, int, int]:
     """
     Check results.json for successful configurations.

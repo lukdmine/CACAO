@@ -19,7 +19,7 @@ from utils.build import compile_framework, driver_command, reference_build_extra
 from utils.files import save_output, get_iter_dir
 from utils.gpu_lock import acquire_gpu_lock
 from utils.log import log
-from utils.results import check_results
+from utils.results import check_results, ensure_results_loadable
 from state.types import WorkingState
 
 # Key metrics for CUDA optimization.
@@ -172,6 +172,11 @@ async def profile_node(state: WorkingState) -> WorkingState:
         ref_file = (cfg_yaml.get("reference") or {}).get("file", ref_file)
     except Exception as e:
         log(f"Failed to parse problem.yaml, using defaults: {e}", "WARN")
+
+    # Profile mode hands results.json back to KTT via LoadResults. A file written by a
+    # pre-2.3 KTT has no Timestamp field and aborts the driver on read, which only
+    # happens when resuming a run tuned before the upgrade.
+    ensure_results_loadable(results_path)
 
     log(f"Profiling best configuration ({num_ok}/{num_total} valid configs)")
 

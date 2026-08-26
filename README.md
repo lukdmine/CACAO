@@ -116,7 +116,7 @@ cuda-agentic-optimizer/
 |-- server.py               # FastAPI server entry point
 |-- config.py               # LLM providers, constants, token tracking
 |-- requirements.txt        # Python dependencies
-|-- libktt.so -> KTT/...    # Symlink to KTT core library
+|-- libktt.so -> KTT/...    # Symlink to KTT core library (pinned to v2.3.1)
 |
 |-- engine/                 # Orchestration (master + worker)
 |-- nodes/                  # LLM and subprocess nodes (10 nodes)
