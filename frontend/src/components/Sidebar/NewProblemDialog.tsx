@@ -357,7 +357,15 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
 
             // Saved either way: a signature mismatch or failed upload is reported, not
             // blocked. Keep the dialog open so it is read (and the upload retried).
-            const allWarnings = [...(res.warnings ?? []), ...uploadWarnings];
+            // The save checked for the binaries BEFORE the uploads above ran, so its
+            // "does not exist" warning (check_input_files' wording) is stale for a
+            // buffer whose upload just succeeded — drop it.
+            const allWarnings = [
+                ...(res.warnings ?? []).filter(
+                    (w) => !uploaded.some((n) => w.startsWith(`buffer '${n}' (init=file)`))
+                ),
+                ...uploadWarnings,
+            ];
             if (allWarnings.length) {
                 setWarnings(allWarnings);
                 await refreshProblems();
