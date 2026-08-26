@@ -189,7 +189,7 @@ def load_reference_time(output_dir: Path) -> Optional[float]:
     if not path.exists():
         return None
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         return data.get("reference_time_us")
     except Exception as e:
@@ -244,7 +244,7 @@ def load_results(results_path: Path) -> Optional[dict]:
         return None
 
     try:
-        with open(results_path) as f:
+        with open(results_path, encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         import logging

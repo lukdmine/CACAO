@@ -44,7 +44,7 @@ async def configure_node(state: WorkingState) -> WorkingState:
             f"{inputs_src} not found — the problem's I/O boundary was never generated. "
             "It comes from inputs.yaml at the start of a run; check that inputs.yaml exists."
         )
-    inputs_hpp = inputs_src.read_text()
+    inputs_hpp = inputs_src.read_text(encoding="utf-8")
     shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
 
     meta = yaml.safe_load(state.problem_yaml) if state.problem_yaml else {}

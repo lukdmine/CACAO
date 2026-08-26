@@ -1,0 +1,48 @@
+name: Gated DeltaNet chunked prefill (Qwen3.8-27B)
+description: >-
+  One Gated DeltaNet layer's chunked forward pass at Qwen3.8-27B dims. ref.py is the
+  spec: the Qwen authors' own reference, vendored so it cannot drift.
+
+  Layout is row-major, token-major: q,k (kT,kHk,kD); v,o (kT,kHv,kD); g,beta (kT,kHv);
+  state (kHv,kD,kD). 16 QK heads feed 48 V heads by repeat_interleave, so V head j reads
+  QK head j/3 — floor division; j % 16 computes a different problem. The kernel
+  L2-normalises q and k itself (eps 1e-6) and applies scale = 1/sqrt(kD).
+
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: kHv * kD
+  y: '1'
+  z: '1'
+# Baseline: output/reference_time.json is pre-seeded with 5970 us, measured on this 3090
+# at this shape. It is where two independent expert implementations converge -- fla's
+# chunked Triton kernel (what vLLM ships) at 5950 us, and NVIDIA's chunked WMMA CUDA
+# kernel (llama.cpp PR #26001) at ~6040 us once its unfused L2-norm passes are backed
+# out. llama.cpp's current recurrent kernel is 18920 us, so chunking alone is worth 3x
+# and is not the remaining prize. Roofline is 641 us (memory: 543 MB at 847 GB/s); both
+# expert kernels sit ~9x above it because the serial chunk recurrence starves occupancy,
+# not because of bandwidth. A speedup past ~9x is a bug.
+reference:
+  type: python
+  function: gdn_chunk_reference
+  file: ref.py
+validation:
+  # 2e-3 absolute, set by measuring every precision policy against the fp32 oracle at
+  # this shape (|o|max 0.167). fp16 operands + fp32 accum 1.03e-4; fp16 + fp16 accum
+  # 1.32e-4; bf16 + fp32 accum 8.32e-4; bf16 + bf16 accum 1.03e-3. Structural error is
+  # three orders away: dropping the carried state halfway measures 1.20e-1. So 2e-3
+  # admits the whole space of sane precision choices with 2x margin and still rejects a
+  # wrong kernel by 60x. Deliberately NOT tighter: a forbid-list on tensor cores is what
+  # stopped an earlier version of this problem from allowing what NVIDIA's own chunked
+  # GDN kernel (llama.cpp PR #26001) actually does.
+  tolerance: 0.002
+tuning:
+  duration_s: 100
+rules:
+  text:
+    - "Write the final `state` buffer correctly even though it is not validated. It is the
+       next layer's initial state, and leaving it unwritten solves an easier problem."
+  forbid:
+    - pattern: "cublas|cutlass|cudnn"
+      reason: "the point is to write the kernel, not to call a library that contains one"

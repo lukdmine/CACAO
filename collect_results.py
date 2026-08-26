@@ -73,14 +73,14 @@ INPUT_SIZE_FMT: dict[str, Callable[[dict], str]] = {
 def load_yaml(path: Path) -> dict:
     if not path.exists():
         return {}
-    return yaml.safe_load(path.read_text()) or {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
 def load_json(path: Path) -> Optional[dict]:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
 
@@ -204,7 +204,7 @@ def wall_clock_minutes(output_dir: Path) -> Optional[float]:
     if not log.exists():
         return None
     first = last = None
-    with log.open() as f:
+    with log.open(encoding="utf-8") as f:
         for line in f:
             m = TS_RE.match(line)
             if not m:
@@ -433,7 +433,7 @@ def write_csv(rows: list[dict]) -> None:
         "correctness_rate",
         "strategies_explored",
     ]
-    with open(OUTPUT_CSV, "w", newline="") as f:
+    with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=fields)
         w.writeheader()
         w.writerows(rows)

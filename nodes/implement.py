@@ -65,7 +65,7 @@ async def implement_node(state: WorkingState) -> WorkingState:
     # Framework mode: show the I/O boundary so the kernel signature matches it.
     inputs_src = get_problem_dir() / "inputs.hpp"
     if inputs_src.exists():
-        ctx["inputs_hpp"] = inputs_src.read_text()
+        ctx["inputs_hpp"] = inputs_src.read_text(encoding="utf-8")
 
     # State how THIS problem's scalars reach a kernel. inputs.hpp shows them as
     # `inline constexpr`, which reads like they are available everywhere — but NVRTC

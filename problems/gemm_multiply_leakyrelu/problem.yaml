@@ -1,0 +1,26 @@
+name: Gemm + Multiply + LeakyReLU (KernelBench L2/12)
+description: >-
+  KernelBench level2/12_Gemm_Multiply_LeakyReLU. A torch nn.Module is the
+  correctness oracle: y = leaky_relu(multiplier * (x @ W.T + b), negative_slope).
+  All tensors are ROW-MAJOR (torch layout) — note this differs from mmul, which is
+  column-major. The fused epilogue is the point: torch pays three passes over an
+  8192x8192 output, a custom kernel pays one.
+
+  Tolerance is absolute (KTT SideBySideComparison). Outputs are O(1) here, so 1e-2
+  is ~1.5% relative — tight enough to catch real bugs, loose enough for fp32
+  reassociation. Loosen it if you want TF32 tensor-core kernels to validate.
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: kOut
+  y: kBatch
+  z: '1'
+reference:
+  type: python
+  function: gemm_multiply_leakyrelu_reference
+  file: ref.py
+validation:
+  tolerance: 0.01
+tuning:
+  duration_s: 100

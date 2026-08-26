@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, uploadProblemInput, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType, type ProblemDetailResponse } from '@/api/client';
+import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, uploadProblemInput, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType, type RulesSpec, type ForbidRule, type ProblemDetailResponse } from '@/api/client';
 import { refreshProblems } from '@/api/hooks';
 import { Plus, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2, AlertTriangle, Info, Upload } from 'lucide-react';
 
@@ -39,7 +39,25 @@ function defaultForm(): CreateProblemData {
         grid_x: 'N', grid_y: '1', grid_z: '1',
         tolerance: 0.05,
         tuning: { duration_s: 100 },
+        rules: { text: [], forbid: [] },
     };
+}
+
+/** Accepts problem.yaml's shorthand (a bare list is `text`) as well as the full form. */
+function normalizeRules(raw: unknown): RulesSpec {
+    if (!raw) return { text: [], forbid: [] };
+    if (Array.isArray(raw)) return { text: raw.map(String), forbid: [] };
+    if (typeof raw === 'string') return { text: [raw], forbid: [] };
+    const r = raw as { text?: unknown; forbid?: unknown };
+    const text = Array.isArray(r.text) ? r.text.map(String) : typeof r.text === 'string' ? [r.text] : [];
+    const forbid = Array.isArray(r.forbid)
+        ? r.forbid.map((f) =>
+              typeof f === 'string'
+                  ? { pattern: f, reason: '' }
+                  : { pattern: String((f as ForbidRule).pattern ?? ''), reason: String((f as ForbidRule).reason ?? '') },
+          )
+        : [];
+    return { text, forbid };
 }
 
 /** Args passed to the reference kernel, in declaration order: buffers, plus `runtime` scalars. */
@@ -205,6 +223,9 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                     duration_s:
                         (data.config.tuning as { duration_s?: number } | undefined)?.duration_s ?? 100,
                 },
+                // Loaded so an edit round-trips them. Without this, saving a problem
+                // whose rules were written by hand would drop them.
+                rules: normalizeRules(data.config.rules),
             });
         } catch (err) {
             setError('Failed to load problem data: ' + (err instanceof Error ? err.message : String(err)));
@@ -870,6 +891,90 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                         <Input type="number" min={1} step={1} className="text-xs"
                                             value={form.tuning?.duration_s ?? 100}
                                             onChange={(e) => update('tuning', { duration_s: parseInt(e.target.value, 10) || 100 })} />
+                                    </div>
+                                </div>
+
+                                <Separator />
+
+                                {/* Kernel rules */}
+                                <div className="space-y-2">
+                                    <Label title="Constraints on how the kernel may be written. Prose goes in every prompt; patterns are checked before the compiler and fail the iteration.">
+                                        Kernel Rules (optional)
+                                    </Label>
+                                    <p className="text-xs text-zinc-500">
+                                        The reference defines correctness, not intent. Without rules a branch can
+                                        win by dropping to fp16 accumulation and still pass validation.
+                                    </p>
+
+                                    <div className="space-y-1.5">
+                                        <Label className="text-xs">Stated in every prompt (one per line)</Label>
+                                        <textarea
+                                            className="w-full rounded-md border bg-background px-3 py-2 text-xs font-mono min-h-[70px] resize-y"
+                                            placeholder={'Accumulate in fp32. Reduced-precision accumulation is not a valid optimization.'}
+                                            value={(form.rules?.text ?? []).join('\n')}
+                                            onChange={(e) =>
+                                                update('rules', {
+                                                    text: e.target.value.split('\n').filter((l) => l.trim()),
+                                                    forbid: form.rules?.forbid ?? [],
+                                                })
+                                            }
+                                        />
+                                    </div>
+
+                                    <div className="space-y-1.5">
+                                        <Label className="text-xs">Forbidden patterns — enforced, checked against kernels.cu before compiling</Label>
+                                        {(form.rules?.forbid ?? []).map((rule, i) => (
+                                            <div key={i} className="flex gap-2">
+                                                <Input
+                                                    className="text-xs font-mono flex-1"
+                                                    placeholder="regex, e.g. wmma::|mma\\.sync"
+                                                    value={rule.pattern}
+                                                    onChange={(e) => {
+                                                        const forbid = [...(form.rules?.forbid ?? [])];
+                                                        forbid[i] = { ...forbid[i], pattern: e.target.value };
+                                                        update('rules', { text: form.rules?.text ?? [], forbid });
+                                                    }}
+                                                />
+                                                <Input
+                                                    className="text-xs flex-1"
+                                                    placeholder="reason shown to the model"
+                                                    value={rule.reason}
+                                                    onChange={(e) => {
+                                                        const forbid = [...(form.rules?.forbid ?? [])];
+                                                        forbid[i] = { ...forbid[i], reason: e.target.value };
+                                                        update('rules', { text: form.rules?.text ?? [], forbid });
+                                                    }}
+                                                />
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    className="text-xs"
+                                                    onClick={() =>
+                                                        update('rules', {
+                                                            text: form.rules?.text ?? [],
+                                                            forbid: (form.rules?.forbid ?? []).filter((_, j) => j !== i),
+                                                        })
+                                                    }
+                                                >
+                                                    Remove
+                                                </Button>
+                                            </div>
+                                        ))}
+                                        <Button
+                                            type="button"
+                                            variant="outline"
+                                            size="sm"
+                                            className="text-xs"
+                                            onClick={() =>
+                                                update('rules', {
+                                                    text: form.rules?.text ?? [],
+                                                    forbid: [...(form.rules?.forbid ?? []), { pattern: '', reason: '' }],
+                                                })
+                                            }
+                                        >
+                                            + Forbidden pattern
+                                        </Button>
                                     </div>
                                 </div>
 

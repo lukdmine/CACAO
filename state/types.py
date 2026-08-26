@@ -111,10 +111,15 @@ class IterState(BaseModel):
     """
 
     iter_num: int
-    status: str  # planning | implementing | configuring | running | profiling | proposing | deciding | decided
+    status: str  # planning | authoring | implementing | configuring | running | profiling | proposing | deciding | decided
     next_status: Optional[str] = (
         None  # status for the *next* iteration (implementing | configuring | success | failed | branching)
     )
+    # What the authoring step is allowed to change. "config_only" is the agentic
+    # equivalent of the old skip_implement route to `configuring`: the kernel stands and
+    # only the framework regions move. Set by the worker from the decision's next_status,
+    # so decide.py and its prompt keep emitting the statuses they always did.
+    authoring_scope: Literal["full", "config_only"] = "full"
     # How this iteration was entered. Computed once by create_initial_iter_state from the
     # previous decision — implement branches on it to reach the fix_errors prompt. The
     # previous decision/feedback/kernel themselves come from state/history.py; only this
@@ -180,7 +185,14 @@ class SubStrategyDict(BaseModel):
 
 _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "initialized": {"running", "failed"},
-    "planning": {"implementing", "deciding"},
+    # "implementing" and "configuring" stay valid alongside "authoring": output
+    # directories written before the merge resume from whichever status they stopped at,
+    # and AGENTIC_STEPS=False runs those two nodes, which set them.
+    "planning": {"authoring", "implementing", "deciding"},
+    # proposing: the step ended without a passing compile check, so the tuner run is
+    # skipped and the failure goes straight to analysis — the same route run.py takes
+    # for a host-compile failure.
+    "authoring": {"running", "proposing", "deciding"},
     "implementing": {"configuring", "deciding"},
     "configuring": {"running", "deciding"},
     "running": {"profiling", "proposing", "deciding"},

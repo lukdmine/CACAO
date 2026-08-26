@@ -64,7 +64,7 @@ def _load_past_iter_states(
         if not state_file.exists():
             continue
         try:
-            with state_file.open("r") as f:
+            with state_file.open("r", encoding="utf-8") as f:
                 snap = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             log(f"Skipping corrupt state iter{n}: {e}", "WARN")
@@ -116,8 +116,23 @@ def output_excerpt(text: str, max_lines: int) -> tuple[str, str]:
     return "\n".join(lines[-max_lines:]), f"last {max_lines} lines"
 
 
+# Raw driver output is unbounded, so it gets an excerpt. A summarize_failures() summary
+# is not: it holds one line plus at most four context lines per DISTINCT diagnostic, and
+# the largest seen across recorded runs is 36 lines. Excerpting it at 30 clipped a
+# quarter of real summaries — the worst dropped 5 of 31 diagnostics — which re-creates in
+# miniature the problem deduplication was added to solve: a retry that never sees one of
+# the causes it is supposed to fix. Cap it high enough to be a runaway guard, not a filter.
+_RUN_OUTPUT_LINES = 30
+_SUMMARY_LINES = 200
+
+
 def _fmt_run_output(v: str) -> str:
-    excerpt, label = output_excerpt(v, 30)
+    limit = (
+        _SUMMARY_LINES
+        if v.lstrip().startswith(_FAILURE_SUMMARY_HEADING)
+        else _RUN_OUTPUT_LINES
+    )
+    excerpt, label = output_excerpt(v, limit)
     return f"**Run Output ({label}):**\n```\n{excerpt}\n```"
 
 
@@ -400,7 +415,7 @@ def format_existing_branches(output_dir: str) -> str:
             if not bfile.exists():
                 continue
             try:
-                with bfile.open() as f:
+                with bfile.open(encoding="utf-8") as f:
                     bm = json.load(f)
                 s = bm.get("strategy", {})
                 name = s.get("name", d.name)
@@ -440,7 +455,7 @@ def existing_branch_names(output_dir: str) -> set:
                 continue
             names.add(d.name)
             try:
-                with (d / "branch.json").open() as f:
+                with (d / "branch.json").open(encoding="utf-8") as f:
                     bm = json.load(f)
                 strategy_name = (bm.get("strategy") or {}).get("name")
                 if strategy_name:
@@ -472,7 +487,7 @@ def format_parent_context(branch_path: Optional[str]) -> str:
         if d.is_dir() and d.name.startswith("iter"):
             state_file = d / "state.json"
             if state_file.exists():
-                with state_file.open("r") as f:
+                with state_file.open("r", encoding="utf-8") as f:
                     iter_states.append(json.load(f))
 
     if not iter_states:
@@ -493,7 +508,7 @@ def format_parent_context(branch_path: Optional[str]) -> str:
     branch_file = parent_path / "branch.json"
     if branch_file.exists():
         try:
-            with branch_file.open("r") as f:
+            with branch_file.open("r", encoding="utf-8") as f:
                 ps = json.load(f)
             parent_name = ps.get("strategy", {}).get("name", "unknown")
             parent_plan = ps.get("plan", "") or ""

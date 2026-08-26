@@ -62,7 +62,7 @@ def read_control_signal(branch_path: Path) -> Optional[dict]:
     except (FileNotFoundError, OSError):
         return None
     try:
-        with consumed.open("r") as f:
+        with consumed.open("r", encoding="utf-8") as f:
             return json.load(f)
     except (json.JSONDecodeError, OSError):
         return None
@@ -75,7 +75,7 @@ def write_control_signal(branch_path: Path, signal: dict):
     branch_path.mkdir(parents=True, exist_ok=True)
     tmp = branch_path / "control.json.tmp"
     final = branch_path / "control.json"
-    with tmp.open("w") as f:
+    with tmp.open("w", encoding="utf-8") as f:
         json.dump(signal, f)
     tmp.replace(final)
 
@@ -92,7 +92,7 @@ def write_requeue(output_dir: Path, branch_path: Path):
     filename = f"{branch_path.name}_{int(time.time() * 1000)}.json"
     tmp = requeue_dir / f"{filename}.tmp"
     final = requeue_dir / filename
-    with tmp.open("w") as f:
+    with tmp.open("w", encoding="utf-8") as f:
         json.dump({"branch_path": str(branch_path)}, f)
     tmp.replace(final)
 
@@ -106,7 +106,7 @@ def read_requeue(output_dir: Path) -> List[Path]:
     for f in sorted(requeue_dir.iterdir()):
         if f.suffix == ".json":
             try:
-                with f.open("r") as fh:
+                with f.open("r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 paths.append(Path(data["branch_path"]))
                 f.unlink()

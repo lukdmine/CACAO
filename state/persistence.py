@@ -20,7 +20,7 @@ def _atomic_write_json(path: Path, data: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
-        with tmp.open("w") as f:
+        with tmp.open("w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
         tmp.replace(path)
     except BaseException:
@@ -47,7 +47,7 @@ def load_context_for_branch(branch_path: Path) -> Context:
     while path != path.parent:
         context_file = path / "context.json"
         if context_file.exists():
-            with context_file.open("r") as f:
+            with context_file.open("r", encoding="utf-8") as f:
                 return Context.model_validate(json.load(f))
         path = path.parent
     raise FileNotFoundError(f"No context.json found above {branch_path}")
@@ -83,7 +83,7 @@ def _migrate_legacy_max_iter(branch_path: Path) -> Optional[BranchConfig]:
         return None
 
     try:
-        with (branch_path / "branch.json").open("r") as f:
+        with (branch_path / "branch.json").open("r", encoding="utf-8") as f:
             legacy = json.load(f).get("max_iter")
     except (OSError, json.JSONDecodeError):
         return None
@@ -110,7 +110,7 @@ def load_branch_config(branch_path: Path) -> BranchConfig:
     """
     branch_path = Path(branch_path)
     try:
-        with (branch_path / "branch_config.json").open("r") as f:
+        with (branch_path / "branch_config.json").open("r", encoding="utf-8") as f:
             return BranchConfig.model_validate(json.load(f))
     except (OSError, json.JSONDecodeError, ValidationError):
         pass
@@ -163,7 +163,7 @@ def save_branch_manifest(branch_path: Path, manifest: BranchManifest):
 
 def load_branch_manifest(branch_path: Path) -> BranchManifest:
     """Load branch manifest from ``branch.json``."""
-    with (Path(branch_path) / "branch.json").open("r") as f:
+    with (Path(branch_path) / "branch.json").open("r", encoding="utf-8") as f:
         return BranchManifest.model_validate(json.load(f))
 
 
@@ -183,7 +183,7 @@ def load_iter_state(
     state_file = Path(branch_path) / f"iter{iter_num}" / "state.json"
     if optional and not state_file.exists():
         return None
-    with state_file.open("r") as f:
+    with state_file.open("r", encoding="utf-8") as f:
         return IterState.model_validate(json.load(f))
 
 
@@ -226,6 +226,9 @@ def create_initial_iter_state(
         # this iteration: the previous one IS this iteration's kernel. Adoption, not
         # carried context.
         kernel_code=prev_state.kernel_code if status == "configuring" else "",
+        # decide still emits "configuring" for skip_implement; the merged authoring step
+        # reads the same intent from here, so that prompt and its schema stay untouched.
+        authoring_scope="config_only" if status == "configuring" else "full",
     )
 
 

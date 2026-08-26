@@ -537,7 +537,7 @@ def generate_inputs_hpp(spec: InputsSpec, reference: dict = None, problem_dir=No
 
 
 def load_inputs_spec(path: Path) -> InputsSpec:
-    return InputsSpec.model_validate(yaml.safe_load(Path(path).read_text()) or {})
+    return InputsSpec.model_validate(yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {})
 
 
 def check_input_files(problem_dir, spec: InputsSpec) -> list:
@@ -591,14 +591,16 @@ def ensure_inputs_hpp(problem_dir) -> Path:
     reference = None
     problem_yaml = problem_dir / "problem.yaml"
     if problem_yaml.exists():
-        reference = (_yaml.safe_load(problem_yaml.read_text()) or {}).get("reference")
+        reference = (_yaml.safe_load(problem_yaml.read_text(encoding="utf-8")) or {}).get("reference")
 
     spec = load_inputs_spec(inputs_yaml)
     missing = check_input_files(problem_dir, spec)
     if missing:
         raise FileNotFoundError("Missing input files: " + "; ".join(missing))
     out = problem_dir / "inputs.hpp"
-    out.write_text(generate_inputs_hpp(spec, reference, problem_dir))
+    out.write_text(
+        generate_inputs_hpp(spec, reference, problem_dir), encoding="utf-8"
+    )
     return out
 
 
@@ -617,9 +619,10 @@ def write_inputs(problem_dir: Path, spec: InputsSpec, reference: dict = None) ->
     problem_dir.joinpath("inputs.yaml").write_text(
         yaml.safe_dump(
             spec.model_dump(by_alias=True, exclude_none=True), sort_keys=False
-        )
+        ),
+        encoding="utf-8"
     )
     problem_dir.joinpath("inputs.hpp").write_text(
-        generate_inputs_hpp(spec, reference, problem_dir)
+        generate_inputs_hpp(spec, reference, problem_dir), encoding="utf-8"
     )
     return check_input_files(problem_dir, spec)

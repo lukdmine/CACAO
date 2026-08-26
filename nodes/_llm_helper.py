@@ -319,7 +319,7 @@ def build_prompt_context(
 
         inputs_src = get_problem_dir() / "inputs.hpp"
         if inputs_src.exists():
-            inputs_hpp = inputs_src.read_text()
+            inputs_hpp = inputs_src.read_text(encoding="utf-8")
     except Exception:
         pass
 

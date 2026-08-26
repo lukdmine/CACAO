@@ -28,3 +28,10 @@ watchfiles>=1.0.0  # Required for uvicorn --reload exclude support
 # (nvidia-*-cu12 wheels), so no CUDA toolkit version match is needed:
 #   python -m pip install torch
 # (to pin a specific bundled CUDA instead: --index-url https://download.pytorch.org/whl/cu124)
+
+# --- Tests ---
+# The offline suite (tests/) needs these; the engine itself does not.
+#   python -m pytest tests/ -q            # full suite
+#   python -m pytest tests/ -m "not integration" -q   # skip the real g++/NVRTC link
+pytest>=7.0.0
+pytest-asyncio>=0.21.0

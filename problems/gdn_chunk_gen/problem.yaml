@@ -1,0 +1,99 @@
+name: Gated DeltaNet chunked prefill at the production micro-batch (Qwen3.8-27B)
+description: >-
+  One Gated DeltaNet layer's chunked forward pass at Qwen3.8-27B dims, at kT=512 --
+  the micro-batch size llama.cpp actually calls this op with. ref.py is the spec: the
+  Qwen authors' own reference, vendored so it cannot drift.
+
+  Layout is row-major, token-major: q,k (kT,kHk,kD); v,o (kT,kHv,kD); g,beta (kT,kHv);
+  state (kHv,kD,kD). 16 QK heads feed 48 V heads by repeat_interleave, so V head j reads
+  QK head j/3 — floor division; j % 16 computes a different problem. The kernel
+  L2-normalises q and k itself (eps 1e-6) and applies scale = 1/sqrt(kD).
+
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: kHv * kD
+  y: '1'
+  z: '1'
+
+# ---------------------------------------------------------------------------
+# Baseline: output/reference_time.json is pre-seeded with 411.28 us.
+#
+# That is NVIDIA's chunked WMMA CUDA kernel (llama.cpp PR #26001), measured on this 3090
+# by `test-backend-ops perf -o GATED_DELTA_NET` over 152 back-to-back runs at exactly
+# this shape (F32, head_count=16, head_size=128, n_seq_tokens=512, v_repeat=3).
+#
+# READ THIS BEFORE TRUSTING A SPEEDUP NUMBER. The baseline was measured under sustained
+# load, where the card holds ~1905 MHz. The KTT driver that measures YOUR kernel runs one
+# launch per configuration and idles for validation in between, so it sits at ~1740 MHz —
+# about 9% less clock. Reaching parity with 411 us inside KTT therefore means genuinely
+# beating the reference, and a reported 1.0x here is a real win, not a tie.
+#
+# Roofline is 43.6 us (36.9 MB of mandatory traffic at 847 GB/s). Both this kernel and the
+# reference sit ~10x above it. That gap is NOT bandwidth and NOT FLOPs — see rules.
+# A speedup past ~9x is a bug.
+# ---------------------------------------------------------------------------
+reference:
+  type: python
+  function: gdn_chunk_reference
+  file: ref.py
+
+validation:
+  # 2e-3 absolute, re-derived at THIS shape (kT=512, |o|max 0.146) rather than inherited:
+  #   bf16 operands            4.48e-4
+  #   fp16 operands            5.77e-5
+  #   dropping carried state   1.25e-1   <- structural
+  #   dropping inter-chunk     1.36e-1   <- structural
+  # So 2e-3 admits the whole space of sane precision choices with 4.5x margin and still
+  # rejects a structurally wrong kernel by 62x. Deliberately NOT tighter: a forbid-list on
+  # tensor cores is what stopped an earlier version of this problem from allowing what
+  # NVIDIA's own chunked GDN kernel actually does.
+  tolerance: 0.002
+
+tuning:
+  duration_s: 120
+
+rules:
+  text:
+    - "Write the final `state` buffer correctly even though it is not validated. It is the
+       next layer's initial state, and leaving it unwritten solves an easier problem."
+
+    - "kT is a RUNTIME argument and is NOT guaranteed to be a multiple of your chunk size.
+       llama.cpp calls this op with whatever the final micro-batch holds; its own test
+       suite exercises 33, 65, 100, 127, 129, 143 and 200 tokens. Size every grid with a
+       ceiling division and bound every load and store against kT. A kernel that is
+       correct only when kT divides evenly is not a valid solution — it will be rebuilt
+       and validated at kT in {100, 127, 500, 1000}, and failing any of those fails the
+       problem. Do not compute a chunk count as kT/CHUNK with integer division: that
+       silently drops the last partial chunk."
+
+    - "THE KERNEL TO BEAT IS LATENCY-BOUND, AND SO WAS OUR LAST ONE. This is the single
+       thing to fix, and it is neither bandwidth nor arithmetic.
+       Measured on this card at this shape:
+         reference        567.4 us at locked base clock -> 411.3 us at 1905 MHz  (converts 38% of the clock gain)
+         our kT=8192 kernel  513.7 us at locked base clock -> 470.0 us at 1740 MHz  (converts  9%)
+       At locked base clock our kernel is 9.5% FASTER than the reference. At real clocks
+       it is 14% slower. It does competitive work per cycle and then fails to fill the
+       machine: 384 blocks for each parallel stage and 192 for the serial scan, on 82 SMs,
+       with the scan at 20% achieved occupancy. Dependent-load stalls and barrier waits
+       are the cost, not DRAM and not FLOPs. Attack occupancy, block count, and
+       instruction-level parallelism — more independent work in flight per warp, fewer
+       dependent round trips, fewer barriers on the critical path."
+
+    - "Report, for EVERY kernel you launch, in EVERY proposal: achieved occupancy, blocks
+       per SM, achieved DRAM throughput in GB/s, and which of the three (latency, memory,
+       compute) you believe bounds it. A proposal that does not name the bound it is
+       attacking is not a proposal. The whole op moves 36.9 MB; if you are quoting a DRAM
+       figure far below 847 GB/s while claiming to be memory-bound, re-read your profile."
+
+    - "At kT=512 there are 8 chunks of 64 tokens, not 128. Optimisations that pay for
+       themselves by shortening a long serial recurrence do not pay here. Consider whether
+       the chunked formulation is even the right one at this size, and whether a different
+       chunk size, a different work decomposition across the 48 value heads, or fusing
+       stages that were separate at kT=8192 wins now. You are not required to reproduce
+       the previous design."
+
+  forbid:
+    - pattern: "cublas|cutlass|cudnn"
+      reason: "the point is to write the kernel, not to call a library that contains one"

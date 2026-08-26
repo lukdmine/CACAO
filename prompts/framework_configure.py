@@ -2,7 +2,7 @@
 
 Teaches the LLM to fill the three regions of a KTT C++ autotuning driver
 (CACAO:KERNELS / CACAO:PARAMS / CACAO:LAUNCHER). The engine assembles these into
-framework.cpp around a fixed skeleton. See docs/FRAMEWORK_FILE_SPEC.md.
+framework.cpp around a fixed skeleton.
 """
 
 SYSTEM = r"""You configure a **KTT C++ autotuning driver** by writing three C++ region bodies

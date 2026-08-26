@@ -1,0 +1,58 @@
+name: Depthwise 2D convolution (ggml CONV_2D_DW)
+description: >-
+  Depthwise 2D convolution. Each input channel is convolved with its own
+  KERNEL_H x KERNEL_W filter; there is no accumulation across channels.
+
+  Layout is whcn: input and output are (W, H, C, N) with W fastest, so channel c of
+  batch n starts at ((n*CHANNELS + c) * H) * W. The filter bank is (KW, KH, C) with KW
+  fastest.
+
+  Out-of-range taps are skipped, not treated as zero: output element (n, c, ox, oy)
+  sums input[n][c][iy][ix] * filter[c][ky][kx] over exactly those (ky, kx) whose
+  ix = ox*STRIDE + kx*DILATION - PADDING and iy = oy*STRIDE + ky*DILATION - PADDING
+  both land inside the input.
+
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: OUT_W * OUT_H * CHANNELS * BATCHES
+  y: '1'
+  z: '1'
+# Baseline: output/reference_time.json is pre-seeded with 1772.56 us -- ggml's current
+# CUDA kernel at this exact shape, measured on this 3090 with
+#   test-backend-ops perf -o CONV_2D_DW -b CUDA0
+# on llama.cpp master @ 1511ce3bc. That harness reports 524297 kB moved per run, so the
+# op is purely bandwidth-bound: 536.9 MB at this machine's measured 847 GB/s is a 634 us
+# floor, and the shipping kernel achieves 282 GB/s -- 33% of roofline, 2.8x off the floor.
+# It is one thread per output element with no shared memory and no reuse of the 3x3
+# neighbourhood that adjacent outputs share, unchanged since PR #14265 (June 2025).
+# A result past ~2.8x is a bug, not a win.
+#
+# Same harness, same commit, for the other two upstream perf shapes (not tuned here --
+# they are 7-13 us and sit below this machine's noise floor):
+#   [112,112,32,1] x [3,3,1,32]  s=1 p=1 -> 12.59 us / 237.65 GB/s
+#   [56,56,128,1]  x [5,5,1,128] s=2 p=2 ->  7.25 us / 259.57 GB/s
+reference:
+  type: cpu_c
+  function: conv2d_dw_reference
+  file: ref_cpu.c
+validation:
+  # 5e-5 absolute. Inputs are [-1,1] and 9 taps accumulate, so |out| <= 9 and honest
+  # fp32 reassociation costs at most ~5e-6. tf32 would cost ~5e-3, so this admits every
+  # fp32 summation order and rejects reduced precision by two orders of magnitude.
+  # Deliberate: ggml's kernel is fp32 and a PR that quietly drops precision will not merge.
+  tolerance: 5.0e-5
+tuning:
+  duration_s: 100
+rules:
+  text:
+    - "Accumulate in fp32. This kernel exists to be ported back into ggml, where the op
+       asserts F32 for the filter, the input and the destination."
+    - "Skip out-of-range taps rather than reading zero-padded memory. Reading outside the
+       input buffer is a correctness bug even when the padded value happens to be zero."
+  forbid:
+    - pattern: "cublas|cutlass|cudnn"
+      reason: "the point is to write the kernel, not to call a library that contains one"
+    - pattern: "__half|__nv_bfloat16|nvcuda::wmma|mma\\.sync|__float2tf32"
+      reason: "the upstream op is fp32 end to end; reduced precision is not a legal win here"

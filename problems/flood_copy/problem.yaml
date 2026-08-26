@@ -1,0 +1,22 @@
+name: Terrain Flooding
+description: 'Given a terrain height map, a water level, and a source cell, mark every
+  cell the water reaches. A cell floods if it is 4-connected to the source through cells
+  with height <= LEVEL. Map edges are walls; there is no wrap. Reachability is a global
+  fixed point: the number of propagation rounds depends on the terrain, not on any tuning
+  parameter. Output is an exact 0/1 mask.
+
+  '
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: MAP_W
+  y: MAP_H
+reference:
+  type: cpu_c
+  function: flood_reference
+  file: ref_cpu.c
+validation:
+  tolerance: 1.0e-06
+tuning:
+  duration_s: 100

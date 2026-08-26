@@ -1,6 +1,6 @@
 """Pydantic request/response schemas for the API."""
 
-from typing import Optional, Literal
+from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
 from models.inputs import InputsSpec
@@ -8,6 +8,21 @@ from models.inputs import InputsSpec
 
 class GpuConfig(BaseModel):
     index: int = 0
+
+
+class ForbidRule(BaseModel):
+    pattern: str
+    reason: str = ""
+
+
+class RulesConfig(BaseModel):
+    """Constraints on what a kernel may do. See utils/rules.py."""
+
+    text: List[str] = Field(default_factory=list)
+    forbid: List[ForbidRule] = Field(default_factory=list)
+
+    def is_empty(self) -> bool:
+        return not self.text and not self.forbid
 
 
 class TuningConfig(BaseModel):
@@ -22,6 +37,7 @@ class CreateProblemRequest(BaseModel):
     description: str
     gpu: Optional[GpuConfig] = None
     tuning: Optional[TuningConfig] = None
+    rules: Optional[RulesConfig] = None
     # All three run, and each takes different arguments:
     #   cuda   — a kernel over the boundary (buffers + runtime scalars), bound by position
     #   cpu_c  — a C function linked into the driver, every buffer as a pointer, scalars

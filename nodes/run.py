@@ -44,7 +44,7 @@ def _resolve_tuning_budget(problem_yaml_path: Path) -> tuple[float, str]:
     if _cfg.TUNER_TIMEOUT_OVERRIDE is not None:
         return float(_cfg.TUNER_TIMEOUT_OVERRIDE), "user override"
     try:
-        with open(problem_yaml_path) as f:
+        with open(problem_yaml_path, encoding="utf-8") as f:
             cfg_yaml = yaml.safe_load(f) or {}
         yaml_value = (cfg_yaml.get("tuning") or {}).get("duration_s")
         if yaml_value is not None:
@@ -145,7 +145,7 @@ async def run_node(state: WorkingState) -> WorkingState:
     tolerance = 1e-4
     ref_file = "ref_kernel.cu"
     try:
-        with open(problem_yaml_path) as f:
+        with open(problem_yaml_path, encoding="utf-8") as f:
             config_yaml = yaml.safe_load(f) or {}
         gpu_index = config_yaml.get("gpu", {}).get("index", 0)
         tolerance = (config_yaml.get("validation") or {}).get("tolerance", tolerance)

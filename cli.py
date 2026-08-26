@@ -28,7 +28,7 @@ from config import (
     OptimizerConfig,
     init_from_config,
 )
-from utils.files import load_file, clean_output_dir
+from utils.files import load_file, archive_output_dir, prune_archives
 from utils.log import log, TeeWriter
 
 
@@ -113,6 +113,12 @@ def parse_args():
         metavar="NEW_NAME",
         help="Clone this problem to a new directory with the given name and exit",
     )
+    parser.add_argument(
+        "--prune-archives",
+        action="store_true",
+        help="Delete regenerable files (tuner input dumps, compiled drivers) from "
+             "archive/output_* and exit. Kernels, results and decisions are kept.",
+    )
     return parser.parse_args()
 
 
@@ -129,7 +135,7 @@ def check_prerequisites(problem_dir: Path):
 
     # Check configured reference source file
     try:
-        problem_config = yaml.safe_load(problem_path.read_text()) or {}
+        problem_config = yaml.safe_load(problem_path.read_text(encoding="utf-8")) or {}
     except Exception as e:
         log(f"Failed to parse problem.yaml: {e}", "ERROR")
         return False
@@ -189,6 +195,19 @@ async def main():
 
     # Set dynamic output directory based on problem dir
     problem_dir = Path(args.dir).resolve()
+
+    # Handle --prune-archives fast bypass. Touches only archive/, never output/.
+    if args.prune_archives:
+        removed, freed = prune_archives(problem_dir)
+        if removed:
+            log(
+                f"Pruned {removed} regenerable file(s) from archived runs, "
+                f"freed {freed / 1e9:.2f} GB. Kernels, results and decisions kept.",
+                "SUCCESS",
+            )
+        else:
+            log("Nothing to prune — no archived runs, or already pruned.")
+        return 0
 
     # Handle --clone fast bypass
     if args.clone:
@@ -314,9 +333,8 @@ async def main():
         # Fresh run
         # Clean output directory
         if not args.no_clean:
-            log("Cleaning output directory...")
-            clean_output_dir()
-            log("Output directory cleaned", "SUCCESS")
+            # Moves the previous run to archive/output_N rather than deleting it.
+            archive_output_dir()
 
         log("Starting optimization workflow...")
         log("Flow: analyze → strategize → [parallel branches]\n")
@@ -329,7 +347,7 @@ async def main():
     log(f"Logging to {log_path}")
 
     log("Starting Queue Execution Engine...")
-    with log_path.open(log_mode) as _log_file:
+    with log_path.open(log_mode, encoding="utf-8") as _log_file:
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout = TeeWriter(old_stdout, _log_file)
         sys.stderr = TeeWriter(old_stderr, _log_file)

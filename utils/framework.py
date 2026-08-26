@@ -9,8 +9,6 @@ which one is validated, arg order) lives in the user-owned ``inputs.hpp`` and is
 consumed at runtime via the ``Inputs`` struct returned by ``DefineInputs()``.
 Only compile-time/structural values are baked in here; runtime scalars
 (duration, tolerance, indices, paths) are passed as argv.
-
-See docs/FRAMEWORK_FILE_SPEC.md.
 """
 
 from __future__ import annotations
@@ -160,6 +158,43 @@ def _region(body: str, empty_hint: str) -> str:
     return textwrap.indent(body, "    ")
 
 
+_REGION_MARKERS = {
+    "kernels": "KERNELS",
+    "params": "PARAMS",
+    "launcher": "LAUNCHER",
+}
+
+
+def extract_regions(framework_cpp: str) -> dict:
+    """Recover the three LLM region bodies from an assembled framework.cpp.
+
+    The inverse of the splicing done by assemble_framework_cpp, used to seed an
+    agentic step from an iteration that predates the region files — existing output
+    directories only carry framework.cpp, so without this a resumed branch would have
+    to rewrite from scratch what it should be editing.
+
+    Indentation added at assembly is stripped back off. A region whose body is only
+    the placeholder comment comes back empty, which is what it originally was.
+    """
+    import re as _re
+
+    regions: dict = {}
+    for key, marker in _REGION_MARKERS.items():
+        pattern = _re.compile(
+            rf"BEGIN CACAO:{marker}\b[^\n]*\n(.*?)\n[^\n]*END CACAO:{marker}\b",
+            _re.DOTALL,
+        )
+        match = pattern.search(framework_cpp or "")
+        if not match:
+            continue
+        body = textwrap.dedent(match.group(1)).strip("\n")
+        stripped = body.strip()
+        if stripped.startswith("//") and "\n" not in stripped:
+            body = ""  # the placeholder emitted for an empty region
+        regions[key] = body
+    return regions
+
+
 def _reference_blocks(ref: dict) -> tuple[str, str]:
     """(setup, bind) C++ for the validation reference, by reference type.
 
@@ -251,13 +286,13 @@ def main() -> int:
     )
     args = p.parse_args()
 
-    meta = yaml.safe_load(Path(args.problem).read_text())
+    meta = yaml.safe_load(Path(args.problem).read_text(encoding="utf-8"))
     regions = {
-        "kernels": Path(args.kernels).read_text() if args.kernels else "",
-        "params": Path(args.params).read_text() if args.params else "",
-        "launcher": Path(args.launcher).read_text() if args.launcher else "",
+        "kernels": Path(args.kernels).read_text(encoding="utf-8") if args.kernels else "",
+        "params": Path(args.params).read_text(encoding="utf-8") if args.params else "",
+        "launcher": Path(args.launcher).read_text(encoding="utf-8") if args.launcher else "",
     }
-    Path(args.out).write_text(assemble_framework_cpp(meta, regions, args.cuda_include))
+    Path(args.out).write_text(assemble_framework_cpp(meta, regions, args.cuda_include), encoding="utf-8")
     print(f"wrote {args.out}")
     return 0
 
