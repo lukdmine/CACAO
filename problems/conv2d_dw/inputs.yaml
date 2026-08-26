@@ -1,0 +1,106 @@
+headers:
+- <cmath>
+shared_setup: ''
+args:
+- kind: scalar
+  name: IN_W
+  dtype: int
+  value: 512
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: IN_H
+  dtype: int
+  value: 512
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: CHANNELS
+  dtype: int
+  value: 256
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: BATCHES
+  dtype: int
+  value: 1
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: KERNEL_W
+  dtype: int
+  value: 3
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: KERNEL_H
+  dtype: int
+  value: 3
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: STRIDE
+  dtype: int
+  value: 1
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: PADDING
+  dtype: int
+  value: 1
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: DILATION
+  dtype: int
+  value: 1
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: OUT_W
+  dtype: int
+  value: 512
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: OUT_H
+  dtype: int
+  value: 512
+  placements:
+  - host
+  - define
+- kind: buffer
+  name: input
+  dtype: float
+  size: IN_W * IN_H * CHANNELS * BATCHES
+  access: read
+  init: random
+  min: -1.0
+  max: 1.0
+  validate: false
+- kind: buffer
+  name: filter
+  dtype: float
+  size: KERNEL_W * KERNEL_H * CHANNELS
+  access: read
+  init: random
+  min: -1.0
+  max: 1.0
+  validate: false
+- kind: buffer
+  name: output
+  dtype: float
+  size: OUT_W * OUT_H * CHANNELS * BATCHES
+  access: write
+  init: zeros
+  validate: true

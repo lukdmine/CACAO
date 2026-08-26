@@ -1,0 +1,75 @@
+name: Depthwise 2D convolution, runtime dimensions (ggml CONV_2D_DW)
+description: >-
+  Depthwise 2D convolution. Each input channel is convolved with its own
+  KERNEL_H x KERNEL_W filter; there is no accumulation across channels.
+
+  Layout is whcn: input and output are (W, H, C, N) with W fastest, so channel c of
+  batch n starts at ((n*CHANNELS + c) * H) * W. The filter bank is (KW, KH, C) with KW
+  fastest.
+
+  Out-of-range taps are skipped, not treated as zero: output element (n, c, ox, oy)
+  sums input[n][c][iy][ix] * filter[c][ky][kx] over exactly those (ky, kx) whose
+  ix = ox*STRIDE + kx*DILATION - PADDING and iy = oy*STRIDE + ky*DILATION - PADDING
+  both land inside the input.
+
+  IN_W, IN_H, CHANNELS, BATCHES, OUT_W and OUT_H are RUNTIME kernel arguments, not
+  compile-time constants. The kernel must work for any values of them.
+
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: OUT_W * OUT_H * CHANNELS * BATCHES
+  y: '1'
+  z: '1'
+# Baseline: output/reference_time.json is pre-seeded with 1786.02 us -- ggml's current
+# CUDA kernel at this exact shape, measured on this 3090 with
+#   test-backend-ops perf -o CONV_2D_DW -b CUDA0
+# on llama.cpp master @ 1511ce3bc (a {513,513,256,1}x{3,3,1,256} F32 s=1 p=1 case added
+# to make_test_cases_perf). It is one thread per output element with no shared memory
+# and no reuse of the 3x3 neighbourhood adjacent outputs share, unchanged since #14265.
+#
+# The op moves (IN_W*IN_H + OUT_W*OUT_H) * CHANNELS * BATCHES * 4 = 539.0 MB and does
+# 1.2 GFLOP, so it is purely bandwidth-bound. This card sustains 842 GB/s on a
+# well-written streaming kernel (measured, 90% of the 3090's 936 GB/s peak), which puts
+# the floor at 640 us -- a 2.79x speedup. A result past that is a bug, not a win.
+#
+# Dimensions are DELIBERATELY odd (513, not 512). No vector-friendly tile width divides
+# 513, so a correct tail path is structurally required rather than merely requested. An
+# earlier version of this problem used 512 with compile-time dimensions; the winning
+# kernel reached 2.78x and then failed every configuration at 112x112 because it had
+# built its grid decomposition on 512 dividing exactly.
+reference:
+  type: python
+  function: conv2d_dw_reference
+  file: ref.py
+validation:
+  # 5e-5 absolute. Inputs are [-1,1] and 9 taps accumulate, so |out| <= 9 and honest
+  # fp32 reassociation costs at most ~5e-6. tf32 would cost ~5e-3, so this admits every
+  # fp32 summation order and rejects reduced precision by two orders of magnitude.
+  tolerance: 5.0e-5
+tuning:
+  duration_s: 100
+rules:
+  text:
+    - "IN_W, IN_H, CHANNELS, BATCHES, OUT_W and OUT_H arrive as runtime kernel arguments.
+       Do not assume any of them is a compile-time constant, a power of two, or divisible
+       by your tile size. A kernel that is correct only when the grid divides the work
+       exactly is not a valid solution to this problem."
+    - "This kernel is destined for ggml, where the same code must serve every shape the
+       op is called with. Prefer one kernel with a correct tail over a fast path that
+       needs the caller to guarantee alignment."
+    - "The op is memory-bound: it moves (IN_W*IN_H + OUT_W*OUT_H)*CHANNELS*BATCHES*4
+       bytes and does under 2 GFLOP. This card sustains ~842 GB/s. Compute achieved
+       bandwidth from your measured time and keep optimising until you are within 10% of
+       that ceiling -- below ~700 GB/s there is still structural work left, and a
+       correct-but-slow kernel is not the goal. Say what bandwidth you achieved in every
+       proposal."
+    - "Accumulate in fp32, and skip out-of-range taps rather than reading outside the
+       input buffer. Reading OOB memory is a correctness bug even when the value read
+       happens to be harmless."
+  forbid:
+    - pattern: "cublas|cutlass|cudnn"
+      reason: "the point is to write the kernel, not to call a library that contains one"
+    - pattern: "__half|__nv_bfloat16|nvcuda::wmma|mma\\.sync|__float2tf32"
+      reason: "the upstream op is fp32 end to end; reduced precision is not a legal win here"
