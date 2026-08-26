@@ -72,7 +72,7 @@ Run this whenever `state/types.py` or `models/` Pydantic models change.
 
 Create a directory under `problems/` with:
 - `problem.yaml` — GPU index, grid, reference (type/function/file), validation tolerance
-- `inputs.yaml` — the I/O boundary spec (scalars, buffers, which buffers validate); `inputs.hpp` is generated from it by `utils/inputs.py`
+- `inputs.yaml` — the I/O boundary spec (scalars, buffers, which buffers validate); `inputs.hpp` is generated from it by `utils/inputs.py`. A buffer with `init: file` + `file_name` reads a raw little-endian binary of its dtype from `inputs/<file_name>` (byte count must equal `size * sizeof(dtype)`); the UI upload puts files there via `POST /api/problems/{name}/inputs/{buffer}`
 - the reference implementation: `ref_kernel.cu` (`reference.type: cuda`), `ref_cpu.c` (`reference.type: cpu_c`, a C function linked into the driver — pointer args only, scalars as `-D` macros), **or** `ref.py` (`reference.type: python`, `f(scalars, buffers)`; extra imports like `torch` are optional per-problem deps — `pip install torch` — checked at engine start)
 
 See `docs/PROBLEM_YAML_GUIDE.md` and `docs/REFERENCE_IMPLEMENTATION_GUIDE.md` for format docs.
@@ -210,7 +210,7 @@ prompt; `forbid` regexes are checked before the compiler runs and fail the check
 
 ```bash
 conda activate ktt
-python -m pytest tests/ -q                       # 200 tests, ~14 s
+python -m pytest tests/ -q                       # 208 tests, ~14 s
 python -m pytest tests/ -m "not integration" -q  # skip the real g++/NVRTC link
 ```
 

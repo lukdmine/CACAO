@@ -43,16 +43,36 @@ def _call_name(node: ast.Call) -> str:
     return ""
 
 
-def _is_binary_mode(node: ast.Call) -> bool:
-    """A binary-mode open takes no encoding, and must not be flagged for lacking one."""
-    for arg in node.args[1:]:
-        if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and "b" in arg.value:
-            return True
+def _mode_arg(node: ast.Call):
+    """The mode argument of an ``open`` call, or None if there isn't one.
+
+    Its positional index depends on the call form: the builtin is ``open(path, mode)``
+    but ``Path.open(mode)`` carries the path as the receiver, so the mode is first.
+    ``read_text``/``write_text`` take no mode at all and are never binary.
+    """
+    if _call_name(node) != "open":
+        return None
+    index = 1 if isinstance(node.func, ast.Name) else 0
+    if len(node.args) > index:
+        return node.args[index]
     for kw in node.keywords:
-        if kw.arg == "mode" and isinstance(kw.value, ast.Constant):
-            if isinstance(kw.value.value, str) and "b" in kw.value.value:
-                return True
-    return False
+        if kw.arg == "mode":
+            return kw.value
+    return None
+
+
+def _is_binary_mode(node: ast.Call) -> bool:
+    """A binary-mode open takes no encoding, and must not be flagged for lacking one.
+
+    Scanning from ``args[1]`` regardless of call form read ``Path.open("wb")`` as text
+    and demanded an ``encoding`` kwarg that binary mode rejects at runtime.
+    """
+    mode = _mode_arg(node)
+    return (
+        isinstance(mode, ast.Constant)
+        and isinstance(mode.value, str)
+        and "b" in mode.value
+    )
 
 
 def test_no_engine_file_io_depends_on_the_locale():
@@ -90,6 +110,26 @@ def test_no_engine_file_io_depends_on_the_locale():
         'locale-dependent I/O found — pass encoding="utf-8" explicitly:\n'
         + "\n".join(offenders)
     )
+
+
+@pytest.mark.parametrize(
+    "source,binary",
+    [
+        ('p.open("wb")', True),
+        ('p.open("rb")', True),
+        ('p.open(mode="wb")', True),
+        ('p.open("w", encoding="utf-8")', False),
+        ('open(p, "wb")', True),
+        ('open(p, mode="rb")', True),
+        ('open(p, "w", encoding="utf-8")', False),
+        # The path is args[0] for the builtin; a "b" in it is not a mode.
+        ('open("blob.txt")', False),
+    ],
+)
+def test_binary_mode_detected_in_both_call_forms(source, binary):
+    """Path.open puts the mode where the builtin puts the path, and vice versa."""
+    call = ast.parse(source, mode="eval").body
+    assert _is_binary_mode(call) is binary
 
 
 def test_generated_inputs_hpp_really_does_contain_non_ascii(cov_problem):

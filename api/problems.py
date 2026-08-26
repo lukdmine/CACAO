@@ -1,9 +1,11 @@
 """Problem CRUD endpoints."""
 
+import os
 import re
 import shutil
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+import numpy as np
 import yaml
 
 from api.helpers import (
@@ -18,7 +20,13 @@ from api.schemas import (
     CloneProblemRequest,
     PreviewInputsRequest,
 )
-from utils.inputs import generate_inputs_hpp, load_inputs_spec, write_inputs
+from utils.inputs import (
+    INPUTS_SUBDIR,
+    generate_inputs_hpp,
+    load_inputs_spec,
+    write_inputs,
+)
+from utils.python_ref_runner import DTYPE_MAP, eval_size
 
 router = APIRouter()
 
@@ -167,15 +175,20 @@ def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
     return data
 
 
-def _write_problem_files(problem_dir, problem_data, req: CreateProblemRequest):
-    """Write problem.yaml, the reference source, and the inputs.yaml/inputs.hpp pair."""
+def _write_problem_files(problem_dir, problem_data, req: CreateProblemRequest) -> list[str]:
+    """Write problem.yaml, the reference source, and the inputs.yaml/inputs.hpp pair.
+
+    Returns warnings. A missing init=file binary does not block the save — the UI
+    uploads the file right after saving (and re-uploads on demand in Edit).
+    ensure_inputs_hpp still hard-fails at run start.
+    """
     with (problem_dir / "problem.yaml").open("w", encoding="utf-8") as f:
         yaml.dump(problem_data, f, default_flow_style=False, sort_keys=False)
     (problem_dir / _REFERENCE_FILE[req.reference_type]).write_text(_reference_source(req), encoding="utf-8")
     # The reference drives codegen: cpu_c needs its extern "C" declaration, host input
     # copies, and a SetReferenceComputation per validated buffer; python needs a lambda
     # that dumps the buffers and shells out to the runner.
-    write_inputs(problem_dir, req.inputs, problem_data["reference"])
+    return write_inputs(problem_dir, req.inputs, problem_data["reference"])
 
 
 @router.get("/api/problems")
@@ -231,12 +244,12 @@ def create_problem(req: CreateProblemRequest):
 
     problem_data = _build_problem_data(req, req.gpu.index if req.gpu else 0)
     problem_dir.mkdir(parents=True)
-    _write_problem_files(problem_dir, problem_data, req)
+    warnings = _write_problem_files(problem_dir, problem_data, req)
     return {
         "status": "created",
         "name": req.slug,
         "path": str(problem_dir),
-        "warnings": _signature_warnings(req),
+        "warnings": warnings + _signature_warnings(req),
     }
 
 
@@ -299,12 +312,96 @@ def update_problem(name: str, req: CreateProblemRequest):
         )
 
     problem_data = _build_problem_data(req, req.gpu.index if req.gpu else 0)
-    _write_problem_files(problem_dir, problem_data, req)
+    warnings = _write_problem_files(problem_dir, problem_data, req)
     return {
         "status": "updated",
         "name": name,
         "path": str(problem_dir),
-        "warnings": _signature_warnings(req),
+        "warnings": warnings + _signature_warnings(req),
+    }
+
+
+@router.post("/api/problems/{name}/inputs/{buffer_name}")
+async def upload_input_file(name: str, buffer_name: str, request: Request):
+    """Upload the binary for an init=file buffer.
+
+    Raw request body (application/octet-stream), streamed to disk in chunks — inputs
+    can be larger than RAM-friendly sizes, and python-multipart is not a dependency.
+    ``file_name`` comes from the saved spec, never from the client, so the path cannot
+    be steered outside the problem's inputs/ directory. The byte count must equal
+    size * sizeof(dtype) — the same contract the generated driver enforces at start.
+    """
+    problem_dir = get_problem_dir(name)
+    if is_problem_running(name):
+        raise HTTPException(
+            status_code=400, detail=f"Cannot upload inputs for '{name}' while running"
+        )
+
+    spec = load_inputs_spec(problem_dir / "inputs.yaml")
+    buf = next((b for b in spec.buffers if b.name == buffer_name), None)
+    if buf is None:
+        raise HTTPException(
+            status_code=404, detail=f"Buffer '{buffer_name}' not found in inputs.yaml"
+        )
+    if buf.init != "file":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Buffer '{buffer_name}' has init={buf.init} — uploads need init=file",
+        )
+
+    # Belt and braces: the model already rejects absolute paths and '..', but the
+    # resolved path staying under inputs/ is what makes this endpoint safe.
+    inputs_dir = (problem_dir / INPUTS_SUBDIR).resolve()
+    path = (inputs_dir / buf.file_name).resolve()
+    if not path.is_relative_to(inputs_dir):
+        raise HTTPException(
+            status_code=400, detail="file_name escapes the inputs/ directory"
+        )
+
+    scalars = {s.name: s.value for s in spec.scalars}
+    try:
+        elems = eval_size(buf.size, scalars)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Buffer '{buffer_name}': cannot evaluate size '{buf.size}': {e}",
+        )
+    want = elems * np.dtype(DTYPE_MAP[buf.dtype]).itemsize
+
+    # path.parent (not inputs_dir): file_name may name a subdirectory.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write to a .part file and rename on success: an existing good binary survives
+    # a rejected upload, and os.replace (same fs) is atomic — no torn reads.
+    tmp = path.parent / (path.name + ".part")
+    got = 0
+    too_big = False
+    try:
+        with tmp.open("wb") as f:
+            async for chunk in request.stream():
+                got += len(chunk)
+                if got > want:
+                    too_big = True
+                    break
+                f.write(chunk)
+    except Exception:
+        # A disconnect or cancelled request must not leave a partial binary behind —
+        # it would fail the driver's byte-count check minutes into a run.
+        tmp.unlink(missing_ok=True)
+        raise
+    if got != want:
+        tmp.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Buffer '{buffer_name}' expects {want} bytes ({elems} {buf.dtype}"
+            f" elements) but the upload {'exceeds that' if too_big else f'has {got} bytes'}",
+        )
+    os.replace(tmp, path)
+
+    return {
+        "status": "uploaded",
+        "buffer": buffer_name,
+        "file_name": buf.file_name,
+        "bytes": want,
     }
 
 
@@ -365,9 +462,19 @@ def get_problem(name: str):
     # The structured boundary, not the generated C++. Reloading the spec is what makes
     # Edit lossless: the form never has to reconstruct its state from inputs.hpp.
     inputs = None
+    input_files = {}
     inputs_yaml = problem_dir / "inputs.yaml"
     if inputs_yaml.exists():
-        inputs = load_inputs_spec(inputs_yaml).model_dump(by_alias=True)
+        spec = load_inputs_spec(inputs_yaml)
+        inputs = spec.model_dump(by_alias=True)
+        for b in spec.buffers:
+            if b.init == "file":
+                p = problem_dir / INPUTS_SUBDIR / b.file_name
+                input_files[b.name] = {
+                    "file_name": b.file_name,
+                    "exists": p.is_file(),
+                    "bytes": p.stat().st_size if p.is_file() else None,
+                }
 
     return {
         "name": name,
@@ -376,5 +483,7 @@ def get_problem(name: str):
         "ref_cpu": ref_cpu,
         "ref_python": ref_python,
         "inputs": inputs,
+        # Upload status per init=file buffer; the Edit dialog shows/replaces from this.
+        "input_files": input_files,
         "has_output": (problem_dir / "output").is_dir(),
     }

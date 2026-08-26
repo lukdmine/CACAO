@@ -12,9 +12,9 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType, type RulesSpec, type ForbidRule } from '@/api/client';
+import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, uploadProblemInput, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType, type RulesSpec, type ForbidRule, type ProblemDetailResponse } from '@/api/client';
 import { refreshProblems } from '@/api/hooks';
-import { Plus, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2, AlertTriangle, Info } from 'lucide-react';
+import { Plus, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2, AlertTriangle, Info, Upload } from 'lucide-react';
 
 // ── Default form state ───────────────────────────────────────────────────────
 function defaultForm(): CreateProblemData {
@@ -137,6 +137,10 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
     const [loadingGpus, setLoadingGpus] = useState(false);
     const [warnings, setWarnings] = useState<string[]>([]);
     const [previewHpp, setPreviewHpp] = useState('');
+    // Picked binaries for init=file buffers, keyed by buffer name; uploaded after save.
+    const [inputFiles, setInputFiles] = useState<Record<string, File>>({});
+    // What the server already holds for each file buffer (edit mode only).
+    const [serverInputFiles, setServerInputFiles] = useState<ProblemDetailResponse['input_files']>({});
 
     useEffect(() => {
         if (open && gpuDevices.length === 0) {
@@ -173,6 +177,8 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setError('');
         setWarnings([]);
         setPreviewHpp('');
+        setInputFiles({});
+        setServerInputFiles({});
     }
 
     async function loadProblemData() {
@@ -180,6 +186,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setLoading(true);
         try {
             const data = await fetchProblemDetail(editProblemName);
+            setServerInputFiles(data.input_files ?? {});
             const ref = (data.config.reference ?? {}) as { type?: ReferenceType; function?: string; block?: { x?: number; y?: number; z?: number } };
             const grid = (data.config.grid ?? {}) as { x?: string; y?: string; z?: string };
 
@@ -269,6 +276,45 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setArgs([...args, { kind: 'buffer', name: '', dtype: 'float', size: '', access: 'read', init: 'random', min: null, max: null, validate: false }]);
     }
 
+    // Picked files are keyed by buffer NAME (it rides along through reorder/remove).
+    // A rename migrates the key; a duplicate/empty name can only exist mid-typing —
+    // the server rejects duplicates on save, before any upload runs.
+    function pickInputFile(bufferName: string, e: React.ChangeEvent<HTMLInputElement>) {
+        const f = e.target.files?.[0];
+        e.target.value = ''; // re-picking the same file must fire onChange again
+        if (!f || !bufferName) return;
+        setInputFiles((prev) => ({ ...prev, [bufferName]: f }));
+        const a = args.find((x) => x.name === bufferName);
+        if (a?.kind === 'buffer' && !a.file_name) {
+            patchArg(args.indexOf(a), { file_name: f.name });
+        }
+    }
+
+    function renameArg(i: number, newName: string) {
+        const oldName = args[i]?.name;
+        patchArg(i, { name: newName });
+        if (oldName && oldName !== newName && inputFiles[oldName]) {
+            setInputFiles((prev) => {
+                const next = { ...prev };
+                next[newName] = next[oldName];
+                delete next[oldName];
+                return next;
+            });
+        }
+    }
+
+    function setInit(i: number, init: BufferSpec['init']) {
+        patchArg(i, { init });
+        if (init !== 'file') {
+            const name = args[i]?.name;
+            if (name) setInputFiles((prev) => {
+                const next = { ...prev };
+                delete next[name];
+                return next;
+            });
+        }
+    }
+
     async function handleSubmit() {
         setError('');
         setSubmitting(true);
@@ -277,10 +323,43 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 ? await createProblem(form)
                 : await updateProblem(editProblemName!, form);
 
-            // Saved either way: a signature mismatch is reported, not blocked (the regex
-            // cannot parse every legal declaration). Keep the dialog open so it is read.
-            if (res.warnings?.length) {
-                setWarnings(res.warnings);
+            // Upload the picked init=file binaries now that the problem is saved:
+            // the server derives file_name from the spec it just persisted and
+            // byte-checks against size × sizeof(dtype). Targets are the spec's own
+            // buffers, so a removed arg's stale pick is simply never sent.
+            const uploaded: string[] = [];
+            const uploadWarnings: string[] = [];
+            for (const a of form.inputs.args) {
+                if (a.kind !== 'buffer' || a.init !== 'file') continue;
+                const f = inputFiles[a.name];
+                if (!f) continue;
+                try {
+                    await uploadProblemInput(res.name, a.name, f);
+                    uploaded.push(a.name);
+                    // Keep the Edit-mode status truthful while the dialog stays open.
+                    setServerInputFiles((prev) => ({
+                        ...prev,
+                        [a.name]: { file_name: a.file_name ?? '', exists: true, bytes: f.size },
+                    }));
+                } catch (err) {
+                    uploadWarnings.push(
+                        `'${a.name}': ${err instanceof Error ? err.message : String(err)}`
+                    );
+                }
+            }
+            if (uploaded.length) {
+                setInputFiles((prev) => {
+                    const next = { ...prev };
+                    for (const n of uploaded) delete next[n];
+                    return next;
+                });
+            }
+
+            // Saved either way: a signature mismatch or failed upload is reported, not
+            // blocked. Keep the dialog open so it is read (and the upload retried).
+            const allWarnings = [...(res.warnings ?? []), ...uploadWarnings];
+            if (allWarnings.length) {
+                setWarnings(allWarnings);
                 await refreshProblems();
                 return;
             }
@@ -313,6 +392,15 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         const [item] = next.splice(fromIndex, 1);
         next.splice(toIndex, 0, item);
         return next;
+    }
+
+    function fmtBytes(n: number | null): string {
+        if (n === null) return '';
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let v = n;
+        let u = 0;
+        while (v >= 1024 && u < units.length - 1) { v /= 1024; u += 1; }
+        return `${u === 0 ? v : v.toFixed(1)} ${units[u]}`;
     }
 
     function formatGpuSubtitle(gpu: GpuDevice): string {
@@ -638,7 +726,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                             </span>
 
                                             <Input className="text-xs font-mono flex-1 min-w-0" placeholder="Name" value={a.name}
-                                                onChange={(e) => patchArg(i, { name: e.target.value })} />
+                                                onChange={(e) => renameArg(i, e.target.value)} />
 
                                             <select className="h-8 rounded border bg-background px-2 text-xs"
                                                 value={a.dtype}
@@ -699,11 +787,35 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                             <div className="flex items-center gap-2 pl-7 flex-wrap">
                                                 <select className="h-7 rounded border bg-background px-2 text-xs"
                                                     value={a.init}
-                                                    onChange={(e) => patchArg(i, { init: e.target.value as BufferSpec['init'] })}>
+                                                    onChange={(e) => setInit(i, e.target.value as BufferSpec['init'])}>
                                                     <option value="zeros">zeros</option>
                                                     <option value="random">random</option>
                                                     <option value="custom">custom</option>
+                                                    <option value="file">file</option>
                                                 </select>
+
+                                                {a.init === 'file' && (
+                                                    <>
+                                                        <label className="h-7 inline-flex items-center gap-1 rounded border px-2 text-xs cursor-pointer hover:bg-accent"
+                                                            title="Raw little-endian binary of the buffer dtype; byte count must equal size × sizeof(dtype). Uploaded when the problem is saved.">
+                                                            <input type="file" className="hidden"
+                                                                onChange={(e) => pickInputFile(a.name, e)} />
+                                                            <Upload size={12} />
+                                                            {inputFiles[a.name] ? inputFiles[a.name].name : 'choose file…'}
+                                                        </label>
+                                                        <Input className="text-xs font-mono w-40 h-7" placeholder="as inputs/…"
+                                                            value={a.file_name ?? ''}
+                                                            onChange={(e) => patchArg(i, { file_name: e.target.value || null })}
+                                                            title={`Stored as problems/${form.slug || '<slug>'}/inputs/${a.file_name || '<file>'}`} />
+                                                        {mode === 'edit' && serverInputFiles[a.name] && (
+                                                            <span className={`text-[11px] ${serverInputFiles[a.name].exists ? 'text-emerald-400' : 'text-amber-400'}`}>
+                                                                {serverInputFiles[a.name].exists
+                                                                    ? `on server (${fmtBytes(serverInputFiles[a.name].bytes)})${inputFiles[a.name] ? ' — will be replaced' : ''}`
+                                                                    : 'not uploaded yet'}
+                                                            </span>
+                                                        )}
+                                                    </>
+                                                )}
 
                                                 {a.init === 'random' && (
                                                     <>

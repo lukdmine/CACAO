@@ -59,11 +59,30 @@ export interface ProblemDetailResponse {
     // The structured boundary spec, not the generated inputs.hpp. Edit reloads this;
     // it never reconstructs form state from C++. Null for a problem with no inputs.yaml.
     inputs: InputsSpec | null;
+    // Upload status per init=file buffer (by buffer name); empty for problems without.
+    input_files: Record<string, { file_name: string; exists: boolean; bytes: number | null }>;
     has_output: boolean;
 }
 
 export async function fetchProblemDetail(name: string): Promise<ProblemDetailResponse> {
     return apiFetch<ProblemDetailResponse>(`/api/problems/${name}/detail`);
+}
+
+/**
+ * Upload a buffer's binary for init=file. Raw body (no multipart): the file IS the
+ * body. The server derives file_name from the saved spec and checks the byte count
+ * against size * sizeof(dtype) — call it AFTER saving the problem.
+ */
+export async function uploadProblemInput(name: string, buffer: string, file: File) {
+    const res = await fetch(
+        `${API_BASE}/api/problems/${name}/inputs/${encodeURIComponent(buffer)}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file },
+    );
+    if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`API ${res.status}: ${body}`);
+    }
+    return res.json() as Promise<{ status: string; buffer: string; file_name: string; bytes: number }>;
 }
 
 // =============================================================================
@@ -155,10 +174,11 @@ export interface BufferSpec {
     dtype: 'int' | 'float';
     size: string;                      // C++ expression over host-const scalars
     access: 'read' | 'write' | 'readwrite';
-    init: 'random' | 'zeros' | 'custom';
+    init: 'random' | 'zeros' | 'custom' | 'file';
     min?: number | null;               // random only
     max?: number | null;               // random only
     body?: string | null;              // custom only: verbatim C++ returning std::vector<dtype>
+    file_name?: string | null;         // file only: binary in problems/<slug>/inputs/
     validate: boolean;                 // checked against the reference; at least one buffer
 }
 
