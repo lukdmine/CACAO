@@ -90,10 +90,12 @@ args:
   max: 1
   validate: false
 
-# o is the validated output, checked at EVERY token. That matters: it is what makes the
-# obvious cheats fail. Dropping the carried state halfway through measures 0.120 against
-# an |o|max of 0.167 (a 72% error), and skipping the inter-chunk term entirely measures
-# 0.168 — both ~1000x the tolerance.
+# o is the validated output, checked at EVERY token, and it is the ONLY thing defining a
+# valid kernel — no rule constrains internal precision or instruction choice. That works
+# because structural error and precision error are three orders apart at this shape:
+# dropping the carried state halfway measures 0.120 against an |o|max of 0.167, and
+# skipping the inter-chunk term measures 0.168, while the loosest sane precision policy
+# (bf16 operands with bf16 accumulate) measures 1.03e-3.
 - kind: buffer
   name: o
   dtype: float
