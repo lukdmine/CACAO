@@ -220,7 +220,7 @@ prompt; `forbid` regexes are checked before the compiler runs and fail the check
 
 ```bash
 conda activate ktt
-python -m pytest tests/ -q                       # 216 tests, ~14 s
+python -m pytest tests/ -q                       # 221 tests, ~14 s
 python -m pytest tests/ -m "not integration" -q  # skip the real g++/NVRTC link
 ```
 
