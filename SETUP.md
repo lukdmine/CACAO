@@ -40,7 +40,11 @@ pip install -r requirements.txt
 If `libktt.so` is not already built:
 
 ```bash
-cd KTT
+# KTT is pinned to a release tag. utils/framework.py generates C++ against this
+# API and the driver is recompiled against these headers every iteration, so the
+# pin is a compatibility contract — do not build master.
+git clone https://github.com/HiPerCoRe/KTT.git
+cd KTT && git checkout v2.3.1
 
 # For a system-installed CUDA (nvcc in /usr/bin, headers in /usr/include), use /usr.
 # For a dedicated install, use its root, e.g. /usr/local/cuda.

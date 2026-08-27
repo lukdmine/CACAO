@@ -56,18 +56,18 @@ export function ProblemSidebar() {
                             <Card
                                 key={problem.name}
                                 onClick={() => setActiveProblem(problem.name)}
-                                className={`p-3 cursor-pointer transition-all duration-150 relative group ${isActive
+                                className={`p-3 gap-0 cursor-pointer transition-all duration-150 relative group ${isActive
                                     ? 'border-primary bg-primary/5 shadow-sm'
                                     : 'hover:bg-accent border-transparent'
                                     }`}
                             >
-                                <div className="flex items-center justify-between gap-1">
-                                    <span className={`text-sm font-medium truncate ${isActive ? 'text-primary' : ''}`} title={problem.name}>
+                                <div className="flex items-center justify-between gap-1 min-w-0">
+                                    <span className={`text-sm font-medium truncate min-w-0 ${isActive ? 'text-primary' : ''}`} title={problem.name}>
                                         {problem.name}
                                     </span>
                                     <Badge
                                         variant="outline"
-                                        className={`text-[10px] px-1.5 py-0 ${problem.status === 'running' ? 'text-amber-400 border-amber-500/30' :
+                                        className={`shrink-0 text-[10px] px-1.5 py-0 ${problem.status === 'running' ? 'text-amber-400 border-amber-500/30' :
                                             problem.status === 'completed' ? 'text-emerald-400 border-emerald-500/30' :
                                                 'text-zinc-400 border-zinc-500/30'
                                             }`}
@@ -76,7 +76,12 @@ export function ProblemSidebar() {
                                     </Badge>
                                 </div>
                                 {problem.description && (
-                                    <p className="text-[11px] text-muted-foreground mt-1 pr-6">{problem.description}</p>
+                                    <p
+                                        className="text-[11px] text-muted-foreground mt-1 pr-20 line-clamp-2 break-words"
+                                        title={problem.description}
+                                    >
+                                        {problem.description}
+                                    </p>
                                 )}
                                 <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
                                     <div onClick={(e) => e.stopPropagation()}>

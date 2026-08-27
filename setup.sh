@@ -243,15 +243,36 @@ if $SKIP_KTT; then
 else
     info "Step 5: Setting up KTT..."
 
-    # Clone (pinned to last known working commit — upstream master has broken Python bindings)
-    KTT_COMMIT="931c4157"
-    if [ -d "KTT" ]; then
-        success "KTT directory already exists — skipping clone"
-    else
+    # Pinned to a release tag, not master: the generated driver is compiled against
+    # these headers on every iteration, so the library it links has to be the one the
+    # codegen in utils/framework.py was written for.
+    KTT_TAG="v2.3.1"
+    if [ ! -d "KTT" ]; then
         info "Cloning KTT..."
         git clone https://github.com/HiPerCoRe/KTT.git
-        cd KTT && git checkout "$KTT_COMMIT" && cd ..
-        success "KTT cloned (pinned to $KTT_COMMIT)"
+        cd KTT && git checkout "$KTT_TAG" && cd ..
+        success "KTT cloned (pinned to $KTT_TAG)"
+    else
+        # An existing checkout used to be accepted as-is, which meant bumping the pin
+        # changed nothing for anyone who had already run setup — they kept building
+        # whatever was in KTT/ while the script reported the new version.
+        cd KTT
+        CURRENT="$(git describe --tags --always 2>/dev/null || echo unknown)"
+        if [ "$CURRENT" = "$KTT_TAG" ]; then
+            success "KTT already at $KTT_TAG"
+        elif [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+            # Never discard local work to move a pin. A modified KTT/ is either a patch
+            # someone needs or a mistake they should see; both deserve a stop.
+            warn "KTT/ is at $CURRENT, not $KTT_TAG, and has uncommitted changes"
+            echo "  Refusing to check out over them. Either keep this build as-is,"
+            echo "  or save your changes and re-run:"
+            echo "    git -C KTT diff > my-ktt.patch && git -C KTT checkout ."
+        else
+            info "Re-pinning KTT: $CURRENT -> $KTT_TAG"
+            git fetch --tags origin && git checkout "$KTT_TAG"
+            success "KTT re-pinned to $KTT_TAG"
+        fi
+        cd ..
     fi
 
     # Build

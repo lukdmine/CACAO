@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Project Is
 
-An **agentic CUDA kernel optimizer**: given a reference CUDA kernel and a `problem.yaml` spec, an LLM agent iteratively rewrites the kernel, benchmarks it with `pyktt` (the KTT autotuner), profiles with NCU, and uses the results to guide the next iteration — branching into multiple strategies in parallel.
+An **agentic CUDA kernel optimizer**: given a reference CUDA kernel and a `problem.yaml` spec, an LLM agent iteratively rewrites the kernel, benchmarks it with KTT (via a compiled C++ driver), profiles with NCU, and uses the results to guide the next iteration — branching into multiple strategies in parallel.
 
 ---
 
 ## Running the Backend
 
 ```bash
-# Activate the conda environment (required for pyktt/KTT compatibility)
+# Activate the conda environment (Python 3.10; what setup.sh provisions)
 conda activate ktt
 
-# Install Python deps (requires Python 3.10 for pyktt compatibility)
+# Install Python deps (Python 3.10)
 pip install -r requirements.txt
 
 # Copy .env and set your LLM provider key
@@ -36,7 +36,17 @@ python server.py              # http://localhost:8003
 python server.py --port 8080
 ```
 
-`pyktt.so` must be symlinked into the project root for the tuner to work.
+`libktt.so` must be symlinked into the project root for the driver to link. KTT is
+pinned to **v2.3.1** in `setup.sh`; `utils/framework.py` generates C++ against that
+API, so the pin is a compatibility contract, not a preference. The Python bindings
+(`pyktt`) are not built and not used — `setup.sh` deliberately omits `--python`.
+
+KTT 2.3 added a `Timestamp` field to every serialised `KernelResult` and reads it back
+with `j.at("Timestamp")`, which throws rather than defaulting. Only profile mode hands
+a `results.json` back to KTT (`Tuner::LoadResults`), and only its own iteration's, so a
+fresh run never hits it — but resuming a run tuned before the upgrade does, and the
+driver aborts with `[json.exception.out_of_range.403]`. `utils/results.ensure_results_loadable`
+injects the missing field before `nodes/profile.py` launches the driver.
 
 ---
 
@@ -94,7 +104,7 @@ cli.py
             │    └─ used unless AGENTIC_STEPS=False, which selects ↓ instead
             ├─ nodes/implement.py    # LLM: write kernels.cu          (AGENTIC_STEPS=False only)
             ├─ nodes/configure.py    # LLM: fill framework.cpp regions (AGENTIC_STEPS=False only)
-            ├─ nodes/run.py          # subprocess: run pyktt tuner, get timing
+            ├─ nodes/run.py          # subprocess: compile + run the KTT driver, get timing
             ├─ nodes/profile.py      # subprocess: run ncu profiler
             ├─ nodes/propose.py      # LLM: analyze results, propose next changes
             └─ nodes/decide.py       # LLM: continue / retry / branch / stop
@@ -210,7 +220,7 @@ prompt; `forbid` regexes are checked before the compiler runs and fail the check
 
 ```bash
 conda activate ktt
-python -m pytest tests/ -q                       # 208 tests, ~14 s
+python -m pytest tests/ -q                       # 221 tests, ~14 s
 python -m pytest tests/ -m "not integration" -q  # skip the real g++/NVRTC link
 ```
 

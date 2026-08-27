@@ -121,6 +121,35 @@ def read_requeue(output_dir: Path) -> List[Path]:
 # -------------------------------------------------------------------------
 
 
+def _recompute_branch_best(branch_path: Path, through_iter: int) -> tuple:
+    """The best time and speedup across iterations 1..through_iter, from what is on disk.
+
+    ``best_time_us`` is a running minimum that nothing ever raises: nodes/run.py only
+    lowers it, the worker copies it back onto the manifest, and api/tree.py treats the
+    manifest value as a floor it can only lower further. That is right while a branch
+    only moves forward, and wrong the moment a revert deletes the iteration that set it
+    — the branch would keep advertising a time whose kernel and results.json no longer
+    exist, to the frontend, to --best, and to the sibling branches that read it as the
+    score to beat.
+
+    Returns (best_time_us, speedup), either of which is None when no surviving
+    iteration recorded one.
+    """
+    best_time = None
+    best_speedup = None
+    for n in range(1, through_iter + 1):
+        state = load_iter_state(branch_path, n, optional=True)
+        if state is None:
+            continue
+        summary = state.results_summary or {}
+        t_us, speedup = summary.get("best_time_us"), summary.get("speedup")
+        if t_us is not None and (best_time is None or t_us < best_time):
+            best_time = t_us
+        if speedup is not None and (best_speedup is None or speedup > best_speedup):
+            best_speedup = speedup
+    return best_time, best_speedup
+
+
 def revert_branch_on_disk(
     branch_path: Path,
     target_iter: int,
@@ -160,6 +189,12 @@ def revert_branch_on_disk(
                     shutil.rmtree(d)
             except ValueError:
                 pass
+
+    # Only now that the later iterations are gone: the surviving ones are the whole
+    # truth about this branch, and the manifest has to agree with them.
+    manifest.best_time_us, manifest.speedup = _recompute_branch_best(
+        branch_path, target_iter
+    )
 
     save_branch_manifest(branch_path, manifest)
     return manifest.model_dump()
