@@ -272,6 +272,22 @@ class Toolbox:
 
     # -- compilation -------------------------------------------------------
 
+    def _compute_capability(self):
+        """The architecture the NVRTC check should target.
+
+        Auto-detection first, then whatever problem.yaml declares. gpu_info is
+        populated only by engine/master's get_gpu_details, which returns None whenever
+        NCU is unavailable or permission-restricted — a common setup, since NCU counter
+        access needs perf_event or root. Falling straight through to nvrtc's own
+        compute_52 default there meant a hand-written gpu.compute_capability was
+        ignored, and any kernel using cp.async, wmma or bf16 could never pass a check
+        it would pass on the real device: check_passed stays False, end_step refuses,
+        and the step burns its whole budget on a kernel that was fine.
+        """
+        return self.gpu_info.get("compute_capability") or (
+            (self.meta.get("gpu") or {}).get("compute_capability")
+        )
+
     def check_compilation(self) -> str:
         """Host-compile the assembled driver and NVRTC-compile the kernel."""
         from utils.build import compile_framework, reference_build_extras
@@ -295,7 +311,11 @@ class Toolbox:
         violations = self.rules.violations(self.ws.read("kernels.cu"))
         if violations:
             self.check_passed = False
-            return (
+            # last_check has to be written on this path too. It is what
+            # nodes/author.py reports as the reason when a step ends without a passing
+            # check, so leaving it holding an earlier — possibly PASSing — verdict made
+            # a rules violation look like something else entirely.
+            self.last_check = (
                 "Compilation check: FAIL\n\n"
                 "Problem rules: VIOLATED\n"
                 + "\n".join(f"- {v}" for v in violations)
@@ -303,6 +323,7 @@ class Toolbox:
                 "kernel without the forbidden construct; a faster kernel that breaks "
                 "them is not a valid result."
             )
+            return self.last_check
         if self.rules.forbid:
             parts.append("Problem rules: PASS")
 
@@ -340,7 +361,7 @@ class Toolbox:
             params_src,
             cuda_include=resolve_cuda_include(),
             scalar_defines=scalar_defines,
-            compute_capability=self.gpu_info.get("compute_capability"),
+            compute_capability=self._compute_capability(),
         )
         kernel_ok = all(c.ok for c in checks)
         parts.append(nvrtc.format_checks(checks, constrained=nvrtc.has_constraints(params_src)))
