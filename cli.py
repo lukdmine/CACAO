@@ -240,11 +240,13 @@ async def main():
         model=args.model,
         provider=args.provider,
     )
-    init_from_config(cfg)
-    model = args.model or get_default_model()
-
-    # Check API key and detect provider
+    # init_from_config and get_default_model both reach _detect_provider, which is what
+    # raises "No LLM provider detected". They have to be inside the try, or the message
+    # below is unreachable and a fresh checkout with no API key gets a raw traceback
+    # instead of the four lines telling it which variable to set.
     try:
+        init_from_config(cfg)
+        model = args.model or get_default_model()
         check_api_key()
         provider = get_provider()
         log(f"Using LLM provider: {provider}", "SUCCESS")

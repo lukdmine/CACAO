@@ -172,17 +172,35 @@ class TokenTracker:
         self.completion_tokens = 0
         self.total_tokens = 0
 
+    def record_usage(self, response) -> None:
+        """Add one response's token counts, whichever way its provider reports them.
+
+        ``usage_metadata`` is langchain's normalised field and every provider
+        integration here populates it. ``response_metadata["token_usage"]`` is the raw
+        provider payload, which only langchain_openai passes through — reading that
+        alone meant anthropic and gemini runs recorded zero tokens everywhere:
+        token_usage.json, the end-of-run banner, the frontend panel and
+        collect_results.py all reported 0 for an entire run.
+        """
+        usage = getattr(response, "usage_metadata", None)
+        if usage:
+            self.prompt_tokens += usage.get("input_tokens", 0)
+            self.completion_tokens += usage.get("output_tokens", 0)
+            self.total_tokens += usage.get(
+                "total_tokens",
+                usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+            )
+            return
+
+        raw = (getattr(response, "response_metadata", None) or {}).get("token_usage")
+        if raw:
+            self.prompt_tokens += raw.get("prompt_tokens", 0)
+            self.completion_tokens += raw.get("completion_tokens", 0)
+            self.total_tokens += raw.get("total_tokens", 0)
+
     def add(self, response):
         self.api_calls += 1
-        if (
-            hasattr(response, "response_metadata")
-            and "token_usage" in response.response_metadata
-        ):
-            usage = response.response_metadata["token_usage"]
-            if usage:
-                self.prompt_tokens += usage.get("prompt_tokens", 0)
-                self.completion_tokens += usage.get("completion_tokens", 0)
-                self.total_tokens += usage.get("total_tokens", 0)
+        self.record_usage(response)
 
     def save(self, output_dir: Path = None):
         """Persist current token stats to output/token_usage.json (atomic write)."""
@@ -433,16 +451,7 @@ class TrackedStructuredLLM:
             try:
                 response = await self._structured_llm.ainvoke(*args, **kwargs)
                 global_tracker.api_calls += 1
-                if hasattr(response, "response_metadata") and "token_usage" in getattr(
-                    response, "response_metadata", {}
-                ):
-                    usage = response.response_metadata["token_usage"]
-                    if usage:
-                        global_tracker.prompt_tokens += usage.get("prompt_tokens", 0)
-                        global_tracker.completion_tokens += usage.get(
-                            "completion_tokens", 0
-                        )
-                        global_tracker.total_tokens += usage.get("total_tokens", 0)
+                global_tracker.record_usage(response)
                 return response
             except Exception as e:
                 if not _is_transient_error(e):
@@ -725,18 +734,48 @@ _current_provider: Optional[str] = None
 _current_model: Optional[str] = None
 
 
+PROVIDERS = ("openai", "anthropic", "gemini", "cerit")
+
+# "claude" is what this repo's docs, its own error message and CLAUDE.md all called the
+# anthropic provider, so it is the value a user is most likely to write. It used to be
+# silently ignored and fall through to key-based detection, which prefers cerit.
+_PROVIDER_ALIASES = {"claude": "anthropic", "google": "gemini"}
+
+
+def _normalise_provider(value) -> Optional[str]:
+    """Map a user-supplied provider name to a canonical one, or None if unknown."""
+    name = str(value or "").strip().lower()
+    name = _PROVIDER_ALIASES.get(name, name)
+    return name if name in PROVIDERS else None
+
+
 def _detect_provider() -> str:
     """Auto-detect provider based on available API keys."""
     # Check module-level LLM_PROVIDER setting first
-    if LLM_PROVIDER in ("openai", "anthropic", "gemini", "cerit"):
-        return LLM_PROVIDER
+    if LLM_PROVIDER:
+        resolved = _normalise_provider(LLM_PROVIDER)
+        if resolved:
+            return resolved
 
     # Then check environment variable
     explicit_provider = os.getenv("LLM_PROVIDER", "").lower()
-    if explicit_provider in ["openai", "anthropic", "gemini", "cerit"]:
-        return explicit_provider
+    if explicit_provider:
+        resolved = _normalise_provider(explicit_provider)
+        if resolved:
+            return resolved
+        # Falling silently through to key-based detection is how a run configured for
+        # one provider quietly executes on another — and the value most likely to land
+        # here used to be "claude", which this project's own docs and the error message
+        # below both named.
+        from utils.log import log
 
-    # Auto-detect based on API keys (priority: cerit > claude > openai > gemini)
+        log(
+            f"LLM_PROVIDER={explicit_provider!r} is not a known provider "
+            f"({', '.join(PROVIDERS)}) — falling back to API-key detection.",
+            "WARN",
+        )
+
+    # Auto-detect based on API keys (priority: cerit > anthropic > openai > gemini)
     if os.getenv("CERIT_API_KEY") or os.getenv("CERIT_API_BASE"):
         return "cerit"
     if os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY"):
@@ -752,7 +791,7 @@ def _detect_provider() -> str:
         "  - ANTHROPIC_API_KEY or CLAUDE_API_KEY (for Claude)\n"
         "  - OPENAI_API_KEY (for OpenAI)\n"
         "  - GOOGLE_API_KEY or GEMINI_API_KEY (for Gemini)\n"
-        "Or set LLM_PROVIDER=openai|claude|gemini|cerit in your .env file"
+        "Or set LLM_PROVIDER=openai|anthropic|gemini|cerit in your .env file"
     )
 
 
