@@ -34,7 +34,7 @@ from state import (
 )
 
 
-async def _time_python_reference_once(problem_dir: Path, output_dir: Path) -> None:
+async def _time_python_reference_for_case(problem_dir, output_dir, cfg, ref, case, case_key) -> None:
     """Time a python reference's GPU op once, up-front, on the real inputs.
 
     For ``reference.type: python`` only: compiles+runs a standalone dump tool
@@ -54,44 +54,54 @@ async def _time_python_reference_once(problem_dir: Path, output_dir: Path) -> No
     import sys
     import yaml as _yaml
 
-    from utils.inputs import generate_dump_inputs_cpp, load_inputs_spec
+    from utils.inputs import (
+        generate_dump_inputs_cpp,
+        generate_inputs_hpp,
+        load_inputs_spec,
+    )
     from utils.build import compile_dump_inputs
     from utils.results import load_reference_time, save_reference_time
     from utils.cuda_env import get_subprocess_env
     from utils.gpu_lock import acquire_gpu_lock
 
-    if load_reference_time(output_dir) is not None:
-        return  # resume: already timed (first-write-wins persists it)
+    if load_reference_time(output_dir, case_key) is not None:
+        return  # resume, or a committed seed: first-write-wins persists it
 
     problem_dir = Path(problem_dir).resolve()
     output_dir = Path(output_dir).resolve()
-
-    try:
-        cfg = _yaml.safe_load((problem_dir / "problem.yaml").read_text(encoding="utf-8")) or {}
-    except Exception:
-        return
-    ref = cfg.get("reference") or {}
-    if str(ref.get("type", "cuda")).lower() != "python":
-        return
     ref_file = ref.get("file", "ref.py")
     ref_function = ref.get("function", "")
+    label = "" if case_key is None else f" [{case.name}]"
 
-    timing_dir = output_dir / "_ref_timing"
+    # Per case, because the dump tool #includes this case's header and the .bin files it
+    # writes therefore hold this case's shapes.
+    timing_dir = output_dir / "_ref_timing" / case.name
     timing_dir.mkdir(parents=True, exist_ok=True)
     dump_cpp = timing_dir / "dump_inputs.cpp"
     dump_bin = timing_dir / "dump_inputs"
 
     try:
-        spec = load_inputs_spec(problem_dir / "inputs.yaml")
+        spec = load_inputs_spec(problem_dir / "inputs.yaml").for_case(case)
+        (timing_dir / "inputs.hpp").write_text(
+            generate_inputs_hpp(spec, ref, problem_dir), encoding="utf-8"
+        )
+        (timing_dir / "inputs.yaml").write_text(
+            _yaml.safe_dump(
+                spec.model_dump(by_alias=True, exclude_none=True), sort_keys=False
+            ),
+            encoding="utf-8",
+        )
         dump_cpp.write_text(generate_dump_inputs_cpp(spec), encoding="utf-8")
     except Exception as e:
-        log(f"reference timing: could not generate dump_inputs.cpp: {e}", "WARN")
+        log(f"reference timing{label}: could not generate dump_inputs.cpp: {e}", "WARN")
         return
 
-    build = compile_dump_inputs(dump_cpp, dump_bin, problem_dir)
+    # The include dir is the timing dir, not the problem dir: this case's header lives
+    # beside the generated .cpp, and the problem dir only ever holds the primary's.
+    build = compile_dump_inputs(dump_cpp, dump_bin, timing_dir)
     if not build.ok:
         log(
-            f"reference timing: dump_inputs compile failed — "
+            f"reference timing{label}: dump_inputs compile failed — "
             f"falling back to KTT coarse time: {build.stderr}",
             "WARN",
         )
@@ -132,7 +142,7 @@ async def _time_python_reference_once(problem_dir: Path, output_dir: Path) -> No
             "-m",
             "utils.torch_ref_timer",
             "--inputs",
-            str(problem_dir / "inputs.yaml"),
+            str(timing_dir / "inputs.yaml"),
             "--ref",
             str(problem_dir / ref_file),
             "--function",
@@ -178,8 +188,43 @@ async def _time_python_reference_once(problem_dir: Path, output_dir: Path) -> No
         return
     us = float(m.group(1))
 
-    save_reference_time(output_dir, us)
-    log(f"Reference time (precise, GPU-only): {us:.2f} µs", "SUCCESS")
+    save_reference_time(output_dir, us, case_key)
+    log(f"Reference time{label} (precise, GPU-only): {us:.2f} µs", "SUCCESS")
+
+
+async def _time_python_reference_once(problem_dir: Path, output_dir: Path) -> None:
+    """Time a python reference's GPU op once per input case, up-front, on the real inputs.
+
+    Silent no-op for non-python references. A case that cannot be timed is skipped rather
+    than failing the run: KTT's coarse post-tune number remains the fallback, and a case
+    with no baseline at all reports no speedup, which utils.results.aggregate_case_summaries
+    turns into a null geomean rather than a flattering average over a subset.
+    """
+    import yaml as _y
+
+    from utils.cases import case_list
+
+    problem_dir = Path(problem_dir).resolve()
+    output_dir = Path(output_dir).resolve()
+    try:
+        cfg = _y.safe_load((problem_dir / "problem.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        return
+    ref = cfg.get("reference") or {}
+    if str(ref.get("type", "cuda")).lower() != "python":
+        return
+
+    cases = case_list(cfg)
+    primary = cases[0].name
+    for case in cases:
+        await _time_python_reference_for_case(
+            problem_dir,
+            output_dir,
+            cfg,
+            ref,
+            case,
+            None if case.name == primary else case.name,
+        )
 
 
 def _init_branch(
