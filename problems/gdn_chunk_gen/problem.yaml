@@ -40,32 +40,75 @@ reference:
   file: ref.py
 
 validation:
-  # 2e-3 absolute, re-derived at THIS shape (kT=512, |o|max 0.146) rather than inherited:
-  #   bf16 operands            4.48e-4
-  #   fp16 operands            5.77e-5
-  #   dropping carried state   1.25e-1   <- structural
-  #   dropping inter-chunk     1.36e-1   <- structural
-  # So 2e-3 admits the whole space of sane precision choices with 4.5x margin and still
-  # rejects a structurally wrong kernel by 62x. Deliberately NOT tighter: a forbid-list on
-  # tensor cores is what stopped an earlier version of this problem from allowing what
-  # NVIDIA's own chunked GDN kernel actually does.
+  # 2e-3 absolute, re-derived by MEASUREMENT against the current input distribution
+  # (mixed per-head decay, v in [-0.3, 5], nonzero s0) rather than by argument.
+  # Running the vendored oracle twice -- once in fp32, once with q/k/v/s0 round-tripped
+  # through fp16 -- gives the error floor any fp16 kernel inherits:
+  #     o      |ref|max 0.277   fp16 floor  max 1.17e-4   rms 1.33e-5
+  #     state  |ref|max 3.280   fp16 floor  max 9.41e-4   rms 1.27e-4
+  # So 2e-3 clears the worst case by 2.1x. It CANNOT be tightened: `state` is ~12x the
+  # magnitude of `o`, and a single ABSOLUTE bound is necessarily set by the larger
+  # buffer. 5e-4 was tried and rejected -- it sits below the fp16 floor on state and
+  # would make the problem unsolvable for exactly the tensor-core kernels it exists to
+  # find.
+  #
+  # llama.cpp's bar for the same op is NMSE 2e-7, roughly 1e-5 absolute on `o` here --
+  # 20x stricter than anything an absolute bound can express while `state` is validated.
+  # Closing that gap needs a relative/NMSE comparison
+  # (KTT ValidationMethod::SideBySideRelativeComparison), which the framework skeleton
+  # does not currently select. That is the open item, not a looser tolerance.
   tolerance: 0.002
 
 tuning:
   duration_s: 120
 
+cases:
+  # The shapes this problem's kT rule already names. kT is host+runtime, so every case
+  # compiles identical NVRTC input and differs only in the host driver's sizes and in
+  # what the reference is asked to compute.
+  - name: t512          # primary: the production micro-batch, and the ONLY shape with a
+    scalars: {kT: 512}  # measured baseline (411.28 us, llama.cpp PR #26001). The others
+                        # have none, so geomean_speedup stays null until they are measured.
+  - name: t100
+    scalars: {kT: 100}
+    duration_s: 30      # exists to catch a dropped tail chunk, not to find an optimum
+  - name: t127
+    scalars: {kT: 127}
+    duration_s: 30
+  - name: t500
+    scalars: {kT: 500}
+    duration_s: 60
+  - name: t1000
+    scalars: {kT: 1000}
+    duration_s: 60
+
 rules:
   text:
-    - "Write the final `state` buffer correctly even though it is not validated. It is the
-       next layer's initial state, and leaving it unwritten solves an easier problem."
+    - "`state` IS validated, and so is `o`. `state` is the recurrent state this chunk
+       leaves behind -- the next micro-batch's `s0` -- so a kernel can produce a
+       perfect `o` and still be worthless by writing it wrongly. Write it in the
+       declared layout: (kHv, kD, kD) flat h*kD*kD + dk*kD + dv."
+
+    - "`s0` is the state this chunk STARTS from and it is NOT zero. Load it; do not
+       assume the recurrence begins empty. It is zero only for the first micro-batch of
+       a fresh sequence, and in production it almost never is."
+
+    - "The decay `g` is a per-token log decay and its per-chunk cumulative sum reaches
+       roughly -19 at CHUNK=64 on this input distribution. Any factorisation that
+       computes exp(+G) or exp(-G) as a SEPARATE factor overflows fp16 (max e^11) and
+       fp32 (max e^88). Apply decay as a single bounded difference exp(G_i - G_j), which
+       is <= 1 for j <= i, or fold it so every staged factor stays bounded."
+
+    - "Clamp every fp32->fp16 conversion to +/-65504. Inputs here are not all O(1) --
+       `v` reaches 5, `s0` reaches 1, and intermediates are larger still. One inf
+       poisons a whole tensor-core tile."
 
     - "kT is a RUNTIME argument and is NOT guaranteed to be a multiple of your chunk size.
        llama.cpp calls this op with whatever the final micro-batch holds; its own test
        suite exercises 33, 65, 100, 127, 129, 143 and 200 tokens. Size every grid with a
        ceiling division and bound every load and store against kT. A kernel that is
-       correct only when kT divides evenly is not a valid solution — it will be rebuilt
-       and validated at kT in {100, 127, 500, 1000}, and failing any of those fails the
-       problem. Do not compute a chunk count as kT/CHUNK with integer division: that
+       correct only when kT divides evenly is not a valid solution. Do not compute a
+       chunk count as kT/CHUNK with integer division: that
        silently drops the last partial chunk."
 
     - "THE KERNEL TO BEAT IS LATENCY-BOUND, AND SO WAS OUR LAST ONE. This is the single
