@@ -434,3 +434,66 @@ async def test_second_iteration_binds_the_history_tools(env, monkeypatch):
     await author_mod.author_node(make_state(env, iter_num=2, current_iter=2))
 
     assert "grep_tuner_output" in set(captured["schemas"])
+
+
+async def test_seeding_recovers_an_aborted_step_from_its_staging(env, monkeypatch):
+    """A step that failed never committed, so its work is only in .staging/.
+
+    _fail_iteration returns before ws.commit(), so iter{N} holds no kernels.cu and no
+    region files. Reading only the iteration directory made every retry start from an
+    empty workspace — while the retry prompt told the model its current files were
+    shown below.
+    """
+    iter1 = env["branch"] / "iter1"
+    staging = author_mod.Workspace(iter1).staging
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "kernels.cu").write_text(
+        'extern "C" __global__ void k(){/*half written*/}\n', encoding="utf-8"
+    )
+    (staging / "region_params.cpp").write_text("// params so far\n", encoding="utf-8")
+
+    # Nothing was committed to the iteration directory itself.
+    assert not (iter1 / "kernels.cu").exists()
+
+    ws = author_mod.Workspace(env["branch"] / "iter2")
+    seeded = author_mod._seed_from_previous(ws, env["branch"], 2)
+
+    assert "kernels.cu" in seeded and "region_params.cpp" in seeded
+    assert "half written" in ws.read("kernels.cu")
+
+
+async def test_committed_files_win_over_stale_staging(env):
+    """Staging is only the fallback. A committed iteration must not be overridden by
+    an abandoned attempt left beside it."""
+    iter1 = env["branch"] / "iter1"
+    iter1.mkdir(parents=True, exist_ok=True)
+    (iter1 / "kernels.cu").write_text("// committed\n", encoding="utf-8")
+    staging = author_mod.Workspace(iter1).staging
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "kernels.cu").write_text("// abandoned\n", encoding="utf-8")
+
+    ws = author_mod.Workspace(env["branch"] / "iter2")
+    author_mod._seed_from_previous(ws, env["branch"], 2)
+
+    assert "committed" in ws.read("kernels.cu")
+
+
+def test_retry_prompt_does_not_promise_files_it_has_none_of(env):
+    """The retry and followup wordings both claimed "the current files are shown
+    below" unconditionally."""
+    empty = author_mod._task_text(make_state(env, iter_num=2, current_iter=2, mode="retry"), [])
+    assert "current files are shown below" not in empty
+    assert "workspace is empty" in empty.lower()
+
+    seeded = author_mod._task_text(
+        make_state(env, iter_num=2, current_iter=2, mode="retry"), ["kernels.cu"]
+    )
+    assert "current files are shown below" in seeded
+
+
+def test_followup_prompt_does_not_promise_files_it_has_none_of(env):
+    empty = author_mod._task_text(
+        make_state(env, iter_num=2, current_iter=2, mode="followup"), []
+    )
+    assert "edit them rather than rewriting" not in empty
+    assert "workspace is empty" in empty.lower()

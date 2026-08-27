@@ -66,6 +66,16 @@ def _stage_engine_files(state: WorkingState, iter_dir: Path, meta: dict) -> str:
     return inputs_src.read_text(encoding="utf-8")
 
 
+def _read_owned_files(directory: Path) -> dict:
+    """Whichever of the four LLM-owned files are present in one directory."""
+    contents = {}
+    for name in ALL_FILES:
+        candidate = directory / name
+        if candidate.exists():
+            contents[name] = candidate.read_text(encoding="utf-8")
+    return contents
+
+
 def _seed_from_previous(ws: Workspace, branch_path: Optional[Path], iteration: int) -> list:
     """Carry the previous iteration's files in so the step can edit rather than rewrite.
 
@@ -78,17 +88,16 @@ def _seed_from_previous(ws: Workspace, branch_path: Optional[Path], iteration: i
     if not prev.is_dir():
         return []
 
-    contents = {}
-    kernel = prev / "kernels.cu"
-    if kernel.exists():
-        contents["kernels.cu"] = kernel.read_text(encoding="utf-8")
+    contents = _read_owned_files(prev)
 
-    for name in ALL_FILES:
-        if name == "kernels.cu":
-            continue
-        staged = prev / name
-        if staged.exists():
-            contents[name] = staged.read_text(encoding="utf-8")
+    if not contents:
+        # The previous step aborted. _fail_iteration returns before ws.commit(), so
+        # nothing reached the iteration directory — but whatever the step did write is
+        # still in its staging directory. That is a strictly better start for a retry
+        # than an empty workspace, and without it the retry prompt lies: it says "the
+        # previous attempt failed... the current files are shown below" with no files
+        # below, so the model is told to make the smallest correct fix to nothing.
+        contents = _read_owned_files(Workspace(prev).staging)
 
     if len(contents) <= 1:
         framework = prev / "framework.cpp"
@@ -147,16 +156,33 @@ def _task_text(state: WorkingState, seeded: list) -> str:
         "plan or the strategy, follow the feedback."
     )
 
+    # Both of these used to promise files unconditionally. When nothing could be
+    # seeded — the previous step aborted before committing, and left no staging either
+    # — the model was told to make the smallest correct fix to an empty workspace, and
+    # to edit files that were not there. Say which situation it is actually in.
     if state.mode == "retry":
         lines.append(
-            "The previous attempt failed. The failure and its analysis are above; the "
-            "current files are shown below. Make the smallest correct fix.\n\n"
+            (
+                "The previous attempt failed. The failure and its analysis are above; "
+                "the current files are shown below. Make the smallest correct fix."
+                if seeded
+                else "The previous attempt failed before it wrote any files. The "
+                "failure and its analysis are above. The workspace is empty — write "
+                "all four files from scratch, and keep the first version simple."
+            )
+            + "\n\n"
             + authoritative
         )
     elif state.mode == "followup":
         lines.append(
-            "Apply the change requested in the most recent decision above. The current "
-            "files are shown below — edit them rather than rewriting.\n\n"
+            (
+                "Apply the change requested in the most recent decision above. The "
+                "current files are shown below — edit them rather than rewriting."
+                if seeded
+                else "Apply the change requested in the most recent decision above. "
+                "The workspace is empty — write all four files from scratch."
+            )
+            + "\n\n"
             + authoritative
         )
     elif seeded:
