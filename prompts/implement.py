@@ -107,6 +107,9 @@ extern "C" __global__ void kernel(
             "argument. See the scalar contract below.\n```cpp\n"
             f"{ctx['inputs_hpp']}\n```"
         )
+    if ctx.get("cases_block"):
+        parts.append(ctx["cases_block"])
+
     if ctx.get("scalar_contract"):
         parts.append(ctx["scalar_contract"])
     if ctx.get("ref_kernel"):

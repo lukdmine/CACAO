@@ -142,6 +142,9 @@ Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
             "— is visible to a kernel unless it is a `-D` macro or an argument.\n"
             f"```cpp\n{ctx['inputs_hpp']}\n```"
         )
+    if ctx.get("cases_block"):
+        parts.append(ctx["cases_block"])
+
     if ctx.get("scalar_contract"):
         parts.append(ctx["scalar_contract"])
     if ctx.get("plan"):

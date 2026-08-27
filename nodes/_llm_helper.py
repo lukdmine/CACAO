@@ -323,8 +323,26 @@ def build_prompt_context(
     except Exception:
         pass
 
+    # The case table. Empty for a single-case problem, so no prompt changes shape unless
+    # the problem declares cases. It carries the "valid at every case" rule, which used to
+    # be prose in problem.yaml that nothing enforced.
+    cases_md = ""
+    try:
+        import yaml as _yaml
+
+        from config import get_problem_dir
+        from prompts._cases import cases_block
+
+        _meta = _yaml.safe_load(
+            (get_problem_dir() / "problem.yaml").read_text(encoding="utf-8")
+        ) or {}
+        cases_md = cases_block(_meta, getattr(state, "results_summary", None))
+    except Exception:
+        pass
+
     ctx = {
         "inputs_hpp": inputs_hpp,
+        "cases_block": cases_md,
         "problem_yaml": getattr(state, "problem_yaml", "") or "",
         "ref_kernel": getattr(state, "ref_kernel", "") or "",
         "ref_language": _infer_ref_language(getattr(state, "problem_yaml", "") or ""),
