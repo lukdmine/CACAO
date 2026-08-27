@@ -3,6 +3,7 @@
 import os
 import re
 import shutil
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 import numpy as np
@@ -172,6 +173,8 @@ def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
     # forbid: []}` stanza on every problem that has none.
     if req.rules is not None and not req.rules.is_empty():
         data["rules"] = req.rules.model_dump(exclude_none=True)
+    if req.cases:
+        data["cases"] = [c.model_dump(exclude_none=True) for c in req.cases]
     return data
 
 
@@ -182,6 +185,20 @@ def _write_problem_files(problem_dir, problem_data, req: CreateProblemRequest) -
     uploads the file right after saving (and re-uploads on demand in Edit).
     ensure_inputs_hpp still hard-fails at run start.
     """
+    # A client that does not send `cases` keeps whatever the file already declares.
+    # problem.yaml is rebuilt wholesale from the request, so without this an Edit+Save
+    # from a UI with no cases support deletes a hand-written case list — and the next run
+    # would tune only the primary shape while reporting a perfectly healthy result.
+    if req.cases is None:
+        existing = problem_dir / "problem.yaml"
+        if existing.exists():
+            try:
+                prior = yaml.safe_load(existing.read_text(encoding="utf-8")) or {}
+            except Exception:
+                prior = {}
+            if prior.get("cases"):
+                problem_data["cases"] = prior["cases"]
+
     with (problem_dir / "problem.yaml").open("w", encoding="utf-8") as f:
         yaml.dump(problem_data, f, default_flow_style=False, sort_keys=False)
     (problem_dir / _REFERENCE_FILE[req.reference_type]).write_text(_reference_source(req), encoding="utf-8")
@@ -322,7 +339,9 @@ def update_problem(name: str, req: CreateProblemRequest):
 
 
 @router.post("/api/problems/{name}/inputs/{buffer_name}")
-async def upload_input_file(name: str, buffer_name: str, request: Request):
+async def upload_input_file(
+    name: str, buffer_name: str, request: Request, case: Optional[str] = None
+):
     """Upload the binary for an init=file buffer.
 
     Raw request body (application/octet-stream), streamed to disk in chunks — inputs
@@ -330,6 +349,11 @@ async def upload_input_file(name: str, buffer_name: str, request: Request):
     ``file_name`` comes from the saved spec, never from the client, so the path cannot
     be steered outside the problem's inputs/ directory. The byte count must equal
     size * sizeof(dtype) — the same contract the generated driver enforces at start.
+
+    ``case`` selects one of problem.yaml's input cases: the destination becomes that
+    case's ``files`` override and the expected byte count is computed from that case's
+    scalars. Both must come from the case, not one of each — a per-case binary checked
+    against the declared size is rejected every time.
     """
     problem_dir = get_problem_dir(name)
     if is_problem_running(name):
@@ -351,14 +375,40 @@ async def upload_input_file(name: str, buffer_name: str, request: Request):
 
     # Belt and braces: the model already rejects absolute paths and '..', but the
     # resolved path staying under inputs/ is what makes this endpoint safe.
+    # Resolve the destination and the expected size through the case, if one was named.
+    resolved_spec, file_name = spec, buf.file_name
+    if case is not None:
+        import yaml as _yaml
+
+        from utils.cases import case_list
+
+        try:
+            meta = _yaml.safe_load(
+                (problem_dir / "problem.yaml").read_text(encoding="utf-8")
+            ) or {}
+            cases = case_list(meta)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Cannot read this problem's cases: {e}"
+            )
+        target = next((c for c in cases if c.name == case), None)
+        if target is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Case '{case}' not found; this problem's cases are "
+                + ", ".join(c.name for c in cases),
+            )
+        resolved_spec = spec.for_case(target)
+        file_name = target.files.get(buffer_name, buf.file_name)
+
     inputs_dir = (problem_dir / INPUTS_SUBDIR).resolve()
-    path = (inputs_dir / buf.file_name).resolve()
+    path = (inputs_dir / file_name).resolve()
     if not path.is_relative_to(inputs_dir):
         raise HTTPException(
             status_code=400, detail="file_name escapes the inputs/ directory"
         )
 
-    scalars = {s.name: s.value for s in spec.scalars}
+    scalars = {s.name: s.value for s in resolved_spec.scalars}
     try:
         elems = eval_size(buf.size, scalars)
     except Exception as e:

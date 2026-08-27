@@ -3,6 +3,7 @@
 from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
+from models.cases import CaseSpec
 from models.inputs import InputsSpec
 
 
@@ -56,6 +57,11 @@ class CreateProblemRequest(BaseModel):
     # The I/O boundary. Canonical: persisted to inputs.yaml, and inputs.hpp is generated
     # from it. Never parsed back out of the generated C++.
     inputs: InputsSpec = Field(default_factory=InputsSpec)
+    # Input cases. None means "the client did not send any", which PRESERVES whatever
+    # problem.yaml already declares — an empty list means "clear them". Without that
+    # distinction, saving from a UI that does not know about cases silently deletes a
+    # hand-written cases: block, the same way Edit used to wipe ref.py.
+    cases: Optional[List[CaseSpec]] = None
     # OpenCL: grid is total work-items (KTT divides by the per-config local size).
     # CUDA:   grid is the number of blocks. Getting this wrong launches a GEMM with
     #         2048x2048 blocks instead of work-items, so it must be explicit.

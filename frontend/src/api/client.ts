@@ -202,6 +202,23 @@ export interface RulesSpec {
     forbid: ForbidRule[];
 }
 
+/** One named instantiation of the declared inputs — problem.yaml's `cases:` block.
+ *
+ * Every case is compiled, validated and tuned each iteration against the same
+ * kernels.cu, and each gets its own tuned configuration. `scalars` keys must name a
+ * scalar declared in inputs.yaml and `files` keys an init=file buffer; the backend
+ * rejects anything else rather than ignoring it. cases[0] is the primary: the display
+ * anchor, the shape NCU profiles, and the one whose baseline is the flat
+ * reference_time_us. */
+export interface CaseSpec {
+    name: string;
+    scalars: Record<string, number>;
+    files: Record<string, string>;
+    /** Falls back to tuning.duration_s. A tail case exists to catch a correctness bug
+     *  rather than to find an optimum, so a shorter budget is normal here. */
+    duration_s?: number | null;
+}
+
 export interface CreateProblemData {
     slug: string;
     name: string;
@@ -215,6 +232,11 @@ export interface CreateProblemData {
     // Constraints on what a kernel may do. `forbid` patterns are checked before the
     // compiler and fail the iteration; see utils/rules.py.
     rules?: RulesSpec;
+    // Input cases. Omitting the field entirely PRESERVES whatever problem.yaml already
+    // declares; an empty array clears them. This dialog always sends the full list it
+    // loaded, so an edit round-trips; the preserve behaviour is the safety net for any
+    // client that does not know about cases.
+    cases?: CaseSpec[];
     // All three run. They differ in what the reference receives:
     //   cuda   — a kernel over the boundary (buffers + runtime scalars), bound by position
     //   cpu_c  — a C function taking every buffer as a pointer, scalars as -D macros

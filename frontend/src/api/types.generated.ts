@@ -159,6 +159,10 @@ export interface ResultsSummary {
   best_time_us: number | null;
   reference_time_us: number | null;
   speedup: number | null;
+  cases?: Record<string, ResultsSummary | null>;
+  geomean_speedup?: number | null;
+  worst_case?: string | null;
+  failed_case?: string | null;
 }
 
 export interface UserMessage {
