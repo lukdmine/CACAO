@@ -148,8 +148,16 @@ def _handle_signal(
 
     try:
         if action == "stop":
-            manifest.pre_stop_status = manifest.status
-            manifest.status = "stopped"
+            # Only the first stop records where to come back to. A second stop — the API
+            # applies no status check (api/branches.py), and the UI leaves the button
+            # clickable for up to one 3 s poll after a branch parks — would otherwise
+            # store pre_stop_status="stopped". Resume then restores "stopped", clears the
+            # field, and _wait_for_resume's `status != "stopped"` exit test can never pass
+            # again: the branch ignores every later signal while still counting towards
+            # master's `busy`, so the whole run stops terminating.
+            if manifest.status != "stopped":
+                manifest.pre_stop_status = manifest.status
+                manifest.status = "stopped"
             save_branch_manifest(branch_path, manifest)
             save_iter_state(branch_path, iter_state.iter_num, iter_state)
 
