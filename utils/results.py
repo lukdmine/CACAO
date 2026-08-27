@@ -175,54 +175,95 @@ def _context_below(lines: list, i: int, limit: int = 4) -> list:
     return out
 
 
-def load_reference_time(output_dir: Path) -> Optional[float]:
-    """
-    Load the central reference time for a problem.
-
-    Args:
-        output_dir: The problem's output directory (e.g. problems/X/output/).
-
-    Returns:
-        Reference time in µs, or None if not yet measured.
-    """
+def _read_reference_times(output_dir: Path) -> dict:
+    """Parsed reference_time.json, or {} when missing or unreadable."""
     path = output_dir / _REFERENCE_TIME_FILE
     if not path.exists():
-        return None
+        return {}
     try:
         with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("reference_time_us")
+            return json.load(f) or {}
     except Exception as e:
         import logging
 
         logging.getLogger(__name__).warning(
             "Failed to load reference time from %s: %s", path, e
         )
-        return None
+        return {}
 
 
-def save_reference_time(output_dir: Path, time_us: float) -> None:
+def load_reference_time(output_dir: Path, case: Optional[str] = None) -> Optional[float]:
     """
-    Persist the reference time.  First-write-wins: if the file already
-    exists it is NOT overwritten.  Uses O_CREAT|O_EXCL for atomic
-    create-if-not-exists across concurrent workers.
+    Load a reference time for a problem.
+
+    Args:
+        output_dir: The problem's output directory (e.g. problems/X/output/).
+        case:       Case name, or None for the primary case.
+
+    Returns:
+        Reference time in µs, or None if not measured for that case.
+
+    The primary case keeps the flat ``reference_time_us`` key the committed seeds already
+    use, so a pre-multi-case file needs no migration. Additional cases live in a ``cases``
+    map beside it, and a flat-only file therefore reports *no* baseline for a named case
+    rather than lending it the primary's number — a baseline measured at a different shape
+    is not a baseline.
+    """
+    data = _read_reference_times(output_dir)
+    if case is None:
+        return data.get("reference_time_us")
+    return (data.get("cases") or {}).get(case)
+
+
+def save_reference_time(
+    output_dir: Path, time_us: float, case: Optional[str] = None
+) -> None:
+    """
+    Persist a reference time.  First-write-wins per case: an existing value is never
+    overwritten, so a seeded baseline survives every run.
 
     Args:
         output_dir: The problem's output directory.
         time_us:    Reference computation time in µs.
+        case:       Case name, or None for the primary case.
+
+    The primary path keeps its O_CREAT|O_EXCL create-if-not-exists, which is atomic
+    across concurrent workers, for the common case of a file that does not exist yet.
+    Anything else needs read-modify-write; the callers are coroutines in one event loop
+    and this function does not await, so no other worker in the process can interleave
+    with it.
     """
     import os
 
     path = output_dir / _REFERENCE_TIME_FILE
     output_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        return
-    try:
-        os.write(fd, json.dumps({"reference_time_us": time_us}, indent=2).encode())
-    finally:
-        os.close(fd)
+    data = _read_reference_times(output_dir)
+
+    if case is None:
+        if "reference_time_us" in data:
+            return  # first-write-wins
+        if not data:
+            try:
+                fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                return
+            try:
+                os.write(
+                    fd, json.dumps({"reference_time_us": time_us}, indent=2).encode()
+                )
+            finally:
+                os.close(fd)
+            return
+        data["reference_time_us"] = time_us
+    else:
+        cases = data.setdefault("cases", {})
+        if cases.get(case) is not None:
+            return  # first-write-wins
+        cases[case] = time_us
+
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 # ---------------------------------------------------------------------------
@@ -437,3 +478,47 @@ def format_results_summary(summary: dict) -> str:
         lines.append(f"Speedup:        {summary['speedup']:.2f}x {status}")
 
     return "\n".join(lines)
+
+
+def aggregate_case_summaries(per_case: dict, primary: str) -> dict:
+    """Fold per-case summaries into one iteration-level summary.
+
+    ``per_case`` maps case name -> the dict from get_results_summary, or None for a case
+    that never ran (fail-fast stopped before it).  ``primary`` is the first case's name.
+
+    A single-case problem gets its summary back untouched, so nothing downstream sees a
+    new shape unless the problem asked for one.
+
+    For several cases the flat keys stay at the top level and describe the PRIMARY case,
+    except ``speedup``, which carries the geometric mean over all cases.  They are
+    deliberately inconsistent with one another: best_time_us and reference_time_us exist
+    to give the UI a microsecond anchor, speedup is the score.  Nothing may derive one
+    from the other two.
+    """
+    import math
+
+    if len(per_case) == 1:
+        return next(iter(per_case.values()))
+
+    out = dict(per_case.get(primary) or {})
+    out["cases"] = per_case
+
+    speedups = [(s or {}).get("speedup") for s in per_case.values()]
+    if speedups and all(s for s in speedups):
+        out["geomean_speedup"] = math.exp(
+            sum(math.log(s) for s in speedups) / len(speedups)
+        )
+    else:
+        # Never drop a case from the mean: a case with no reference time would then make
+        # the problem score better by being unmeasured.
+        out["geomean_speedup"] = None
+    out["speedup"] = out["geomean_speedup"]
+
+    ranked = [(n, (s or {}).get("speedup")) for n, s in per_case.items()]
+    ranked = [(n, s) for n, s in ranked if s]
+    out["worst_case"] = min(ranked, key=lambda r: r[1])[0] if ranked else None
+
+    out["failed_case"] = next(
+        (n for n, s in per_case.items() if s is None or not s.get("has_success")), None
+    )
+    return out

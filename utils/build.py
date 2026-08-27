@@ -77,12 +77,16 @@ def compile_command(
     ]
 
 
-def reference_build_extras(problem_dir) -> tuple[list, list]:
+def reference_build_extras(problem_dir, case=None) -> tuple[list, list]:
     """(extra_sources, extra_flags) the problem's reference adds to the driver build.
 
     Empty for cuda references. For cpu_c: ref_cpu.c plus -DNAME=value for every
     problem scalar (the C contract: pointer args only, scalars as macros). Shared by
     run and profile so both build the same driver.
+
+    ``case`` selects which case's scalar values become the -D macros; None uses the
+    declared values. A cpu_c reference compiled with another case's sizes computes the
+    wrong answer, and validation then reports a correct kernel as broken.
     """
     import yaml
 
@@ -99,7 +103,10 @@ def reference_build_extras(problem_dir) -> tuple[list, list]:
 
     sources = [problem_dir / ref.get("file", "ref_cpu.c")]
     try:
-        flags = scalar_define_flags(load_inputs_spec(problem_dir / "inputs.yaml"))
+        spec = load_inputs_spec(problem_dir / "inputs.yaml")
+        if case is not None:
+            spec = spec.for_case(case)
+        flags = scalar_define_flags(spec)
     except Exception as e:
         from utils.log import log
 
