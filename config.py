@@ -245,8 +245,13 @@ TRUNCATION_RETRY_NUDGE = (
 
 
 class TrackedLLM:
-    def __init__(self, llm):
+    def __init__(self, llm, tools_bound: bool = False):
         self._llm = llm
+        # Whether this wrapper has tools bound to it. When it does, an empty reply is
+        # the agentic loop's business, not ours: it has its own escalating truncation
+        # policy, and retrying underneath it multiplies the two. See the guard in
+        # ainvoke.
+        self._tools_bound = tools_bound
 
     async def ainvoke(self, *args, **kwargs):
         import asyncio
@@ -309,6 +314,17 @@ class TrackedLLM:
                         f"tokens: {completion_tokens}",
                         "WARN",
                     )
+
+                    if self._tools_bound:
+                        # The agentic loop owns this failure. It detects the same
+                        # condition from finish_reason, applies an escalating
+                        # correction that shrinks the unit of work, and gives up after
+                        # STEP_TRUNCATION_RETRIES. Retrying here as well made the two
+                        # policies multiply: one truncated authoring step cost 24
+                        # provider calls and ~248 s of backoff instead of 4 calls and
+                        # no sleep. The nudge appended below is lost regardless — the
+                        # loop keeps its own message list, so it never saw the mutation.
+                        return response
 
                     if finish_reason == "length":
                         # Thinking models (e.g. glm-5.2 behind a ~48k server cap) can
@@ -392,8 +408,12 @@ class TrackedLLM:
 
         Raises whatever the provider raises when it has no tool support — the agentic
         loop treats that as a signal to fall back rather than something to retry.
+
+        The returned wrapper keeps transient-error retry and token tracking but drops
+        the empty-content retry: with tools bound, an empty reply is either a tool call
+        (returned early) or a truncation the loop handles itself.
         """
-        return TrackedLLM(self._llm.bind_tools(tools, **kwargs))
+        return TrackedLLM(self._llm.bind_tools(tools, **kwargs), tools_bound=True)
 
 
 class TrackedStructuredLLM:
