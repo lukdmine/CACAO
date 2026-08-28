@@ -251,9 +251,27 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
         manifest.status = "running"
         save_branch_manifest(branch_path, manifest)
 
+    iter_state = None
+    iter_num = manifest.current_iter
+
     while manifest.status not in ["success", "failed", "branching"]:
         try:
             iter_num = manifest.current_iter
+
+            # A parent revert rmtree's this whole subtree, and every write path below
+            # recreates it: _atomic_write_json mkdirs the parent, so save_iter_state
+            # and save_branch_manifest rebuild a directory the user just deleted, and
+            # the branch reappears in the tree and keeps spending LLM calls and GPU
+            # lock time. The cooperative stop that state/control.py writes cannot help
+            # — the rmtree destroys the signal file on the very next line, long before
+            # this loop's next poll. _wait_for_resume has had this check all along;
+            # the main loop, where the worker actually spends its time, did not.
+            if not branch_path.exists():
+                log(
+                    f"Branch {strategy_name} directory deleted (parent reverted). Exiting.",
+                    "WARN",
+                )
+                return []
 
             # Load or create iteration state
             iter_state = load_iter_state_if_exists(branch_path, iter_num)
@@ -337,11 +355,24 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
         except Exception as e:
             log(f"Unhandled exception in branch {strategy_name}: {e}", "ERROR")
             traceback.print_exc()
-            iter_state.status = "decided"
-            iter_state.run_output = f"CRITICAL WORKER CRASH: {e}"
-            save_iter_state(branch_path, iter_num, iter_state)
+            # iter_state is bound inside the try, so a failure in loading it — a
+            # corrupt state.json on the first pass, say — used to raise
+            # UnboundLocalError from the handler itself. That escaped run_branch_loop
+            # with manifest.status never set to "failed", so the branch died without
+            # recording why. Mark the branch failed first; annotate the iteration only
+            # if there is one.
             manifest.status = "failed"
-            save_branch_manifest(branch_path, manifest)
+            try:
+                if iter_state is not None:
+                    iter_state.status = "decided"
+                    iter_state.run_output = f"CRITICAL WORKER CRASH: {e}"
+                    save_iter_state(branch_path, iter_num, iter_state)
+                save_branch_manifest(branch_path, manifest)
+            except Exception as save_error:
+                log(
+                    f"Could not persist the failure for {strategy_name}: {save_error}",
+                    "ERROR",
+                )
 
     if manifest.status == "success":
         log(

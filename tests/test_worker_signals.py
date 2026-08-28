@@ -5,6 +5,7 @@ loop: the failure it guards against is a state-machine one — a field that surv
 across signals — and a loop would only reproduce it after minutes of real polling.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -86,3 +87,74 @@ def test_a_repeated_stop_still_records_its_message(branch, manifest, iter_state)
     _handle_signal(_signal("stop", content="actually stop now"), manifest, iter_state, branch)
 
     assert [m["content"] for m in iter_state.user_messages] == ["actually stop now"]
+
+
+# -- the main loop ----------------------------------------------------------
+
+
+import pytest_asyncio  # noqa: F401  (asyncio marker support)
+
+from engine.worker import run_branch_loop
+from state import save_branch_manifest
+
+
+@pytest.mark.asyncio
+async def test_a_deleted_branch_directory_exits_instead_of_rebuilding_itself(
+    tmp_path, monkeypatch
+):
+    """A parent revert rmtree's the subtree; every write path recreates it.
+
+    _atomic_write_json mkdirs its parent, so save_iter_state and
+    save_branch_manifest rebuilt a directory the user had just deleted and the
+    branch carried on — reappearing in the tree and still spending LLM calls and
+    GPU lock time. The cooperative stop cannot help: the rmtree destroys the
+    signal file before the worker's next poll.
+    """
+    branch = tmp_path / "branches" / "vectorized"
+    branch.mkdir(parents=True)
+    manifest = BranchManifest(
+        strategy=StrategyInfo(name="vectorized"), status="running", current_iter=1
+    )
+    save_branch_manifest(branch, manifest)
+    (branch.parent.parent / "context.json").write_text(
+        json.dumps({"analysis": "a"}), encoding="utf-8"
+    )
+
+    import shutil
+
+    shutil.rmtree(branch)
+
+    result = await run_branch_loop(branch)
+
+    assert result == []
+    assert not branch.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_crash_before_the_iteration_loads_still_marks_the_branch_failed(
+    tmp_path, monkeypatch
+):
+    """iter_state is bound inside the try, so a failure loading it used to raise
+    UnboundLocalError out of the handler — and the branch died with its status
+    never set to failed."""
+    import engine.worker as worker
+
+    branch = tmp_path / "branches" / "tiled"
+    branch.mkdir(parents=True)
+    manifest = BranchManifest(
+        strategy=StrategyInfo(name="tiled"), status="running", current_iter=1
+    )
+    save_branch_manifest(branch, manifest)
+    (branch.parent.parent / "context.json").write_text(
+        json.dumps({"analysis": "a"}), encoding="utf-8"
+    )
+
+    def boom(*args, **kwargs):
+        raise ValueError("corrupt state.json")
+
+    monkeypatch.setattr(worker, "load_iter_state_if_exists", boom)
+
+    result = await run_branch_loop(branch)
+
+    assert result == []
+    assert worker.load_branch_manifest(branch).status == "failed"
