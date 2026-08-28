@@ -1,644 +1,210 @@
-# `problem.yaml` Guide
+# `problem.yaml`
 
-This guide documents the `problem.yaml` format used by the tuner in [tuner.py](../tuner.py).
+One problem is a directory under `problems/` holding two spec files and a reference
+implementation:
 
-It covers:
-- all supported top-level fields
-- required vs optional fields
-- allowed values and defaults
-- expression syntax for sizes and grid dimensions
-- CUDA-reference and CPU-reference variants
+| File | Holds |
+|---|---|
+| `problem.yaml` | GPU, launch geometry, reference, validation, tuning budget, rules |
+| `inputs.yaml` | the I/O boundary — every scalar and buffer. See [INPUTS_YAML_GUIDE.md](INPUTS_YAML_GUIDE.md) |
+| `ref_kernel.cu` / `ref_cpu.c` / `ref.py` | the reference. See [REFERENCE_IMPLEMENTATION_GUIDE.md](REFERENCE_IMPLEMENTATION_GUIDE.md) |
 
-## Quick Example
+`problem.yaml` carries no scalars, no buffers and no kernel filename. Those moved to
+`inputs.yaml` and to the LLM-authored driver regions respectively.
 
-```yaml
-name: Averages Calculation 2019
-description: Compute per-student and per-question averages.
-
-gpu:
-  index: 0
-
-kernel:
-  file: kernel.cu
-  function: kernel
-
-reference:
-  type: cpu_c
-  file: ref_cpu.c
-  function: averages_reference
-
-scalars:
-  - name: STUDENTS
-    dtype: int
-    value: 4096
-  - name: QUESTIONS
-    dtype: int
-    value: 1024
-
-grid:
-  x: STUDENTS
-  y: QUESTIONS
-
-vectors:
-  - name: results
-    dtype: int
-    size: STUDENTS * QUESTIONS
-    access: read
-    init: random
-    validate: false
-  - name: avg_stud
-    dtype: float
-    size: STUDENTS
-    access: write
-    init: zeros
-    validate: true
-  - name: avg_que
-    dtype: float
-    size: QUESTIONS
-    access: write
-    init: zeros
-    validate: true
-
-validation:
-  tolerance: 1.0e-6
-```
-
----
-
-## Top-Level Schema
-
-| Field | Required | Type | Notes |
-|---|---|---|---|
-| `name` | yes | string | Human-readable problem name |
-| `description` | recommended | string | Shown in UI and prompts |
-| `gpu` | recommended | mapping | `gpu.index` affects runtime device selection; other fields are advisory metadata |
-| `kernel` | yes | mapping | Kernel source file and entry function |
-| `reference` | yes | mapping | Validation reference source and function |
-| `scalars` | yes | list | Scalar constants injected as compiler defines (`-D` flags) |
-| `grid` | yes | mapping | Base problem dimensions, not the tuned launch config |
-| `vectors` | yes | list | Vector buffers used by the kernel/reference |
-| `validation` | yes | mapping | Validation tolerance |
-| `rules` | no | list or mapping | Constraints on what a kernel is allowed to do (see [`rules`](#rules)) |
-
----
-
-## `name`
+## Example
 
 ```yaml
 name: GEMM
+description: Dense single-precision matrix multiply
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: kSizeM
+  y: kSizeN
+  z: '1'
+reference:
+  type: cuda
+  function: gemm_reference
+  file: ref_kernel.cu
+  block:
+    x: 8
+    y: 8
+    z: 1
+validation:
+  tolerance: 1.0
+tuning:
+  duration_s: 100
 ```
 
-- Type: string
-- Required: yes
-- Used by: tuner logs, UI, prompts
+## Schema
 
----
+| Key | Required | Type | Notes |
+|---|---|---|---|
+| `name` | recommended | string | Shown in the UI and in prompts |
+| `description` | recommended | string | Shown in the UI and in prompts |
+| `gpu` | recommended | mapping | `gpu.index` selects the device; other keys are advisory metadata |
+| `global_size_type` | recommended | string | `cuda` (default) or `opencl` — changes what `grid` means |
+| `grid` | **yes** | mapping | `x`/`y`/`z`, pasted into the driver as C++ |
+| `reference` | **yes** | mapping | Validation reference source and function |
+| `validation` | no | mapping | `tolerance`, default `1e-4` |
+| `tuning` | no | mapping | `duration_s`, default `20.0` |
+| `rules` | no | list, string or mapping | Constraints on what a kernel may do |
 
-## `description`
+Unknown keys are ignored, not rejected.
 
-```yaml
-description: General Matrix-Matrix Multiplication: C = A * B
-```
-
-- Type: string
-- Required: no, but strongly recommended
-- Used by: UI and LLM context
-
----
-
-## `gpu`
-
-Example:
+### `gpu`
 
 ```yaml
 gpu:
   index: 0
-  model: NVIDIA GeForce RTX 3090
-  compute_capability: "8.6"
-  sm_count: 82
-  max_threads_per_block: 1024
-  shared_memory_per_block: 49152
-  registers_per_block: 65536
-  memory_bandwidth_gb: 936
+  compute_capability: '8.6'
 ```
 
-### Supported fields
+`index` selects the device. `compute_capability` is used by the in-step NVRTC compile
+check when auto-detection is unavailable — worth setting when `ncu` is missing or
+permission-restricted, otherwise the check falls back to `compute_52` and rejects
+`cp.async`, `wmma` and `bf16` kernels the device would compile fine.
 
-| Field | Required | Type | Runtime meaning |
-|---|---|---|---|
-| `index` | no | int | CUDA device index used by the tuner; defaults to `0` in most flows |
-| `model` | no | string | Informational for prompts/UI |
-| `compute_capability` | no | string | Informational for prompts/UI |
-| `sm_count` | no | int | Informational for prompts/UI |
-| `max_threads_per_block` | no | int | Informational for prompts/UI |
-| `shared_memory_per_block` | no | int | Informational for prompts/UI |
-| `registers_per_block` | no | int | Informational for prompts/UI |
-| `memory_bandwidth_gb` | no | int/float | Informational for prompts/UI |
+### `global_size_type`
 
-### Notes
+Decides how KTT reads `grid`:
 
-- Only `gpu.index` is consumed directly by the runtime.
-- The other fields help analysis/planning prompts and can also be injected automatically by the backend.
-- Extra fields are generally tolerated and simply passed through as YAML metadata.
+- `cuda` (default) — `grid` is a **block count**. The launch is `grid` blocks of
+  whatever block size the kernel's thread modifiers produce.
+- `opencl` — `grid` is a **total work-item count**, which KTT divides by the block
+  size to get the block count.
 
----
+Every problem in this repo sets it explicitly. Getting it wrong changes the launch by
+a factor of the block size.
 
-## `kernel`
+### `grid`
 
 ```yaml
-kernel:
-  file: kernel.cu
-  function: kernel
+grid:
+  x: kSizeM
+  y: kSizeN
+  z: '1'
 ```
 
-| Field | Required | Type | Meaning |
-|---|---|---|---|
-| `file` | yes | string | Path to the CUDA kernel source |
-| `function` | yes | string | Kernel entry symbol name |
+`x`, `y` and `z` are pasted **verbatim into the generated C++** as
+`ktt::DimensionVector(x, y, z)`. They are C++ expressions, not Python:
 
-### Notes
+- Any host-placement scalar from `inputs.yaml` is in scope by name.
+- Integer division is `/`, not `//` — `//` starts a C++ line comment and will silently
+  truncate the rest of the line.
+- Quote anything YAML would otherwise read as a number or a bool (`z: '1'`).
 
-- Paths may be relative to the problem directory.
-- During optimization iterations, `kernel.file` is rewritten to the per-iteration local `kernel.cu` copy.
-- The kernel source should use `extern "C" __global__ void ...` so KTT can locate the symbol.
+Missing components default to 1. This is the *base* geometry; the tuned launch comes
+from `AddThreadModifier` in the LLM-authored `CACAO:PARAMS` region and from the
+`CACAO:LAUNCHER` region.
 
----
-
-## `reference`
-
-The reference is mandatory for validation.
-
-### CUDA reference
+### `reference`
 
 ```yaml
 reference:
-  type: cuda
+  type: cuda            # cuda | cpu_c | python
   file: ref_kernel.cu
   function: gemm_reference
-  block_x: 8
-  block_y: 8
+  block: {x: 8, y: 8, z: 1}
 ```
 
-### CPU C / C++ reference
-
-```yaml
-reference:
-  type: cpu_c
-  file: ref_cpu.c
-  function: averages_reference
-```
-
-### Python reference
-
-```yaml
-reference:
-  type: python
-  file: ref.py
-  function: gemm_reference
-```
-
-### Supported fields
-
-| Field | Required | Type | Allowed values / behavior |
-|---|---|---|---|
-| `type` | no | string | `cuda`, `cpu_c`, or `python`; defaults to `cuda` |
-| `file` | yes | string | Path to reference source |
-| `function` | yes | string | Reference function name |
-| `block_x` | CUDA only | int | Optional, defaults to `8` |
-| `block_y` | CUDA only | int | Optional, defaults to `8` |
-| `block_z` | CUDA only | int | Optional, defaults to `1` |
-
-### Reference file behavior
-
-- `type: cuda`
-  - `file` should point to a CUDA source file, usually `ref_kernel.cu`.
-  - The reference is launched by KTT as another CUDA kernel.
-- `type: cpu_c`
-  - `file` should point to a C or C++ source file such as `.c`, `.cc`, `.cpp`, or `.cxx`.
-  - The source is compiled into a shared object at runtime.
-  - The function must be exported with `extern "C"` if using C++.
-- `type: python`
-  - `file` should point to a Python file, usually `ref.py`, defining `function(scalars, buffers)`.
-  - `scalars` is a dict of scalar name → value; `buffers` is a dict of buffer name → flat `np.ndarray` (read/readwrite buffers hold the real input data, write buffers are zeros).
-  - The return value (a `np.ndarray`, or anything with `.cpu().numpy()` such as a torch tensor) must have exactly as many elements as the validated buffer.
-  - Third-party imports in `ref.py` (e.g. `torch`, see `problems/mmul_pytorch`) are optional dependencies of that problem only — they are never needed by the engine itself. Install with plain `python -m pip install torch` (PyPI's Linux wheels bundle their own CUDA runtime). The engine imports `ref.py` in a `python3` subprocess at startup and aborts the run with the import error if it fails.
-  - An optional `prepare_input(scalars, buffers)` splits setup (e.g. host→device transfer) from the reference function, which then takes `prepared` instead. It is only needed for precise GPU-only reference timing; validation works without it, but the reference time then falls back to KTT's coarse wall clock of the whole Python process (startup + imports included), making speedup numbers meaningless — GPU references should always define it.
-
-### CPU reference ABI
-
-For `cpu_c`, the reference function receives only vector pointer arguments in `vectors:` order. Scalars are injected as `-D` compiler flags during compilation, so they are available as compile-time constants in the function body.
-
-Standard example:
-
-```c
-void ref(const float* A, float* C)
-```
-
----
-
-## `scalars`
-
-```yaml
-scalars:
-  - name: M
-    dtype: int
-    value: 2048
-  - name: ALPHA
-    dtype: float
-    value: 1.0
-```
-
-**Scalar names must be UPPERCASE.** Lowercase names like `n` conflict with NVRTC built-in header parameter names, causing compilation failures.
-
-Each item supports:
-
-| Field | Required | Type | Default | Allowed values |
-|---|---|---|---|---|
-| `name` | yes | string | – | UPPERCASE identifier (e.g. `N`, `ALPHA`, `BLOCK_SIZE`) |
-| `dtype` | no | string | `int` | See supported dtypes below |
-| `value` | yes | number | – | Scalar literal |
-
-### Supported scalar dtypes
-
-Canonical types:
-- `char`
-- `short`
-- `int`
-- `long`
-- `float`
-- `double`
-
-Accepted aliases:
-- `int8` → `char`
-- `int16` → `short`
-- `int32` → `int`
-- `int64` → `long`
-- `float32` → `float`
-- `float64` → `double`
-
-### Notes
-
-- Scalar values are also available inside `size:` and `grid:` expressions.
-- If you want a scalar to be zero, just set `value: 0`.
-- Scalars are always inputs in the current schema.
-
-### How scalars reach the kernel
-
-Scalars are injected as `-D` compiler flags (e.g., `-DM=2048 -DALPHA=1.5f`). They are **not** passed as function arguments. This means:
-- Scalars are compile-time constants in the kernel
-- They can be used for static shared memory sizing (e.g., `__shared__ float tile[M]`)
-- The kernel function signature contains only vector (pointer) arguments
-
----
-
-## `grid`
-
-```yaml
-grid:
-  x: M
-  y: N
-  z: 1
-```
-
-| Field | Required | Type | Default | Meaning |
-|---|---|---|---|---|
-| `x` | yes | int or expression string | – | Base X problem extent |
-| `y` | no | int or expression string | `1` | Base Y problem extent |
-| `z` | no | int or expression string | `1` | Base Z problem extent |
-
-### Expression rules
-
-`grid.x`, `grid.y`, and `grid.z` are evaluated with the problem scalars as variables.
-
-Examples:
-
-```yaml
-grid:
-  x: M
-  y: N
-```
-
-```yaml
-grid:
-  x: N // 32
-  y: 1
-```
-
-Allowed operators depend on normal Python integer arithmetic, for example:
-- `+`
-- `-`
-- `*`
-- `//`
-- `%`
-- parentheses
-
-The expression must evaluate to a non-negative integer.
-
-### Important
-
-- These are not the final launch dimensions used during tuning.
-- Final runtime launch dimensions come from `params.json -> launch_config`.
-- `grid` provides base problem dimensions for the tuner, references, and prompt context.
-
----
-
-## `vectors`
-
-```yaml
-vectors:
-  - name: mat_a
-    dtype: float
-    size: M * K
-    access: read
-    init: random
-    validate: false
-  - name: mat_c
-    dtype: float
-    size: M * N
-    access: write
-    init: zeros
-    validate: true
-```
-
-Each vector item supports:
-
-| Field | Required | Type | Default | Allowed values / behavior |
-|---|---|---|---|---|
-| `name` | yes | string | – | Buffer name |
-| `dtype` | yes | string | – | Same dtype set as scalars |
-| `size` | yes | int or expression string | – | Must evaluate to a non-negative integer |
-| `access` | yes | string | – | Recommended: `read` or `write` |
-| `init` | no | string | `zeros` | `random` or any non-`random` value for zero-initialization |
-| `init_min` | no | number | see below | Minimum value for random initialization |
-| `init_max` | no | number | see below | Maximum value for random initialization (inclusive) |
-| `validate` | no | bool | `false` | Whether this vector is checked against the reference |
-
-### `access`
-
-Recommended values:
-- `read` → KTT read-only buffer
-- `write` → KTT write-only buffer
-
-Current implementation note:
-- only the exact string `read` is treated as read-only
-- any other value is treated as write-only
-
-So use only:
-- `read`
-- `write`
-
-### `init`
-
-Current implementation behavior:
-- `random` → randomized initial contents
-- anything else → zero-filled buffer
-
-Recommended values:
-- `random`
-- `zeros`
-
-Why random init is useful:
-- it helps catch kernels that forget to write part of an output buffer
-
-Why zero init is useful:
-- it is convenient for reductions, accumulators, and debugging
-
-### `init_min` / `init_max`
-
-Optional bounds for random initialization. Only used when `init: random`.
-
-- **Floats**: default range is `[-2.0, 2.0]`
-- **Integers**: default range is `[-2, 2]` (inclusive)
-
-Use these when your algorithm requires values in a specific range, e.g. array indices:
-
-```yaml
-- name: indices
-  dtype: int
-  size: N
-  access: read
-  init: random
-  init_min: 0
-  init_max: 99
-```
-
-### `size`
-
-`size` can be a literal integer:
-
-```yaml
-size: 1024
-```
-
-or an expression using scalar names:
-
-```yaml
-size: M * N
-size: N * 18
-size: 20 * 18
-```
-
-The expression must evaluate to a non-negative integer.
-
-### `validate`
-
-- `true` means the vector is checked against the reference implementation.
-- `false` means it is not checked.
-- Multiple vectors may be validated.
-- If no vector has `validate: true`, validation is effectively disabled.
-
----
-
-## `tuning`
-
-```yaml
-tuning:
-  duration_s: 300
-```
-
-| Field | Required | Type | Meaning |
-|---|---|---|---|
-| `duration_s` | no | int | Wall-clock budget (seconds) for one KTT tuning pass. Falls back to the system default (100 s) if omitted, and is overridden by the `--timeout` CLI flag. |
-
----
-
-## `validation`
+| Field | Applies to | Notes |
+|---|---|---|
+| `type` | all | `cuda` (default), `cpu_c`, or `python` |
+| `file` | all | Path relative to the problem directory |
+| `function` | `cuda`, `python` | Entry symbol. Required for `cuda` |
+| `block` | `cuda` only | Reference launch block, **nested** `{x, y, z}` |
+
+`block` is a nested mapping. Flat `block_x` / `block_y` / `block_z` keys are silently
+ignored, and an absent `block` defaults to `{x: 1}` — a one-thread block, which makes
+the reference roughly a thousand times slower rather than failing. Set it.
+
+An unrecognised `type` is treated as `cuda` and will fail on the missing `function`.
+
+### `validation`
 
 ```yaml
 validation:
-  tolerance: 0.001
+  tolerance: 1.0
 ```
 
-| Field | Required | Type | Meaning |
-|---|---|---|---|
-| `tolerance` | yes | float | Element-wise comparison tolerance used by KTT |
+Element-wise tolerance for comparing validated buffers against the reference.
+Optional — both readers default to `1e-4`, which is a silently strict comparison, so
+set it deliberately.
 
-### Notes
+A loose tolerance is how a kernel wins by quietly dropping precision. Pair it with
+`rules.forbid` when that matters.
 
-- This field is required by the current tuner.
-- Typical values seen in the repo:
-  - `1e-6` for strict integer-derived float outputs
-  - `1e-3` for moderate floating-point tolerance
-  - `0.05` for looser comparisons
+### `tuning`
 
----
+```yaml
+tuning:
+  duration_s: 100
+```
 
-## `rules`
+Wall-clock budget for one KTT tuning run, in seconds. Default `20.0`. `--timeout`
+overrides it.
 
-Constraints on *how* the kernel may be written, as opposed to what it must compute.
+### `rules`
 
-The reference implementation defines correctness, not intent. A kernel that drops to
-fp16 accumulation, or swaps a real reduction for tensor cores, is faster and still
-validates whenever `validation.tolerance` is loose enough — and the run reports a
-speedup that does not mean what it looks like. Rules are where you say so.
+Constrains what a kernel may do. This is the mechanism that stops a branch winning by
+dropping to fp16 accumulation, which still validates whenever `tolerance` is loose.
 
 ```yaml
 rules:
   text:
-    - "Accumulate in fp32. Reduced-precision accumulation is not a valid optimization."
+    - Accumulate in fp32. Inputs may be fp16 but the accumulator may not.
   forbid:
-    - pattern: "wmma::|mma\\.sync"
-      reason: "tensor cores change the numerics this problem measures"
-    - pattern: "\\b__half\\b|nv_bfloat16"
-      reason: "fp16/bf16 storage is not permitted"
+    - pattern: 'wmma::'
+      reason: this problem measures the CUDA-core path
+    - '__half\s+acc'
 ```
 
-| Field | Required | Type | Meaning |
-|---|---|---|---|
-| `text` | no | list of strings | Stated in every prompt that writes or judges a kernel. Guidance the model applies to cases you did not enumerate. |
-| `forbid` | no | list | Regular expressions checked against `kernels.cu` at compile time. |
-| `forbid[].pattern` | yes | string (regex) | Matched against the kernel source. |
-| `forbid[].reason` | no | string | Shown to the model when it matches. Worth writing — it turns a rejection into a correction. |
+| Field | Type | Notes |
+|---|---|---|
+| `text` | string or list of strings | Stated in the authoring prompt |
+| `forbid` | list | Regexes matched against `kernels.cu` before the compiler runs |
+| `forbid[].pattern` | string (regex) | Required for the mapping form |
+| `forbid[].reason` | string | Reported with the violation |
 
-### Shorthand
+Shorthands: a bare string is one `text` rule; a bare list is a list of `text` rules;
+a bare string inside `forbid` is a pattern with no reason.
 
-A bare list is `text`:
+**How they are enforced.** `forbid` patterns are checked inside the agentic authoring
+step, before compiling — a match fails the check with the reason attached. `text` goes
+into the authoring prompt. Neither reaches the `propose` or `decide` prompts, and
+with `AGENTIC_STEPS=False` neither is applied at all.
 
-```yaml
-rules:
-  - "Do not use tensor cores."
-```
+A malformed `rules` block warns and is ignored rather than failing the run.
 
-### How they are enforced
-
-`text` rules are prompt-level. `forbid` patterns have teeth: they are checked before
-the compiler runs, and a match fails the iteration's compilation check regardless of
-correctness or speed. Anything you actually care about belongs in `forbid` — a rule
-that is only asked for is a rule that loses to a speedup.
-
-Both kinds appear in the prompt, including the patterns. A model that knows a check
-exists writes conforming code the first time instead of discovering the constraint
-through a failed compile.
-
-### Notes
-
-- Patterns are Python regular expressions. Escape backslashes for YAML (`"\\b"`).
-- An invalid pattern is logged and skipped rather than taking the run down.
-- Rules are re-read from `problem.yaml` every iteration, so editing them mid-run works.
-
----
-
-## Minimal Valid Configurations
-
-### Minimal CUDA-reference problem
+## Minimal problem
 
 ```yaml
-name: My Problem
-description: Minimal CUDA reference example.
+name: Vector scale
 gpu:
   index: 0
-kernel:
-  file: kernel.cu
-  function: kernel
-reference:
-  type: cuda
-  file: ref_kernel.cu
-  function: reference
-scalars:
-  - name: N
-    value: 1024
+global_size_type: cuda
 grid:
-  x: N
-vectors:
-  - name: x
-    dtype: float
-    size: N
-    access: read
-    init: random
-  - name: y
-    dtype: float
-    size: N
-    access: write
-    init: zeros
-    validate: true
-validation:
-  tolerance: 1.0e-6
-```
-
-### Minimal CPU-reference problem
-
-```yaml
-name: My Problem
-description: Minimal CPU reference example.
-gpu:
-  index: 0
-kernel:
-  file: kernel.cu
-  function: kernel
+  x: N / 256
 reference:
   type: cpu_c
   file: ref_cpu.c
-  function: reference
-scalars:
-  - name: N
-    value: 1024
-grid:
-  x: N
-vectors:
-  - name: x
-    dtype: float
-    size: N
-    access: read
-    init: random
-  - name: y
-    dtype: float
-    size: N
-    access: write
-    init: zeros
-    validate: true
 validation:
-  tolerance: 1.0e-6
+  tolerance: 1e-5
 ```
 
----
+with an `inputs.yaml` declaring `N` and the buffers, and a `ref_cpu.c` defining the
+reference function.
 
-## Practical Recommendations
+## What reads what
 
-1. Use explicit dtypes everywhere.
-2. Use only `read` and `write` for `vectors[].access`.
-3. Use only `random` and `zeros` for `vectors[].init`.
-4. Keep `size`, `grid.x`, and `grid.y` expressions simple and integer-valued.
-5. Add GPU metadata when you know it; the LLM prompts use it.
-6. Validate at least one output vector.
-7. For CPU C++ references, wrap the function with `extern "C"`.
-
----
-
-## Current Implementation Caveats
-
-These reflect the current code behavior in [tuner.py](../tuner.py):
-
-1. `vectors[].init` is permissive.
-   - Only `random` is special.
-   - Any other string currently becomes zero-initialization.
-
-2. `vectors[].access` is permissive.
-   - Only the exact value `read` is treated as read-only.
-   - Any other value currently becomes write-only.
-
-3. `reference.type` should be only `cuda` or `cpu_c`.
-   - Any other value disables validation with a warning.
-
-4. `validation.tolerance` is required.
-
-If stricter schema validation is added later, invalid or ambiguous values may stop being accepted.
+| Key | Read by |
+|---|---|
+| `gpu.index` | `nodes/run.py` |
+| `gpu.compute_capability` | `agentic/tools.py` |
+| `global_size_type`, `grid`, `reference`, `validation`, `tuning` | `utils/framework.py` |
+| `reference.file`, `reference.type` | `utils/build.py`, `engine/master.py`, `nodes/author.py` |
+| `rules` | `utils/rules.py` |
+| `name`, `description` | the API and the prompts |
