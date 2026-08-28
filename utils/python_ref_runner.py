@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -130,13 +131,22 @@ def run(
     ref_func = _resolve_ref_function(mod, ref_py, function_name)
     prepare = getattr(mod, "prepare_input", None)
 
+    # A problem with more than one validated buffer needs the reference to know which
+    # one is being asked for: the codegen emits one SetReferenceComputation per target,
+    # all calling this runner with the same --function but a different --target. A
+    # reference that declares the extra parameter gets it; single-target references are
+    # unchanged, so every existing problem keeps working.
+    wants_target = len(inspect.signature(ref_func).parameters) > (1 if prepare is not None else 2)
+
     if prepare is not None:
         prepared = prepare(scalars, buffers)
-        result = ref_func(prepared)
+        result = ref_func(prepared, target) if wants_target else ref_func(prepared)
         if hasattr(result, "cpu"):  # device tensor -> host numpy
             result = result.cpu().numpy()
     else:
-        result = ref_func(scalars, buffers)
+        result = ref_func(scalars, buffers, target) if wants_target else ref_func(scalars, buffers)
+        if hasattr(result, "cpu"):
+            result = result.cpu().numpy()
 
     if not isinstance(result, np.ndarray):
         result = np.asarray(result, dtype=target_entry["dtype"])

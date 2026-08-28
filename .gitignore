@@ -33,6 +33,10 @@ eval_results.csv
 # claude superpowers generated files
 docs/superpowers/
 
+# Claude Code scratch state. worktrees/ holds real git worktrees -- committing one
+# adds an embedded repository, not its files.
+.claude/worktrees/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
