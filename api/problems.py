@@ -26,6 +26,7 @@ from utils.inputs import (
     load_inputs_spec,
     write_inputs,
 )
+from utils.files import clone_problem_dir
 from utils.python_ref_runner import DTYPE_MAP, eval_size
 
 router = APIRouter()
@@ -284,15 +285,7 @@ def clone_problem(name: str, req: CloneProblemRequest):
             status_code=409, detail=f"Problem '{req.new_name}' already exists"
         )
 
-    # Copy entire problem directory, excluding runtime artifacts.
-    # symlinks=True copies links as links so stale/broken symlinks in old
-    # output dirs don't crash the copy.
-    shutil.copytree(
-        source_dir,
-        target_dir,
-        symlinks=True,
-        ignore=shutil.ignore_patterns("run.pid", "run.log", "requeue"),
-    )
+    clone_problem_dir(source_dir, target_dir)
 
     return {"status": "cloned", "name": req.new_name, "source": name}
 

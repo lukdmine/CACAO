@@ -301,3 +301,28 @@ def prune_archives(problem_dir: Path) -> tuple:
                     removed += sum(1 for f in path.rglob("*") if f.is_file())
                     shutil.rmtree(path, ignore_errors=True)
     return (removed, freed)
+
+
+# A clone is a copy of the problem *definition*, never of a run. output/ and archive/
+# are the run history: copying them made `--clone` duplicate 71 GB for gdn_chunk and
+# 12 GB for gemm_multiply_leakyrelu (measured), and left the new problem looking
+# already-run — the API reports results for it, run_eval.sh skips it as completed, and
+# its first real run archives someone else's output as though it were its own.
+_CLONE_EXCLUDE = ("run.pid", "run.log", "requeue", "output", "archive")
+
+
+def clone_problem_dir(source_dir: Path, target_dir: Path) -> Path:
+    """Copy a problem's definition files into a new directory.
+
+    symlinks=True copies links as links, so a stale or broken symlink left in the
+    source cannot crash the copy.
+    """
+    source_dir = Path(source_dir)
+    target_dir = Path(target_dir)
+    shutil.copytree(
+        source_dir,
+        target_dir,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(*_CLONE_EXCLUDE),
+    )
+    return target_dir

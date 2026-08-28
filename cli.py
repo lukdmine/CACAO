@@ -28,7 +28,12 @@ from config import (
     OptimizerConfig,
     init_from_config,
 )
-from utils.files import load_file, archive_output_dir, prune_archives
+from utils.files import (
+    load_file,
+    archive_output_dir,
+    clone_problem_dir,
+    prune_archives,
+)
 from utils.log import log, TeeWriter
 
 
@@ -221,11 +226,7 @@ async def main():
         if target_dir.exists():
             log(f"Problem '{new_name}' already exists", "ERROR")
             return 1
-        shutil.copytree(
-            problem_dir,
-            target_dir,
-            ignore=shutil.ignore_patterns("run.pid", "run.log", "requeue"),
-        )
+        clone_problem_dir(problem_dir, target_dir)
         log(f"Cloned '{problem_dir.name}' → '{new_name}'", "SUCCESS")
         return 0
 
