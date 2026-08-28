@@ -134,3 +134,78 @@ def test_writing_the_summary_never_raises_into_the_run(output_dir, monkeypatch):
     master._write_final_results()  # must not raise
 
     assert not (output_dir / "final_results.json").exists()
+
+
+# -- multi-case layout ------------------------------------------------------
+
+
+def _multicase_problem(tmp_path, monkeypatch, names=("small", "large")):
+    """A problem declaring several cases, so results live per case directory."""
+    import config as _cfg
+    import nodes.merge as merge
+
+    problem = tmp_path / "problem"
+    problem.mkdir()
+    (problem / "problem.yaml").write_text(
+        "name: P\ncases:\n" + "".join(f"  - name: {n}\n" for n in names),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_cfg, "get_problem_dir", lambda: problem)
+    monkeypatch.setattr(merge, "get_problem_dir", lambda: problem)
+    return problem
+
+
+def test_best_config_is_found_when_results_live_per_case(output_dir, tmp_path, monkeypatch):
+    """A multi-case problem writes iter_N/case_<name>/results.json and nothing at the
+    iteration root, so a scan anchored on the root finds no configuration at all —
+    silently reintroducing the null best_config this fix removed."""
+    _multicase_problem(tmp_path, monkeypatch)
+
+    branch = _branch(output_dir, "tiled", best_time=305.0)
+    case_dir = branch / "iter1" / "case_small"
+    case_dir.mkdir(parents=True)
+    _results_json(branch, 1, 305.0, {"TILE": 16})
+    # Move the results where a multi-case run actually writes them.
+    (branch / "iter1" / "results.json").rename(case_dir / "results.json")
+
+    results = find_branch_results(output_dir / "branches")
+
+    assert results[0]["best_config"] == {"TILE": 16}
+
+
+def test_single_case_problems_still_read_the_iteration_root(output_dir, tmp_path, monkeypatch):
+    """The layout every problem that declares no cases uses."""
+    import config as _cfg
+    import nodes.merge as merge
+
+    problem = tmp_path / "problem"
+    problem.mkdir()
+    (problem / "problem.yaml").write_text("name: P\n", encoding="utf-8")
+    monkeypatch.setattr(_cfg, "get_problem_dir", lambda: problem)
+    monkeypatch.setattr(merge, "get_problem_dir", lambda: problem)
+
+    branch = _branch(output_dir, "tiled", best_time=305.0)
+    _results_json(branch, 1, 305.0, {"TILE": 16})
+
+    results = find_branch_results(output_dir / "branches")
+
+    assert results[0]["best_config"] == {"TILE": 16}
+
+
+def test_an_unreadable_problem_yaml_falls_back_to_the_root(output_dir, tmp_path, monkeypatch):
+    """primary_case_dir must never raise into a summary."""
+    import config as _cfg
+    import nodes.merge as merge
+
+    problem = tmp_path / "problem"
+    problem.mkdir()
+    (problem / "problem.yaml").write_text("cases: [unclosed\n", encoding="utf-8")
+    monkeypatch.setattr(_cfg, "get_problem_dir", lambda: problem)
+    monkeypatch.setattr(merge, "get_problem_dir", lambda: problem)
+
+    branch = _branch(output_dir, "tiled", best_time=305.0)
+    _results_json(branch, 1, 305.0, {"TILE": 16})
+
+    results = find_branch_results(output_dir / "branches")
+
+    assert results[0]["best_config"] == {"TILE": 16}

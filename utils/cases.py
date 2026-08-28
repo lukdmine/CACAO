@@ -36,6 +36,28 @@ def case_list(meta: dict) -> List[CaseSpec]:
     return cases
 
 
+def primary_case_dir(problem_dir, iter_dir) -> Path:
+    """The iteration directory holding the anchor results.json.
+
+    Identity for a single-case problem, i.e. every problem that declares no ``cases:``
+    block. Readers that summarise a run — the tree API, the results merge — need one
+    results.json per iteration to point at, and it is the primary case's.
+
+    Never raises: a summary is not worth failing a run over.
+    """
+    iter_dir = Path(iter_dir)
+    try:
+        import yaml as _yaml
+
+        meta = _yaml.safe_load(
+            (Path(problem_dir) / "problem.yaml").read_text(encoding="utf-8")
+        ) or {}
+        cases = case_list(meta)
+        return case_dir(iter_dir, cases, cases[0])
+    except Exception:
+        return iter_dir
+
+
 def case_dir(iter_dir, cases: List[CaseSpec], case: CaseSpec) -> Path:
     """Where this case's driver, header and results live.
 

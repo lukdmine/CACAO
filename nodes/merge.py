@@ -8,7 +8,8 @@ It scans the output directory for branch results and selects the best one.
 from pathlib import Path
 from typing import List, Optional
 
-from config import get_output_dir
+from config import get_output_dir, get_problem_dir
+from utils.cases import primary_case_dir
 from utils.files import save_json
 from utils.log import log
 
@@ -50,7 +51,11 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
             for iter_dir in sorted(branch_path.glob("iter*")):
                 if not iter_dir.is_dir():
                     continue
-                summary = get_results_summary(iter_dir / "results.json", ref_time)
+                # Multi-case problems put each case's results in its own subdirectory,
+                # so the iteration root holds no results.json at all. Anchor on the
+                # primary case, as the tree API does.
+                results_path = primary_case_dir(get_problem_dir(), iter_dir) / "results.json"
+                summary = get_results_summary(results_path, ref_time)
                 t_us = summary.get("best_time_us")
                 if t_us is not None and (scanned_time is None or t_us < scanned_time):
                     scanned_time = t_us
@@ -152,7 +157,8 @@ def print_iteration_timeline(branches_dir: Path) -> None:
         iters = []
         for i in range(1, manifest.current_iter + 1):
             iter_dir = branch_path / f"iter{i}"
-            summary = get_results_summary(iter_dir / "results.json", ref_time)
+            results_path = primary_case_dir(get_problem_dir(), iter_dir) / "results.json"
+            summary = get_results_summary(results_path, ref_time)
             ms = summary["best_time_us"] / 1000 if summary["best_time_us"] else None
 
             action = "?"

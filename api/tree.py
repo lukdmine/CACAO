@@ -66,25 +66,10 @@ router = APIRouter()
 
 
 def _primary_case_dir(problem_dir, iter_dir):
-    """The iteration directory holding the anchor results.json.
+    """The iteration directory holding the anchor results.json."""
+    from utils.cases import primary_case_dir
 
-    Identity for a single-case problem, which is every problem that declares no
-    ``cases:`` block — so this changes nothing for them.
-    """
-    from pathlib import Path as _Path
-
-    try:
-        import yaml as _yaml
-
-        from utils.cases import case_dir, case_list
-
-        meta = _yaml.safe_load(
-            (_Path(problem_dir) / "problem.yaml").read_text(encoding="utf-8")
-        ) or {}
-        cases = case_list(meta)
-        return case_dir(iter_dir, cases, cases[0])
-    except Exception:
-        return iter_dir
+    return primary_case_dir(problem_dir, iter_dir)
 
 
 def _project_iter(snap: dict) -> dict:

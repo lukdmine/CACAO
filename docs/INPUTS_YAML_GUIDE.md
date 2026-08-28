@@ -51,6 +51,10 @@ args:
 
 At least one buffer must set `validate: true`, or loading the spec raises.
 
+A `cases:` block in `problem.yaml` overrides scalar `value`s and `init: file`
+`file_name`s per case; everything else here is shared by every case. See
+[PROBLEM_YAML_GUIDE.md](PROBLEM_YAML_GUIDE.md#cases).
+
 ## Scalars
 
 ```yaml

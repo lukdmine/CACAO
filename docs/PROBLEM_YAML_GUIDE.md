@@ -50,6 +50,7 @@ tuning:
 | `reference` | **yes** | mapping | Validation reference source and function |
 | `validation` | no | mapping | `tolerance`, default `1e-4` |
 | `tuning` | no | mapping | `duration_s`, default `20.0` |
+| `cases` | no | list | Named input variants, all tuned and validated each iteration |
 | `rules` | no | list, string or mapping | Constraints on what a kernel may do |
 
 Unknown keys are ignored, not rejected.
@@ -147,6 +148,43 @@ tuning:
 Wall-clock budget for one KTT tuning run, in seconds. Default `20.0`. `--timeout`
 overrides it.
 
+### `cases`
+
+Named instantiations of the same inputs. Every case is tuned and validated each
+iteration, so a kernel that is only correct at one shape fails the iteration instead of
+being reported as a win.
+
+```yaml
+cases:
+  - name: prefill          # the primary case: first in the list
+    scalars: {T: 4096}
+  - name: decode
+    scalars: {T: 1}
+    duration_s: 20         # a tail case catches a bug, it need not find an optimum
+  - name: from_file
+    files: {q: q_decode.bin}
+```
+
+| Field | Required | Default | Notes |
+|---|---|---|---|
+| `name` | no | `default` | Becomes a directory name — letters, digits, `_`, `-` only. Must be unique |
+| `scalars` | no | `{}` | Overrides for scalars declared in `inputs.yaml`, coerced to their dtype |
+| `files` | no | `{}` | `file_name` overrides for `init: file` buffers |
+| `duration_s` | no | `tuning.duration_s` | This case's tuning budget |
+
+Omitting the block entirely gives one implicit case named `default` whose resolution is
+an identity copy of `inputs.yaml` — which is what every problem without `cases:` gets,
+and why the layout below is unchanged for them.
+
+**Layout.** One case (declared or implicit) writes its artifacts at the iteration root,
+exactly as before this feature. More than one, and each case gets
+`iter_N/case_<name>/`, holding its own `inputs.hpp`, `framework.cpp`, `driver` and
+`results.json`. The first case in the list is the primary, and is what run-level
+summaries anchor on.
+
+Only `scalars` and `files` vary per case. The grid expression, the kernel and the three
+driver regions are shared: a case changes the numbers, not the program.
+
 ### `rules`
 
 Constrains what a kernel may do. This is the mechanism that stops a branch winning by
@@ -206,5 +244,6 @@ reference function.
 | `gpu.compute_capability` | `agentic/tools.py` |
 | `global_size_type`, `grid`, `reference`, `validation`, `tuning` | `utils/framework.py` |
 | `reference.file`, `reference.type` | `utils/build.py`, `engine/master.py`, `nodes/author.py` |
+| `cases` | `utils/cases.py`, `models/cases.py` |
 | `rules` | `utils/rules.py` |
 | `name`, `description` | the API and the prompts |

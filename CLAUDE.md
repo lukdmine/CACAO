@@ -302,6 +302,12 @@ problems/<name>/output/
         └── branches/              # sub-branches (recursive)
 ```
 
+A problem declaring several `cases:` puts each case's `inputs.hpp`, `framework.cpp`,
+`driver` and `results.json` in `iter_N/case_<name>/` instead of at the iteration
+root; `kernels.cu` and the region files stay at the root, shared. One case — which
+is every problem with no `cases:` block — keeps the layout above exactly.
+`utils.cases.primary_case_dir` is what run-level readers anchor on.
+
 ### Server + Frontend
 
 `server.py` is a thin entry point that creates the FastAPI app via `api.create_app()`. The server is split into an `api/` package:
