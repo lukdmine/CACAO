@@ -497,3 +497,85 @@ def test_followup_prompt_does_not_promise_files_it_has_none_of(env):
     )
     assert "edit them rather than rewriting" not in empty
     assert "workspace is empty" in empty.lower()
+
+
+# -- salvaging a step that ended badly with the work already done -----------
+
+
+async def test_a_stalled_step_with_passing_files_is_committed(env, monkeypatch):
+    """The model wrote everything, got a PASS, then answered in prose instead of
+    calling end_step.
+
+    NO_TOOL_CALLS made author_node fail the iteration, discarding a complete and
+    compile-verified workspace — costing one of the user's max_iter slots and four
+    LLM calls to re-derive a kernel that was already sitting in staging.
+    """
+    _passing_check(monkeypatch)
+    turns = [
+        [call("write_file", name="kernels.cu", content='extern "C" __global__ void k(){}\n')],
+        [call("write_file", name="region_kernels.cpp", content="ktt::KernelId kernel = 0;\n")],
+        [
+            call(
+                "write_file",
+                name="region_params.cpp",
+                content='tuner.AddParameter(kernel, "TILE", std::vector<uint64_t>{16});\n',
+            )
+        ],
+        [call("write_file", name="region_launcher.cpp", content="// default\n")],
+        [call("check_compilation")],
+        "The kernel is complete and compiles cleanly.",
+        "As I said, it is done.",
+    ]
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(turns))
+
+    state = await author_mod.author_node(make_state(env))
+
+    assert "[AUTHORING FAILED]" not in state.run_output
+    assert state.status == "running"
+    assert "__global__ void k()" in state.kernel_code
+    assert (env["branch"] / "iter1" / "kernels.cu").exists()
+
+
+async def test_a_stalled_step_without_a_passing_check_still_fails(env, monkeypatch):
+    """Salvage requires a verified workspace. Files that never compiled are not a
+    result, and committing them would send a broken kernel to the tuner."""
+    def failing_check(self):
+        self.checks_run += 1
+        self.check_passed = False
+        self.last_check = "Compilation check: FAIL"
+        return self.last_check
+
+    monkeypatch.setattr(author_mod.Toolbox, "check_compilation", failing_check)
+    turns = [
+        [call("write_file", name="kernels.cu", content='extern "C" __global__ void k(){}\n')],
+        [call("write_file", name="region_kernels.cpp", content="ktt::KernelId kernel = 0;\n")],
+        [call("write_file", name="region_params.cpp", content="// p\n")],
+        [call("write_file", name="region_launcher.cpp", content="// l\n")],
+        [call("check_compilation")],
+        "I think that is right.",
+        "Still right.",
+    ]
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(turns))
+
+    state = await author_mod.author_node(make_state(env))
+
+    assert "[AUTHORING FAILED]" in state.run_output
+    assert state.status == "deciding"
+
+
+async def test_a_stalled_step_with_missing_files_still_fails(env, monkeypatch):
+    """A passing check on an incomplete workspace cannot happen in practice, but the
+    salvage must require both conditions regardless."""
+    _passing_check(monkeypatch)
+    turns = [
+        [call("write_file", name="kernels.cu", content='extern "C" __global__ void k(){}\n')],
+        [call("check_compilation")],
+        "Done.",
+        "Done.",
+    ]
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(turns))
+
+    state = await author_mod.author_node(make_state(env))
+
+    assert "[AUTHORING FAILED]" in state.run_output
+    assert state.status == "deciding"

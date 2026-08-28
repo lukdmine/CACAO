@@ -357,7 +357,23 @@ async def author_node(state: WorkingState) -> WorkingState:
         f"{len(schemas)} tools bound (history={has_history}, siblings={has_siblings})"
     )
 
-    if result.outcome.aborted:
+    # An aborted outcome says the step ended badly, not that it produced nothing. If
+    # all four files are there and the compile check passed, the work is done and
+    # verified — the model just failed to say end_step. Throwing that away and failing
+    # the iteration costs one of the user's max_iter slots and four LLM calls to
+    # re-derive a kernel that is sitting in staging. This is the same reasoning that
+    # already excludes BUDGET_EXHAUSTED from `aborted`; the outcome simply cannot tell
+    # "never called a tool" from "called forty tools and then stalled".
+    salvageable = ws.complete() and toolbox.check_passed
+
+    if result.outcome.aborted and salvageable:
+        log(
+            f"Step ended {result.outcome.value} but all four files are present and "
+            "the compile check passed — committing rather than discarding the work.",
+            "WARN",
+        )
+
+    if result.outcome.aborted and not salvageable:
         detail = result.outcome.diagnosis
         if toolbox.internal_errors:
             # A tool of ours raised and left the model with nothing to converge on.
