@@ -26,6 +26,7 @@ from utils.files import create_iter_dir, save_output
 from utils.framework import assemble_framework_cpp
 from utils.inputs import load_inputs_spec, scalar_contract_text
 from utils.log import log
+from utils.problem import reference_spec
 from utils.rules import parse_rules
 from state.types import WorkingState
 from agentic.loop import StepResult, run_agentic_step
@@ -53,9 +54,9 @@ def _stage_engine_files(state: WorkingState, iter_dir: Path, meta: dict) -> str:
         )
     shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
 
-    ref = meta.get("reference", {})
-    if str(ref.get("type", "cuda")).lower() == "python":
-        ref_py = problem_dir / ref.get("file", "ref.py")
+    ref = reference_spec(meta)
+    if ref.type == "python":
+        ref_py = problem_dir / ref.file
         if not ref_py.exists():
             raise FileNotFoundError(
                 f"{ref_py} not found — python reference file required by problem.yaml"

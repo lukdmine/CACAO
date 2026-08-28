@@ -11,6 +11,7 @@ import shutil
 import yaml
 
 from config import get_problem_dir
+from utils.problem import reference_spec
 from models.regions import FrameworkRegions
 from utils.files import save_output, get_iter_dir
 from utils.framework import assemble_framework_cpp, resolve_cuda_include
@@ -48,11 +49,11 @@ async def configure_node(state: WorkingState) -> WorkingState:
     shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
 
     meta = yaml.safe_load(state.problem_yaml) if state.problem_yaml else {}
-    ref = meta.get("reference", {})
-    ref_type = str(ref.get("type", "cuda")).lower()
+    ref = reference_spec(meta)
+    ref_type = ref.type
 
     if ref_type == "python":
-        ref_py = problem_dir / ref.get("file", "ref.py")
+        ref_py = problem_dir / ref.file
         if not ref_py.exists():
             raise FileNotFoundError(
                 f"{ref_py} not found — python reference file required by problem.yaml"

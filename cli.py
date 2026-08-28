@@ -35,6 +35,7 @@ from utils.files import (
     prune_archives,
 )
 from utils.log import log, TeeWriter
+from utils.problem import reference_spec
 
 
 def log_section(title: str):
@@ -145,7 +146,7 @@ def check_prerequisites(problem_dir: Path):
         log(f"Failed to parse problem.yaml: {e}", "ERROR")
         return False
 
-    ref_file = problem_config.get("reference", {}).get("file", "ref_kernel.cu")
+    ref_file = reference_spec(problem_config).file
     ref_path = problem_dir / ref_file
     if not ref_path.exists():
         log(f"Reference source not found at {ref_path}", "ERROR")

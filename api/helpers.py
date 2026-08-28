@@ -10,6 +10,8 @@ from pathlib import Path
 import yaml
 from fastapi import HTTPException
 
+from utils.problem import reference_spec
+
 from dataclasses import dataclass
 
 PROBLEMS_DIR = Path(__file__).parent.parent / "problems"
@@ -231,7 +233,7 @@ def load_problem_inputs(problem_dir: Path) -> tuple[str, str]:
 
     problem_yaml = load_file(problem_dir / "problem.yaml")
     config = yaml.safe_load(problem_yaml) or {}
-    ref_file = config.get("reference", {}).get("file", "ref_kernel.cu")
+    ref_file = reference_spec(config).file
     ensure_inputs_hpp(problem_dir)
     return problem_yaml, load_file(problem_dir / ref_file)
 

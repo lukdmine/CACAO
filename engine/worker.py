@@ -19,6 +19,7 @@ from nodes.decide import decide_node
 
 from config import get_problem_dir
 from utils.log import log
+from utils.problem import reference_source
 from state import (
     load_branch_config,
     load_branch_manifest,
@@ -56,14 +57,8 @@ def _read_fresh_problem_yaml(gpu_info: dict | None) -> str:
 
 
 def _read_fresh_ref_kernel() -> str:
-    """Re-read the reference kernel source from the problem directory."""
-    problem_dir = get_problem_dir()
-    with open(problem_dir / "problem.yaml", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    ref_file = config.get("reference", {}).get("file", "")
-    if ref_file:
-        return (problem_dir / ref_file).read_text(encoding="utf-8")
-    return ""
+    """Re-read the reference source from the problem directory."""
+    return reference_source(get_problem_dir())
 
 
 def _compose_working_state(
