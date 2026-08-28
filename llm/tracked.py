@@ -1,6 +1,8 @@
 """Retry, token tracking and truncation handling around a provider client."""
 
 import asyncio
+import json
+import re
 
 from utils.log import log
 
@@ -21,8 +23,6 @@ class TrackedLLM:
         self._tools_bound = tools_bound
 
     async def ainvoke(self, *args, **kwargs):
-        import asyncio
-
         retries = 0
         max_retries = 5
         base_wait = 2
@@ -172,8 +172,6 @@ class TrackedStructuredLLM:
         self._schema = schema
 
     async def ainvoke(self, *args, **kwargs):
-        import asyncio
-
         retries = 0
         max_retries = 5
         base_wait = 2
@@ -213,7 +211,6 @@ class TrackedStructuredLLM:
 
     async def _try_raw_fallback_async(self, *args, **kwargs):
         """Async variant of _try_raw_fallback for thinking models."""
-        import re
         try:
             log(
                 "Structured output failed — trying raw LLM fallback with JSON parsing",
