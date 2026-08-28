@@ -38,7 +38,7 @@ from state import (
 
 def _init_branch(
     strategy: dict,
-    parent_branch: str = None,
+    parent_branch: Optional[str] = None,
     current_depth: int = _cfg.MAX_BRANCH_DEPTH,
     path_iters_consumed: int = 0,
     inherited_max_iter: Optional[int] = None,
@@ -183,7 +183,7 @@ def _spawn_sub_branches(branch_path: Path, sub_strategies: list) -> List[Path]:
 
 
 async def run_optimization_engine(
-    problem_yaml: str, ref_kernel: str, resume_states: list = None
+    problem_yaml: str, ref_kernel: str, resume_states: Optional[list] = None
 ):
     """
     Main entry point for optimization execution.

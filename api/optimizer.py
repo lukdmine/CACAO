@@ -46,8 +46,8 @@ def _run_target(
     max_depth: int,
     path_budget: int,
     timeout: Optional[int],
-    model: str = None,
-    provider: str = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ):
     """Process target for a fresh optimization run."""
     try:
@@ -123,8 +123,8 @@ def _resume_target(
     max_depth: int,
     path_budget: int,
     timeout: Optional[int],
-    model: str = None,
-    provider: str = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ):
     """Process target for resuming an interrupted optimization."""
     try:

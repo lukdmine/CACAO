@@ -16,6 +16,7 @@ import sys
 import textwrap
 import zlib
 from pathlib import Path, PurePosixPath
+from typing import Optional
 
 import yaml
 
@@ -369,7 +370,9 @@ def scalar_contract_text(spec: InputsSpec) -> str:
     return "\n".join(lines)
 
 
-def generate_inputs_hpp(spec: InputsSpec, reference: dict = None, problem_dir=None) -> str:
+def generate_inputs_hpp(
+    spec: InputsSpec, reference: Optional[dict] = None, problem_dir=None
+) -> str:
     """Render the spec as the inputs.hpp the engine compiles.
 
     ``reference`` is the problem.yaml reference mapping ({type, function, file}).
@@ -622,7 +625,9 @@ def ensure_inputs_hpp(problem_dir) -> Path:
     return out
 
 
-def write_inputs(problem_dir: Path, spec: InputsSpec, reference: dict = None) -> list:
+def write_inputs(
+    problem_dir: Path, spec: InputsSpec, reference: Optional[dict] = None
+) -> list:
     """Persist the canonical spec and the generated header side by side.
 
     ``reference`` (the problem.yaml reference mapping) is required for cpu_c
