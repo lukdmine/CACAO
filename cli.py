@@ -363,7 +363,11 @@ async def main():
     # After all branches complete, aggregate results from disk
     log_section("AGGREGATING RESULTS")
 
-    from nodes.merge import find_branch_results, get_best_branch_result
+    from nodes.merge import (
+        build_final_summary,
+        find_branch_results,
+        get_best_branch_result,
+    )
     from utils.files import save_json
 
     output_dir = config.get_output_dir()
@@ -415,26 +419,10 @@ async def main():
         if best.get("speedup"):
             log(f"Speedup: {best.get('speedup'):.2f}x")
 
-        # Save final summary
-        final_summary = {
-            "best_branch": best.get("branch_name"),
-            "best_config": best.get("best_config"),
-            "best_time_us": best.get("best_time_us"),
-            "speedup": best.get("speedup"),
-            "total_branches": len(branch_results),
-            "all_branches": [
-                {
-                    "name": r.get("branch_name"),
-                    "path": r.get("branch_path"),
-                    "status": r.get("status"),
-                    "best_time_us": r.get("best_time_us"),
-                    "speedup": r.get("speedup"),
-                    "iterations": r.get("iterations"),
-                }
-                for r in branch_results
-            ],
-        }
-        save_json(output_dir / "final_results.json", final_summary)
+        save_json(
+            output_dir / "final_results.json",
+            build_final_summary(branch_results, best),
+        )
 
         return 0
     else:

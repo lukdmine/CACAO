@@ -43,17 +43,26 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
             branch_path = branch_file.parent
             manifest = load_branch_manifest(branch_path)
             strategy = manifest.strategy or {}
-            best_time_us = manifest.best_time_us
+            # The parameter values that produced the best time exist only in an
+            # iteration's results.json — the manifest carries the time and nothing
+            # else. This scan is therefore unconditional: it used to run only when the
+            # manifest had no time, and it discarded everything except best_time_us,
+            # so final_results.json reported "best_config": null on every run ever
+            # written, for a value that was sitting in results_summary all along.
+            scanned_time = None
+            best_config = None
+            for iter_dir in sorted(branch_path.glob("iter*")):
+                if not iter_dir.is_dir():
+                    continue
+                summary = get_results_summary(iter_dir / "results.json", ref_time)
+                t_us = summary.get("best_time_us")
+                if t_us is not None and (scanned_time is None or t_us < scanned_time):
+                    scanned_time = t_us
+                    best_config = summary.get("best_config")
 
-            # If best_time not in manifest, scan iter dirs
-            if best_time_us is None:
-                for iter_dir in branch_path.glob("iter*"):
-                    if iter_dir.is_dir():
-                        results_path = iter_dir / "results.json"
-                        summary = get_results_summary(results_path, ref_time)
-                        t_us = summary.get("best_time_us")
-                        if t_us and (best_time_us is None or t_us < best_time_us):
-                            best_time_us = t_us
+            best_time_us = (
+                manifest.best_time_us if manifest.best_time_us is not None else scanned_time
+            )
 
             speedup = manifest.speedup
             if not speedup and best_time_us and ref_time:
@@ -65,6 +74,7 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
                     "branch_path": str(branch_path),
                     "status": manifest.status,
                     "best_time_us": best_time_us,
+                    "best_config": best_config,
                     "speedup": speedup,
                     "iterations": manifest.current_iter,
                 }
@@ -73,6 +83,34 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
             log(f"Failed to load branch {branch_file}: {e}", "WARN")
 
     return results
+
+
+def build_final_summary(branch_results: List[dict], best: dict) -> dict:
+    """The contents of ``output/final_results.json``.
+
+    One builder, because there used to be two. cli.py wrote a summary with
+    total_branches and a per-branch path and iteration count; merge_node wrote one
+    without any of the three. ``cli.py --best`` runs merge_node, so looking at your
+    results silently rewrote the richer file with the poorer one.
+    """
+    return {
+        "best_branch": best.get("branch_name"),
+        "best_config": best.get("best_config"),
+        "best_time_us": best.get("best_time_us"),
+        "speedup": best.get("speedup"),
+        "total_branches": len(branch_results),
+        "all_branches": [
+            {
+                "name": r.get("branch_name"),
+                "path": r.get("branch_path"),
+                "status": r.get("status"),
+                "best_time_us": r.get("best_time_us"),
+                "speedup": r.get("speedup"),
+                "iterations": r.get("iterations"),
+            }
+            for r in branch_results
+        ],
+    }
 
 
 def get_best_branch_result(results: List[dict]) -> Optional[dict]:
@@ -212,23 +250,10 @@ def merge_node() -> dict:
         if best.get("speedup"):
             log(f"Speedup: {best.get('speedup'):.2f}x")
 
-        # Save final summary
-        final_summary = {
-            "best_branch": best.get("branch_name"),
-            "best_config": best.get("best_config"),
-            "best_time_us": best.get("best_time_us"),
-            "speedup": best.get("speedup"),
-            "all_branches": [
-                {
-                    "name": r.get("branch_name"),
-                    "status": r.get("status"),
-                    "best_time_us": r.get("best_time_us"),
-                    "speedup": r.get("speedup"),
-                }
-                for r in branch_results
-            ],
-        }
-        save_json(get_output_dir() / "final_results.json", final_summary)
+        save_json(
+            get_output_dir() / "final_results.json",
+            build_final_summary(branch_results, best),
+        )
 
         return {
             "status": "success"

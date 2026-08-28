@@ -251,6 +251,37 @@ def _init_branch(
     return branch_path
 
 
+def _write_final_results() -> None:
+    """Write ``output/final_results.json`` at the end of a run.
+
+    It belongs here, not in cli.py, because cli.py is not the only entry point: the
+    API's run target calls run_optimization_engine and nothing else, so every run
+    started from the web UI's Run button finished without ever producing this file —
+    and GET /api/problems/{name}/results, whose only job is to serve it, returned
+    {"results": null} permanently.
+
+    Failure is logged, never raised: the run itself has already succeeded by this
+    point and its per-branch results are on disk regardless.
+    """
+    from nodes.merge import build_final_summary, find_branch_results, get_best_branch_result
+    from utils.files import save_json
+
+    try:
+        output_dir = get_output_dir()
+        branch_results = find_branch_results(output_dir / "branches")
+        best = get_best_branch_result(branch_results)
+        if not best:
+            log("No branch results to summarise; skipping final_results.json", "WARN")
+            return
+        save_json(
+            output_dir / "final_results.json",
+            build_final_summary(branch_results, best),
+        )
+        log(f"Wrote {output_dir / 'final_results.json'}", "SUCCESS")
+    except Exception as e:
+        log(f"Could not write final_results.json: {e}", "WARN")
+
+
 def _spawn_sub_branches(branch_path: Path, sub_strategies: list) -> List[Path]:
     """Create the child branches a branch asked for, and return their paths.
 
@@ -537,6 +568,8 @@ async def run_optimization_engine(
     await asyncio.gather(monitor_task, *worker_tasks)
 
     log("All branches and sub-branches have completed!", "SUCCESS")
+
+    _write_final_results()
 
     global_tracker.save()
 
