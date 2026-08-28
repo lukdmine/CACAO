@@ -215,6 +215,31 @@ def load_reference_time(output_dir: Path, case: Optional[str] = None) -> Optiona
     return (data.get("cases") or {}).get(case)
 
 
+def reference_time_recorded(output_dir: Path, case: Optional[str] = None) -> bool:
+    """Whether a baseline decision has been recorded for this case.
+
+    True for a measured value AND for an explicit ``null``, which means "we know there
+    is no baseline for this shape — do not go and measure one".
+
+    Timing the reference is the normal path and stays the default: an absent case is
+    measured exactly as before, and for a python reference with ``prepare_input`` that
+    is a torch.cuda.Event timing with H2D and startup excluded (utils/torch_ref_timer),
+    which is a fine denominator. ``null`` is the opt-out for the one case it does not
+    serve — a problem where SOME cases carry a hand-seeded incumbent. Speedups against
+    the reference and speedups against a production kernel are both accurate and are not
+    comparable with each other, so letting the unseeded cases fall back to the reference
+    puts two denominators in one geometric mean and inflates the score. Seeding the rest
+    by hand fixes it too; ``null`` is for when there is nothing to seed them with.
+
+    Callers deciding whether to MEASURE use this; callers wanting the value use
+    load_reference_time, which returns None for both null and absent.
+    """
+    data = _read_reference_times(output_dir)
+    if case is None:
+        return "reference_time_us" in data
+    return case in (data.get("cases") or {})
+
+
 def save_reference_time(
     output_dir: Path, time_us: float, case: Optional[str] = None
 ) -> None:
@@ -257,8 +282,8 @@ def save_reference_time(
         data["reference_time_us"] = time_us
     else:
         cases = data.setdefault("cases", {})
-        if cases.get(case) is not None:
-            return  # first-write-wins
+        if case in cases:
+            return  # first-write-wins; an explicit null means "deliberately no baseline"
         cases[case] = time_us
 
     tmp = path.with_suffix(".json.tmp")

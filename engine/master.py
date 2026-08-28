@@ -60,12 +60,14 @@ async def _time_python_reference_for_case(problem_dir, output_dir, cfg, ref, cas
         load_inputs_spec,
     )
     from utils.build import compile_dump_inputs
-    from utils.results import load_reference_time, save_reference_time
+    from utils.results import reference_time_recorded, save_reference_time
     from utils.cuda_env import get_subprocess_env
     from utils.gpu_lock import acquire_gpu_lock
 
-    if load_reference_time(output_dir, case_key) is not None:
-        return  # resume, or a committed seed: first-write-wins persists it
+    if reference_time_recorded(output_dir, case_key):
+        # A measured value, a committed seed, or an explicit null meaning "this shape has
+        # no incumbent measurement". All three mean: do not time the reference for it.
+        return
 
     problem_dir = Path(problem_dir).resolve()
     output_dir = Path(output_dir).resolve()

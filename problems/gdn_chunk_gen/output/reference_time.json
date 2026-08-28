@@ -1,3 +1,9 @@
 {
-  "reference_time_us": 411.28
+  "reference_time_us": 411.28,
+  "cases": {
+    "t100": null,
+    "t127": null,
+    "t500": null,
+    "t1000": null
+  }
 }
