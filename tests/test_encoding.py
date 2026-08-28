@@ -11,6 +11,7 @@ if that regresses.
 """
 
 import ast
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -19,9 +20,20 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Directories that are not the engine: vendored code, the frontend, and the tests
-# themselves (which construct their own fixtures and control their own encoding).
-SKIP_PARTS = ("KTT", "frontend", "node_modules", ".git", "__pycache__", "tests", "problems")
+# Directories that are not the engine: vendored code, the frontend's TypeScript, and
+# the tests themselves (which construct their own fixtures and control their own
+# encoding). Note "frontend" is NOT skipped wholesale — frontend/scripts holds
+# project-owned Python that CLAUDE.md tells you to run, and excluding the whole tree
+# hid a bare write_text emitting an em dash from this audit.
+SKIP_PARTS = (
+    "KTT",
+    "node_modules",
+    "dist",
+    ".git",
+    "__pycache__",
+    "tests",
+    "problems",
+)
 
 # Text-mode I/O whose codec comes from the locale unless `encoding` is passed.
 TEXT_IO = {"read_text", "write_text", "open"}
@@ -212,6 +224,7 @@ def test_a_bare_read_would_still_fail_under_that_locale(tmp_path):
     assert "UnicodeDecodeError" in proc.stderr
 
 
+@pytest.mark.skipif(shutil.which("g++") is None, reason="g++ not on PATH")
 def test_compile_framework_survives_non_ascii_compiler_output(tmp_path):
     """g++ quotes the offending source line back; a kernel comment with µ or an em dash
     then arrives as non-ASCII bytes on stderr. Decoding that with the locale codec is
@@ -226,6 +239,7 @@ def test_compile_framework_survives_non_ascii_compiler_output(tmp_path):
     assert isinstance(result.stderr, str)  # decoded, not raised
 
 
+@pytest.mark.skipif(shutil.which("g++") is None, reason="g++ not on PATH")
 def test_check_compilation_reports_failure_rather_than_raising(filled_workspace, tmp_path):
     """The end-to-end shape of the bug: a tool that raises leaves the model with
     nothing actionable, and the step dead-ends without ever producing a kernel."""

@@ -47,8 +47,8 @@ def test_arch_option_matches_ktt_format(capability, expected):
     assert nvrtc.arch_option(capability) == expected
 
 
-def test_parses_scalar_defines_from_inputs_hpp(cov_problem):
-    text = (cov_problem / "inputs.hpp").read_text(encoding="utf-8")
+def test_parses_scalar_defines_from_inputs_hpp(cov_inputs_hpp):
+    text = cov_inputs_hpp.read_text(encoding="utf-8")
     assert nvrtc.parse_defines_from_inputs_hpp(text) == ["-DCOV_M=8192", "-DCOV_K=512"]
 
 

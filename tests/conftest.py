@@ -43,6 +43,17 @@ def cov_branch() -> Path:
 
 
 @pytest.fixture(scope="session")
+def cov_inputs_hpp() -> Path:
+    """A real generated inputs.hpp.
+
+    Its own fixture rather than ``cov_problem / "inputs.hpp"``: the problem directory
+    is tracked but inputs.hpp is a gitignored build artifact, so on a fresh clone the
+    directory check passes and the read then raises instead of skipping.
+    """
+    return _require(COVARIANCE / "inputs.hpp")
+
+
+@pytest.fixture(scope="session")
 def params_region() -> str:
     """The PARAMS region of a real, validated iteration."""
     from utils.framework import extract_regions
