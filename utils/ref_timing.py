@@ -10,6 +10,7 @@ import asyncio
 import re
 from pathlib import Path
 
+from config import get_problem_dir
 from utils.log import log
 
 
@@ -243,7 +244,7 @@ async def preflight_python_reference(problem_yaml: str) -> bool:
     if str(ref.get("type", "cuda")).lower() != "python":
         return True
 
-    problem_dir = _cfg.get_problem_dir()
+    problem_dir = get_problem_dir()
     ref_path = problem_dir / ref.get("file", "ref.py")
     if not ref_path.exists():
         log(f"Python reference not found at {ref_path}", "ERROR")
