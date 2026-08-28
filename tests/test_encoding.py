@@ -30,6 +30,12 @@ SKIP_PARTS = (
     "__pycache__",
     "tests",
     "problems",
+    # Reference material, not engine code — and docs/local carries vendored third-party
+    # sources, some of them Python 2, which ast.parse cannot read at all.
+    "docs",
+    # Holds git worktrees: a full second copy of this repo, which would otherwise be
+    # audited alongside the real one.
+    ".claude",
 )
 
 # Text-mode I/O whose codec comes from the locale unless `encoding` is passed.

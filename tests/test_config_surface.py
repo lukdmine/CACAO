@@ -25,6 +25,7 @@ SKIP_PARTS = {
     "__pycache__",
     "problems",
     "tests",
+    "docs",
     ".claude",
     "archive",
     "output",
