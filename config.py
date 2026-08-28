@@ -558,8 +558,8 @@ MODELS = {
     "cerit": {
         "default": "glm-5.2",
         "available": [
-            "glm-5",
             "glm-5.2",
+            "glm-5.3",
             "kimi-k3",
             "qwen3.5",
             "qwen3.5-122b",
