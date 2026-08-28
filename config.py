@@ -14,6 +14,8 @@ from typing import Optional, Literal
 
 from dotenv import load_dotenv
 
+# Module level: utils/log.py has no first-party imports, so there is no cycle to dodge.
+from utils.log import log
 # Load environment variables
 load_dotenv()
 
@@ -173,15 +175,8 @@ class TokenTracker:
         self.total_tokens = 0
 
     def record_usage(self, response) -> None:
-        """Add one response's token counts, whichever way its provider reports them.
-
-        ``usage_metadata`` is langchain's normalised field and every provider
-        integration here populates it. ``response_metadata["token_usage"]`` is the raw
-        provider payload, which only langchain_openai passes through — reading that
-        alone meant anthropic and gemini runs recorded zero tokens everywhere:
-        token_usage.json, the end-of-run banner, the frontend panel and
-        collect_results.py all reported 0 for an entire run.
-        """
+        """Add one response's tokens. usage_metadata is langchain's normalised field;
+        only langchain_openai also fills response_metadata["token_usage"]."""
         usage = getattr(response, "usage_metadata", None)
         if usage:
             self.prompt_tokens += usage.get("input_tokens", 0)
@@ -265,10 +260,6 @@ TRUNCATION_RETRY_NUDGE = (
 class TrackedLLM:
     def __init__(self, llm, tools_bound: bool = False):
         self._llm = llm
-        # Whether this wrapper has tools bound to it. When it does, an empty reply is
-        # the agentic loop's business, not ours: it has its own escalating truncation
-        # policy, and retrying underneath it multiplies the two. See the guard in
-        # ainvoke.
         self._tools_bound = tools_bound
 
     async def ainvoke(self, *args, **kwargs):
@@ -308,16 +299,12 @@ class TrackedLLM:
                         getattr(response, "additional_kwargs", None) or {}
                     ).get("reasoning_content")
                     if reasoning and reasoning.strip():
-                        from utils.log import log
-
                         log(
                             "Content empty but reasoning_content found — using as output",
                             "WARN",
                         )
                         response.content = reasoning
                         return response
-
-                    from utils.log import log
 
                     additional = getattr(response, "additional_kwargs", None) or {}
                     metadata = getattr(response, "response_metadata", None) or {}
@@ -333,15 +320,9 @@ class TrackedLLM:
                         "WARN",
                     )
 
+                    # The agentic loop has its own escalating truncation policy;
+                    # retrying here too made the two multiply.
                     if self._tools_bound:
-                        # The agentic loop owns this failure. It detects the same
-                        # condition from finish_reason, applies an escalating
-                        # correction that shrinks the unit of work, and gives up after
-                        # STEP_TRUNCATION_RETRIES. Retrying here as well made the two
-                        # policies multiply: one truncated authoring step cost 24
-                        # provider calls and ~248 s of backoff instead of 4 calls and
-                        # no sleep. The nudge appended below is lost regardless — the
-                        # loop keeps its own message list, so it never saw the mutation.
                         return response
 
                     if finish_reason == "length":
@@ -391,8 +372,6 @@ class TrackedLLM:
                 return response
             except Exception as e:
                 if not _is_transient_error(e):
-                    from utils.log import log
-
                     log(
                         f"LLM invoke failed (non-transient): {_format_error(e)}",
                         "ERROR",
@@ -400,8 +379,6 @@ class TrackedLLM:
                     raise
                 retries += 1
                 if retries > max_retries:
-                    from utils.log import log
-
                     log(
                         f"LLM invoke failed after {max_retries} retries: {_format_error(e)}",
                         "ERROR",
@@ -409,8 +386,6 @@ class TrackedLLM:
                     raise
 
                 wait_time = _compute_retry_wait(e, retries, base_wait)
-                from utils.log import log
-
                 log(
                     f"LLM transient error ({_format_error(e)}). Retrying {retries}/{max_retries} in {wait_time:.1f}s...",
                     "WARN",
@@ -427,9 +402,7 @@ class TrackedLLM:
         Raises whatever the provider raises when it has no tool support — the agentic
         loop treats that as a signal to fall back rather than something to retry.
 
-        The returned wrapper keeps transient-error retry and token tracking but drops
-        the empty-content retry: with tools bound, an empty reply is either a tool call
-        (returned early) or a truncation the loop handles itself.
+        Keeps transient-error retry and token tracking, drops the empty-content retry.
         """
         return TrackedLLM(self._llm.bind_tools(tools, **kwargs), tools_bound=True)
 
@@ -455,8 +428,6 @@ class TrackedStructuredLLM:
                 return response
             except Exception as e:
                 if not _is_transient_error(e):
-                    from utils.log import log
-
                     will_fallback = bool(self._base_llm and self._schema)
                     log(
                         f"Structured LLM invoke failed (non-transient): {_format_error(e)}",
@@ -469,8 +440,6 @@ class TrackedStructuredLLM:
                     raise
                 retries += 1
                 if retries > max_retries:
-                    from utils.log import log
-
                     log(
                         f"Structured LLM invoke failed after {max_retries} retries: {_format_error(e)}",
                         "ERROR",
@@ -478,8 +447,6 @@ class TrackedStructuredLLM:
                     raise
 
                 wait_time = _compute_retry_wait(e, retries, base_wait)
-                from utils.log import log
-
                 log(
                     f"Structured LLM transient error ({_format_error(e)}). Retrying {retries}/{max_retries} in {wait_time:.1f}s...",
                     "WARN",
@@ -489,8 +456,6 @@ class TrackedStructuredLLM:
     async def _try_raw_fallback_async(self, *args, **kwargs):
         """Async variant of _try_raw_fallback for thinking models."""
         import re
-        from utils.log import log
-
         try:
             log(
                 "Structured output failed — trying raw LLM fallback with JSON parsing",
@@ -736,9 +701,7 @@ _current_model: Optional[str] = None
 
 PROVIDERS = ("openai", "anthropic", "gemini", "cerit")
 
-# "claude" is what this repo's docs, its own error message and CLAUDE.md all called the
-# anthropic provider, so it is the value a user is most likely to write. It used to be
-# silently ignored and fall through to key-based detection, which prefers cerit.
+# Names this project's own docs used; ignoring them fell through to key detection.
 _PROVIDER_ALIASES = {"claude": "anthropic", "google": "gemini"}
 
 
@@ -763,12 +726,7 @@ def _detect_provider() -> str:
         resolved = _normalise_provider(explicit_provider)
         if resolved:
             return resolved
-        # Falling silently through to key-based detection is how a run configured for
-        # one provider quietly executes on another — and the value most likely to land
-        # here used to be "claude", which this project's own docs and the error message
-        # below both named.
-        from utils.log import log
-
+        # Silent fallback is how a run configured for one provider executes on another.
         log(
             f"LLM_PROVIDER={explicit_provider!r} is not a known provider "
             f"({', '.join(PROVIDERS)}) — falling back to API-key detection.",

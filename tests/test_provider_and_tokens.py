@@ -148,9 +148,7 @@ def test_an_unrecognised_env_provider_warns_rather_than_silently_switching(monke
     for var in ("CERIT_API_KEY", "CERIT_API_BASE", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 
-    import utils.log
-
-    monkeypatch.setattr(utils.log, "log", lambda msg, level="INFO": warnings.append((level, msg)))
+    monkeypatch.setattr(config, "log", lambda msg, level="INFO": warnings.append((level, msg)))
 
     assert config._detect_provider() == "openai"
     assert any(level == "WARN" and "bedrock" in msg for level, msg in warnings)
