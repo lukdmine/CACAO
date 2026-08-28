@@ -11,7 +11,7 @@ single source of truth for the execution model and the compile environment, and
 prompts/_system_overview.py documents what per-prompt paraphrases cost last time.
 """
 
-from nodes._llm_helper import format_strategy
+from prompts._format import format_strategy
 from prompts._launcher_reference import LAUNCHER_RULES
 from prompts._system_overview import SYSTEM_OVERVIEW, NVRTC_RULES
 

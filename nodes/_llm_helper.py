@@ -216,35 +216,6 @@ def normalize_sub_strategies(sub_strats, parent_strategy) -> list:
 # -------------------------------------------------------------------------
 
 
-def format_strategy(strategy) -> str:
-    if not strategy:
-        return ""
-    name = (
-        strategy.name if hasattr(strategy, "name") else strategy.get("name", "unknown")
-    )
-    desc = (
-        strategy.description
-        if hasattr(strategy, "description")
-        else strategy.get("description", "")
-    )
-    hyp = (
-        strategy.hypothesis
-        if hasattr(strategy, "hypothesis")
-        else strategy.get("hypothesis", "")
-    )
-    params = (
-        strategy.key_parameters
-        if hasattr(strategy, "key_parameters")
-        else strategy.get("key_parameters", [])
-    )
-    return (
-        f"## Strategy: {name}\n"
-        f"**Description**: {desc}\n"
-        f"**Hypothesis**: {hyp}\n"
-        f"**Key Parameters**: {', '.join(params)}"
-    )
-
-
 def _format_current_iter(state, summary, tuner_tail) -> str:
     from utils.results import format_results_summary
 

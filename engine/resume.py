@@ -1,8 +1,7 @@
-"""
-Resume utilities - scan output directory and reconstruct state for resuming.
+"""Scan branch manifests for work interrupted mid-execution and re-queue it.
 
-Scans ``branch.json`` manifests to find branches that were interrupted
-mid-execution and returns their paths for re-queuing.
+In engine/ rather than utils/: this rewrites branch.json to restore a pre-stop
+status, which is branch-lifecycle surgery, not a utility.
 """
 
 from pathlib import Path

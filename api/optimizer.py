@@ -147,7 +147,7 @@ def _resume_target(
                 import config as cfg
                 from config import OptimizerConfig, init_from_config
                 from engine.master import run_optimization_engine
-                from utils.resume import get_resume_states
+                from engine.resume import get_resume_states
 
                 init_from_config(
                     OptimizerConfig(

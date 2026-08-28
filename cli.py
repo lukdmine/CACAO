@@ -315,7 +315,7 @@ async def main():
     if args.resume:
         log_section("RESUMING PREVIOUS RUN")
 
-        from utils.resume import get_resume_states
+        from engine.resume import get_resume_states
 
         # Build resume states for incomplete branches
         log("\nScanning branch status...")

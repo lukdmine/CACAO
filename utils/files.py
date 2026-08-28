@@ -9,11 +9,10 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Optional, Any, Union, Dict
+from typing import Optional, Union
 
 
 from config import get_output_dir
-from state.types import WorkingState
 from utils.log import log
 
 
@@ -134,18 +133,11 @@ def load_json(path: Path) -> Optional[dict]:
     return None
 
 
-def get_iter_dir(state: Union[Dict[str, Any], WorkingState]) -> Path:
-    """
-    Get the current iteration directory path from a working state.
+def get_iter_dir(state) -> Path:
+    """``branch_path/iterN`` for a WorkingState or an equivalent dict.
 
-    Shared helper used by all node files to avoid duplication.
-    Accepts either a dict or a Pydantic ``WorkingState`` model.
-
-    Args:
-        state: Working state (needs ``iter_num`` and ``branch_path``)
-
-    Returns:
-        Path to the iteration directory (e.g. ``branch_path/iter3``)
+    Deliberately unannotated: importing state.types for a type the body duck-types
+    anyway put utils above state in the layering, for nothing.
     """
     if hasattr(state, "iter_num"):
         iteration = getattr(state, "iter_num", 1) or 1

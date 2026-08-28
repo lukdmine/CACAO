@@ -1,6 +1,6 @@
 """Plan prompt — creates strategy-specific optimization plan."""
 
-from nodes._llm_helper import format_strategy
+from prompts._format import format_strategy
 from prompts._system_overview import SYSTEM_OVERVIEW
 from prompts._tensor_core_reference import TENSOR_CORE_REFERENCE
 
