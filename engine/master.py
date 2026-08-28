@@ -12,6 +12,7 @@ per branch.
 import asyncio
 import re
 from pathlib import Path
+from typing import List, Optional
 
 import config as _cfg
 from config import get_output_dir, global_tracker
@@ -28,6 +29,7 @@ from state import (
     Context,
     save_context,
     save_branch_config,
+    load_branch_config,
     save_branch_manifest,
     load_branch_manifest,
     read_requeue,
@@ -187,10 +189,19 @@ def _init_branch(
     parent_branch: str = None,
     current_depth: int = _cfg.MAX_BRANCH_DEPTH,
     path_iters_consumed: int = 0,
+    inherited_max_iter: Optional[int] = None,
+    path_budget_total: Optional[int] = None,
 ) -> Path:
     """
     Creates the directory for a new branch and initializes its branch.json.
     Returns the path to the newly created branch directory.
+
+    ``inherited_max_iter`` and ``path_budget_total`` carry the parent's *effective*
+    budget down. A user who raises a branch's max_iter in the UI is saying that
+    subtree needs more room, so its children have to start from the raised number —
+    reading config.MAX_ITERATIONS / config.PATH_BUDGET here meant the grant stopped
+    at the branch it was made on. Both are None for a root branch, which is the only
+    place config is still the source.
     """
     if parent_branch:
         parent_path = Path(parent_branch)
@@ -212,9 +223,13 @@ def _init_branch(
 
     # Compute max_iter based on mode; depth always tracked so both constraints can apply
     if _cfg.PATH_BUDGET > 0:
-        max_iter = _cfg.PATH_BUDGET - path_iters_consumed
+        budget_total = path_budget_total or _cfg.PATH_BUDGET
+        # At least one iteration: a branch the master decided to spawn but that cannot
+        # run at all is worse than one that runs once and stops on its own budget.
+        max_iter = max(budget_total - path_iters_consumed, 1)
     else:
-        max_iter = _cfg.MAX_ITERATIONS
+        budget_total = 0
+        max_iter = inherited_max_iter or _cfg.MAX_ITERATIONS
     depth = current_depth
 
     # Build the initial BranchManifest using Pydantic model
@@ -222,6 +237,7 @@ def _init_branch(
         strategy=strategy,
         branch_depth=depth,
         path_iters_consumed=path_iters_consumed,
+        path_budget_total=budget_total,
         current_iter=1,
         status="initialized",
     )
@@ -233,6 +249,70 @@ def _init_branch(
 
     log(f"Initialized branch at {branch_path} (max_iter={max_iter})", "SUCCESS")
     return branch_path
+
+
+def _spawn_sub_branches(branch_path: Path, sub_strategies: list) -> List[Path]:
+    """Create the child branches a branch asked for, and return their paths.
+
+    Sizing them is the whole job. Depth is a simple decrement, but the iteration
+    budget has to come from the parent's *effective* max_iter — the value in
+    branch_config.json, which the UI can raise and which grant_one_more_iteration
+    raises when an exhausted branch is revived — not from config. Reading config here
+    meant a grant died on the branch it was made on: a branch given 12 iterations
+    spawned children with MAX_ITERATIONS.
+
+    Returns an empty list, with a reason logged, when depth or budget is exhausted.
+    """
+    manifest = load_branch_manifest(branch_path)
+    new_depth = manifest.branch_depth - 1
+    consumed = manifest.path_iters_consumed + manifest.current_iter
+    effective_max_iter = load_branch_config(branch_path).max_iter
+
+    if new_depth <= 0:
+        log(
+            "Branch requested sub-strategies but MAX_DEPTH reached. Discarding.",
+            "WARN",
+        )
+        return []
+
+    if _cfg.PATH_BUDGET > 0:
+        budget_total = manifest.path_budget_total or _cfg.PATH_BUDGET
+        # Whatever the parent was granted beyond its allocated share extends the path
+        # budget rather than being taken out of its children's. The point of raising a
+        # branch's budget is to buy more work on that path, not to move work off the
+        # branches below it.
+        allocated = max(budget_total - manifest.path_iters_consumed, 1)
+        granted = max(effective_max_iter - allocated, 0)
+        child_budget_total = budget_total + granted
+        remaining = child_budget_total - consumed
+        if remaining <= 0:
+            log(
+                "Branch requested sub-strategies but path budget exhausted. Discarding.",
+                "WARN",
+            )
+            return []
+        budget_note = f", path budget: {remaining} iters remaining"
+    else:
+        child_budget_total = None
+        budget_note = f", max_iter: {effective_max_iter}"
+
+    log(
+        f"Master received {len(sub_strategies)} sub-strategies "
+        f"(depth left: {new_depth}{budget_note}).",
+        "INFO",
+    )
+
+    return [
+        _init_branch(
+            strategy=sub_strat,
+            parent_branch=str(branch_path),
+            current_depth=new_depth,
+            path_iters_consumed=consumed,
+            inherited_max_iter=effective_max_iter,
+            path_budget_total=child_budget_total,
+        )
+        for sub_strat in sub_strategies
+    ]
 
 
 # Module-level loader executed by ``python3 -c`` in _preflight_python_reference.
@@ -430,46 +510,10 @@ async def run_optimization_engine(
                 new_sub_strategies = await run_branch_loop(branch_path)
             finally:
                 if new_sub_strategies:
-                    manifest = load_branch_manifest(branch_path)
-                    new_depth = manifest.branch_depth - 1
-                    consumed = manifest.path_iters_consumed + manifest.current_iter
-
-                    depth_ok = new_depth > 0
-                    if _cfg.PATH_BUDGET > 0:
-                        remaining = _cfg.PATH_BUDGET - consumed
-                        budget_ok = remaining > 0
-                    else:
-                        remaining = None
-                        budget_ok = True
-
-                    if depth_ok and budget_ok:
-                        budget_note = (
-                            f", path budget: {remaining} iters remaining"
-                            if remaining is not None
-                            else ""
-                        )
-                        log(
-                            f"Master received {len(new_sub_strategies)} sub-strategies (depth left: {new_depth}{budget_note}).",
-                            "INFO",
-                        )
-                        for sub_strat in new_sub_strategies:
-                            child_path = _init_branch(
-                                strategy=sub_strat,
-                                parent_branch=str(branch_path),
-                                current_depth=new_depth,
-                                path_iters_consumed=consumed,
-                            )
-                            strategy_queue.put_nowait(child_path)
-                    elif not depth_ok:
-                        log(
-                            "Branch requested sub-strategies but MAX_DEPTH reached. Discarding.",
-                            "WARN",
-                        )
-                    else:
-                        log(
-                            "Branch requested sub-strategies but path budget exhausted. Discarding.",
-                            "WARN",
-                        )
+                    for child_path in _spawn_sub_branches(
+                        branch_path, new_sub_strategies
+                    ):
+                        strategy_queue.put_nowait(child_path)
 
                 busy -= 1
 

@@ -87,6 +87,7 @@ export interface BranchManifest {
   plan: string;
   branch_depth: number;
   path_iters_consumed: number;
+  path_budget_total: number;
   current_iter: number;
   status: string;
   best_time_us?: number | null;
