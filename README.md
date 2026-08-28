@@ -17,11 +17,20 @@ python cli.py --dir problems/mmul
 ### CLI Options
 
 ```bash
-python cli.py --dir problems/mmul --resume         # resume an interrupted run
+python cli.py --dir problems/mmul --resume          # resume an interrupted run
 python cli.py --dir problems/mmul --max-iter 5 --max-depth 2
-python cli.py --dir problems/mmul --best           # show results without running
-python cli.py --dir problems/mmul --prune-archives # shrink archived runs on disk
+python cli.py --dir problems/mmul --path-budget 30  # budget a root-to-leaf path instead
+python cli.py --dir problems/mmul --timeout 300     # override the tuner wall-clock budget
+python cli.py --dir problems/mmul --provider cerit --model qwen3.5
+python cli.py --dir problems/mmul --best            # show results without running
+python cli.py --dir problems/mmul --clone mmul_v2   # copy the problem definition
+python cli.py --dir problems/mmul --no-clean        # reuse output/ instead of archiving it
+python cli.py --dir problems/mmul --prune-archives  # shrink archived runs on disk
 ```
+
+`--path-budget N` selects a different budgeting mode: instead of `--max-iter`
+iterations per branch, a whole root-to-leaf path shares N. Raising a branch's budget in
+the UI extends that path rather than spending its children's share.
 
 `--dir` may be relative or absolute — the optimizer can be invoked from any working directory.
 
@@ -78,9 +87,10 @@ engine/worker.py                    # Phase 2: per-branch optimization loop
     |-- nodes/decide.py             # LLM: continue / retry / branch / stop
 ```
 
-When every branch is done, `cli.py` writes `output/final_results.json` — the best
-configuration and a per-branch summary. `nodes/merge.py` rebuilds the same summary
-from what is already on disk and backs `--best`.
+When every branch is done, the engine writes `output/final_results.json` — the best
+configuration and a per-branch summary — so both the CLI and the web UI produce it.
+`nodes/merge.py` rebuilds the same summary from what is already on disk and backs
+`--best`.
 
 `author.py` runs the kernel and its KTT driver regions as one tool loop with an NVRTC
 compile check inside the step, so a compile error costs a retry rather than a whole
@@ -113,16 +123,20 @@ Provider selection, highest priority first:
 3. `LLM_PROVIDER` env var in `.env`
 4. Auto-detect from whichever API key is set in `.env`. When multiple are set, this order wins: **CERIT > Anthropic > OpenAI > Gemini**.
 
+`claude` and `google` are accepted as aliases for `anthropic` and `gemini`. Any other
+unrecognised `LLM_PROVIDER` warns and falls through to key detection rather than
+failing.
+
 The model is set via `--model`; otherwise the provider's default model is used (see `MODELS` in `config.py`).
 
 ## Adding a Problem
 
 Create a directory under `problems/` with:
 - `problem.yaml` — GPU index, grid, reference, validation tolerance, and an optional `rules:` block constraining what a kernel may do
-- `inputs.yaml` — the I/O boundary (scalars, buffers, which buffers are validated); `inputs.hpp` is generated from it
+- `inputs.yaml` — the I/O boundary (scalars, buffers, which buffers are validated); `inputs.hpp` is generated from it. See [docs/INPUTS_YAML_GUIDE.md](docs/INPUTS_YAML_GUIDE.md)
 - One reference: `ref_kernel.cu` (CUDA), `ref_cpu.c` (a C function linked into the driver), or `ref.py` (Python, e.g. a torch or numpy oracle)
 
-See [docs/PROBLEM_YAML_GUIDE.md](docs/PROBLEM_YAML_GUIDE.md) and [docs/REFERENCE_IMPLEMENTATION_GUIDE.md](docs/REFERENCE_IMPLEMENTATION_GUIDE.md) for format details.
+See [docs/PROBLEM_YAML_GUIDE.md](docs/PROBLEM_YAML_GUIDE.md), [docs/INPUTS_YAML_GUIDE.md](docs/INPUTS_YAML_GUIDE.md) and [docs/REFERENCE_IMPLEMENTATION_GUIDE.md](docs/REFERENCE_IMPLEMENTATION_GUIDE.md) for format details.
 
 Or use the web UI's "New Problem" dialog.
 

@@ -74,7 +74,10 @@ The TypeScript API types are auto-generated from Python Pydantic models:
 python frontend/scripts/generate_types.py
 ```
 
-Run this whenever `state/types.py` or `models/` Pydantic models change.
+Run this whenever `state/types.py`, `models/strategy.py` or `models/decision.py`
+change — those are the only three the generator reads. `models/inputs.py` and
+`models/regions.py` are not covered; their TypeScript counterparts are hand-written
+in `frontend/src/api/client.ts`.
 
 ---
 
@@ -85,7 +88,8 @@ Create a directory under `problems/` with:
 - `inputs.yaml` — the I/O boundary spec (scalars, buffers, which buffers validate); `inputs.hpp` is generated from it by `utils/inputs.py`. A buffer with `init: file` + `file_name` reads a raw little-endian binary of its dtype from `inputs/<file_name>` (byte count must equal `size * sizeof(dtype)`); the UI upload puts files there via `POST /api/problems/{name}/inputs/{buffer}`
 - the reference implementation: `ref_kernel.cu` (`reference.type: cuda`), `ref_cpu.c` (`reference.type: cpu_c`, a C function linked into the driver — pointer args only, scalars as `-D` macros), **or** `ref.py` (`reference.type: python`, `f(scalars, buffers)`; extra imports like `torch` are optional per-problem deps — `pip install torch` — checked at engine start)
 
-See `docs/PROBLEM_YAML_GUIDE.md` and `docs/REFERENCE_IMPLEMENTATION_GUIDE.md` for format docs.
+See `docs/PROBLEM_YAML_GUIDE.md`, `docs/INPUTS_YAML_GUIDE.md` and
+`docs/REFERENCE_IMPLEMENTATION_GUIDE.md` for format docs.
 
 ---
 
@@ -128,20 +132,31 @@ Nodes receive a `WorkingState` (composed from all three), then the worker decomp
 ### Iteration Status Machine
 
 Each iteration progresses through these statuses in order:
-`planning → implementing → configuring → running → profiling → proposing → deciding → decided`
+`planning → authoring → running → profiling → proposing → deciding → decided`
 
-After `deciding`, `next_status` on the manifest drives the branch-level outcome:
+After `deciding`, `IterState.next_status` — written to `iter_N/state.json`, not to the
+manifest — drives the branch-level outcome. The worker copies it into `manifest.status`:
 - `continue` → increment `current_iter`, new iteration starts at `implementing` (planning runs once per branch); `configuring` if `skip_implement`
 - `retry` → increment `current_iter`, new iteration starts at `implementing` with the previous decision/feedback/run_output carried over (fix_errors prompt); `configuring` if `skip_implement`
 - `branch` → master spawns sub-strategies (up to `MAX_BRANCH_DEPTH`)
 - `stop/success/failed` → terminal
 
-**`implementing` and `configuring` are dispatch aliases now.** With `AGENTIC_STEPS`
-on, `engine/worker.py:_dispatch_status` routes both to `nodes/author.py`, which does
-the work of both in one tool loop. `decide.py` and its prompt still emit the old
-statuses and are untouched; the scope distinction rides on `IterState.authoring_scope`
-(`skip_implement` → `"config_only"`). Nothing writes `authoring` to disk, so state
-files and the frontend see the same statuses they always did.
+**A raised budget propagates.** `engine/master._spawn_sub_branches` sizes children from
+the parent's *effective* `max_iter` — the value in `branch_config.json`, which the UI
+can raise and which `grant_one_more_iteration` raises when an exhausted branch is
+revived — not from `config`. In path-budget mode the grant extends the path rather than
+coming out of the children's share: `BranchManifest.path_budget_total` carries the
+budget that root-to-leaf path actually runs on, starting at `PATH_BUDGET` and growing by
+whatever an ancestor was granted beyond its allocated share. It defaults to 0, read as
+"use `config.PATH_BUDGET`", so pre-existing manifests keep working.
+
+**`implementing` and `configuring` are dispatch aliases.** `decide.py` and its prompt
+still emit them, and `engine/worker.py:_dispatch_status` routes both to
+`nodes/author.py`, which does the work of both in one tool loop. The scope distinction
+rides on `IterState.authoring_scope` (`skip_implement` → `"config_only"`). Nothing
+writes `authoring` to disk, so state files and the frontend see the statuses they
+always did — which is why they still appear above. With `AGENTIC_STEPS=False` the two
+statuses reach `implement.py` and `configure.py` instead, and mean what they say.
 
 ### Agentic Authoring Step
 
@@ -155,7 +170,7 @@ checking it before `configure` runs is impossible.
 |---|---|
 | Loop driver, budget, `step_trace.jsonl` | `agentic/loop.py` |
 | Tool schemas + dispatch + preconditions | `agentic/tools.py` |
-| Staged workspace (`.staging/`, commit on `end_step`) | `agentic/workspace.py` |
+| Staged workspace (`.staging/`) | `agentic/workspace.py` |
 | Offline replay of a recorded step | `agentic/replay.py` |
 | NVRTC check (ctypes → `libnvrtc.so`) | `utils/nvrtc.py` |
 | `results.json` queries | `utils/landscape.py` |
@@ -230,11 +245,19 @@ tool calls, a string (prose, no calls), or a dict carrying response metadata —
 `{"text": ..., "finish_reason": "length"}` is how a truncated reply is scripted.
 
 The `integration` marker covers the real toolchain — it links the driver against
-`libktt.so` and NVRTC-compiles recorded kernels whose real outcome is known.
+`libktt.so`, *runs* it, and NVRTC-compiles recorded kernels whose real outcome is
+known. Tests needing only `g++` guard on `shutil.which`, so the fast suite is green
+on a machine with no compiler.
+
+32 tests read recorded run output under `problems/*/output/`, which is gitignored.
+They skip cleanly on a fresh clone; the rest still pass.
 
 ### LLM Provider Configuration
 
-Provider is set via `LLM_PROVIDER` in `config.py` (default: `"claude"`). Auto-detected from env vars if not set. All LLM calls go through `TrackedLLM` / `TrackedStructuredLLM` wrappers in `config.py` that handle retries with exponential backoff and token usage tracking.
+Provider is set via `LLM_PROVIDER` in `config.py` (default: `None`, so it falls
+through). Then the `LLM_PROVIDER` env var, then auto-detection from whichever API
+key is set (cerit > anthropic > openai > gemini). `claude` and `google` are accepted
+as aliases; any other unrecognised value warns and falls through. All LLM calls go through `TrackedLLM` / `TrackedStructuredLLM` wrappers in `config.py` that handle retries with exponential backoff and token usage tracking.
 
 Supported providers: `openai`, `anthropic`, `gemini`, `cerit` (OpenAI-compatible endpoint).
 
@@ -264,11 +287,18 @@ problems/<name>/output/
         ├── iter1/
         │   ├── state.json         # IterState
         │   ├── kernels.cu         # generated kernel(s)
+        │   ├── region_kernels.cpp # LLM-authored CACAO:KERNELS region
+        │   ├── region_params.cpp  # LLM-authored CACAO:PARAMS region
+        │   ├── region_launcher.cpp# LLM-authored CACAO:LAUNCHER region
         │   ├── framework.cpp      # assembled KTT C++ driver (engine skeleton + LLM regions)
+        │   ├── inputs.hpp         # copied from the problem dir, staged beside the driver
+        │   ├── step_trace.jsonl   # every turn of the authoring loop
         │   ├── driver             # compiled driver binary
+        │   ├── cacao_in_*.bin     # tuner input dumps (regenerable)
         │   ├── results.json       # timing results
         │   ├── tuner_output.txt   # KTT stdout/stderr
-        │   └── ncu_profile.csv    # NCU metrics (if profiled)
+        │   ├── ncu_profile.csv    # NCU metrics (if profiled)
+        │   └── .staging/          # uncommitted authoring work; the only copy if a step aborts
         └── branches/              # sub-branches (recursive)
 ```
 
