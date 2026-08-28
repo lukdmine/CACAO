@@ -86,7 +86,7 @@ def _run_target(
         (meta_dir / "run_meta.json").write_text(
             _json.dumps(
                 {
-                    "model": cfg._current_model,
+                    "model": cfg.get_model(),
                     "provider": cfg.get_provider(),
                 }
             ),
@@ -169,7 +169,7 @@ def _resume_target(
                 (problem_dir / "output" / "run_meta.json").write_text(
                     _json.dumps(
                         {
-                            "model": cfg._current_model,
+                            "model": cfg.get_model(),
                             "provider": cfg.get_provider(),
                         }
                     ),
