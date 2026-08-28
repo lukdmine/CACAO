@@ -22,38 +22,21 @@ def ensure_output_dir() -> Path:
     return get_output_dir()
 
 
-def create_branch_dir(
-    parent: Path,
-    name: str,
-    strategy: dict,
-    depth: int,
-) -> Path:
-    """
-    Create a branch directory with strategy metadata.
+def create_branch_dir(parent: Path, name: str) -> Path:
+    """Create a branch directory, suffixing the name if it is taken.
 
-    Args:
-        parent: Parent directory (e.g., output/branches or output/branches/tiled/branches)
-        name: Branch name (e.g., "shared_mem_tiling")
-        strategy: Strategy dict from strategize_node
-        depth: Current branch depth
-
-    Returns:
-        Path to created branch directory
+    The caller must take the branch's name from the returned path, not from what it
+    asked for: everything that resolves a branch by name reads the manifest, so a
+    manifest saying "tiled" beside a directory called "tiled_2" is unresolvable.
     """
     original_name = name
     counter = 2
     branch_dir = parent / name
     while branch_dir.exists():
-        name = f"{original_name}_{counter}"
-        branch_dir = parent / name
+        branch_dir = parent / f"{original_name}_{counter}"
         counter += 1
 
     branch_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save strategy metadata (use **strategy first so we can override the name key)
-    strategy_info = {**strategy, "name": name, "depth": depth}
-    save_json(branch_dir / "strategy.json", strategy_info)
-
     return branch_dir
 
 

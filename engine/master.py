@@ -209,13 +209,14 @@ def _init_branch(
         strategy.get("name", "default") if isinstance(strategy, dict) else strategy.name
     )
 
-    # Create the physical directory
-    branch_path = create_branch_dir(
-        parent=branches_dir,
-        name=branch_name,
-        strategy=strategy,
-        depth=current_depth,
-    )
+    # The directory name wins: create_branch_dir suffixes a name that is already taken,
+    # and a manifest naming the branch something the directory is not called cannot be
+    # resolved by anything that looks a branch up by name.
+    branch_path = create_branch_dir(branches_dir, branch_name)
+    strategy = {
+        **(strategy if isinstance(strategy, dict) else strategy.model_dump()),
+        "name": branch_path.name,
+    }
 
     # Compute max_iter based on mode; depth always tracked so both constraints can apply
     if _cfg.PATH_BUDGET > 0:

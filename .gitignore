@@ -5,6 +5,12 @@ experiments/
 results.json*
 results_profile.json*
 gpu.lock
+# Engine artifacts the run regenerates. Normally under the ignored output/, but a
+# driver built in a problem root escapes that. Keep in sync with
+# utils/files.py:_REGENERABLE.
+cacao_in_*.bin
+cacao_ref_*.bin
+driver
 cuda_env.yaml
 node_modules/
 todo

@@ -294,3 +294,32 @@ def test_a_grant_can_revive_an_otherwise_exhausted_path(output_dir, monkeypatch)
 
     assert len(children) == 1
     assert load_branch_config(children[0]).max_iter == 10
+
+
+def test_a_colliding_branch_name_reaches_the_manifest(output_dir, monkeypatch):
+    """create_branch_dir suffixes a taken name, and the manifest has to follow.
+
+    It did not: the directory became tiled_2 while branch.json kept saying "tiled",
+    so anything resolving a branch by name — the cross-branch tools, the API, the
+    results scan — looked for a directory that was not there.
+    """
+    monkeypatch.setattr(_cfg, "PATH_BUDGET", 0)
+
+    first = _init_branch(STRATEGY)
+    second = _init_branch(STRATEGY)
+
+    assert first.name == "tiled"
+    assert second.name == "tiled_2"
+    assert load_branch_manifest(first).strategy.name == "tiled"
+    assert load_branch_manifest(second).strategy.name == "tiled_2"
+
+
+def test_a_colliding_sub_branch_name_reaches_the_manifest(output_dir, monkeypatch):
+    monkeypatch.setattr(_cfg, "PATH_BUDGET", 0)
+
+    parent = _init_branch(STRATEGY)
+    a = _init_branch(CHILD, parent_branch=str(parent), current_depth=1)
+    b = _init_branch(CHILD, parent_branch=str(parent), current_depth=1)
+
+    assert load_branch_manifest(a).strategy.name == a.name == "vectorized"
+    assert load_branch_manifest(b).strategy.name == b.name == "vectorized_2"

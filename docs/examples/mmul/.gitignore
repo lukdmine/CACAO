@@ -1,4 +1,0 @@
-# Build/run artifacts (framework driver is compiled per run)
-driver
-*.o
-results.json
