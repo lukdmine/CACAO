@@ -64,6 +64,29 @@ def _load_run_meta(output_dir: Path) -> dict:
 router = APIRouter()
 
 
+
+def _primary_case_dir(problem_dir, iter_dir):
+    """The iteration directory holding the anchor results.json.
+
+    Identity for a single-case problem, which is every problem that declares no
+    ``cases:`` block — so this changes nothing for them.
+    """
+    from pathlib import Path as _Path
+
+    try:
+        import yaml as _yaml
+
+        from utils.cases import case_dir, case_list
+
+        meta = _yaml.safe_load(
+            (_Path(problem_dir) / "problem.yaml").read_text(encoding="utf-8")
+        ) or {}
+        cases = case_list(meta)
+        return case_dir(iter_dir, cases, cases[0])
+    except Exception:
+        return iter_dir
+
+
 def _project_iter(snap: dict) -> dict:
     """Reduce a full IterState to what the tree needs, plus presence flags.
 
@@ -119,6 +142,9 @@ def _scan_branches(branches_dir: Path, name: str, seen: set[str]) -> list[dict]:
     from utils.results import get_results_summary, load_reference_time
 
     output_dir = branches_dir.parent
+    problem_dir = output_dir.parent
+    # The primary case's baseline: the flat reference_time_us key, which is what a
+    # single-case problem has always stored.
     ref_time = load_reference_time(output_dir)
     cache = _iter_cache.setdefault(name, {})
 
@@ -158,7 +184,9 @@ def _scan_branches(branches_dir: Path, name: str, seen: set[str]) -> list[dict]:
             else:
                 snap = load_json(state_file)
                 if not snap.get("results_summary") and snap.get("iter_num") is not None:
-                    results_path = iter_dir / "results.json"
+                    # A multi-case problem keeps no results.json at the iteration root;
+                    # the anchor the UI shows is the primary case's.
+                    results_path = _primary_case_dir(problem_dir, iter_dir) / "results.json"
                     if results_path.exists():
                         snap["results_summary"] = get_results_summary(
                             results_path, ref_time

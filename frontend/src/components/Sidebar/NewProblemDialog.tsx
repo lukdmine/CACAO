@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, uploadProblemInput, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType, type RulesSpec, type ForbidRule, type ProblemDetailResponse } from '@/api/client';
+import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, uploadProblemInput, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType, type RulesSpec, type ForbidRule, type CaseSpec, type ProblemDetailResponse } from '@/api/client';
 import { refreshProblems } from '@/api/hooks';
 import { Plus, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2, AlertTriangle, Info, Upload } from 'lucide-react';
 
@@ -40,6 +40,7 @@ function defaultForm(): CreateProblemData {
         tolerance: 0.05,
         tuning: { duration_s: 100 },
         rules: { text: [], forbid: [] },
+        cases: [],
     };
 }
 
@@ -108,6 +109,34 @@ const REFERENCE_KINDS: Record<ReferenceType, {
             + 'and block size does not either. Requires numpy.',
     },
 };
+
+/** Parse problem.yaml's `cases:` list into form state.
+ *
+ * Loaded so an edit round-trips them: problem.yaml is rebuilt wholesale from this
+ * request, so a save that dropped them would delete a hand-written case list and the
+ * next run would tune only the primary shape while reporting a healthy result. */
+function normalizeCases(raw: unknown): CaseSpec[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.map((c, i) => {
+        const o = (c ?? {}) as Record<string, unknown>;
+        const scalars: Record<string, number> = {};
+        for (const [k, v] of Object.entries((o.scalars as Record<string, unknown>) ?? {})) {
+            const n = Number(v);
+            if (Number.isFinite(n)) scalars[k] = n;
+        }
+        const files: Record<string, string> = {};
+        for (const [k, v] of Object.entries((o.files as Record<string, unknown>) ?? {})) {
+            files[k] = String(v);
+        }
+        const d = Number(o.duration_s);
+        return {
+            name: String(o.name ?? `case${i + 1}`),
+            scalars,
+            files,
+            duration_s: Number.isFinite(d) && d > 0 ? d : null,
+        };
+    });
+}
 
 const PLACEMENTS: Placement[] = ['host', 'define', 'runtime'];
 
@@ -226,6 +255,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 // Loaded so an edit round-trips them. Without this, saving a problem
                 // whose rules were written by hand would drop them.
                 rules: normalizeRules(data.config.rules),
+                cases: normalizeCases(data.config.cases),
             });
         } catch (err) {
             setError('Failed to load problem data: ' + (err instanceof Error ? err.message : String(err)));
@@ -236,6 +266,25 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
 
     // ── Argument list helpers ────────────────────────────────────────────────
     const args = form.inputs.args;
+
+    // ── Input case helpers ───────────────────────────────────────────────────
+    const cases = form.cases ?? [];
+    const scalarArgs = args.filter((a): a is ScalarSpec => a.kind === 'scalar');
+    const fileBuffers = args.filter(
+        (a): a is BufferSpec => a.kind === 'buffer' && a.init === 'file',
+    );
+    // What a run of this problem now costs: each case tunes for its full budget.
+    const totalCaseBudget = cases.reduce(
+        (sum, c) => sum + (c.duration_s ?? form.tuning?.duration_s ?? 100),
+        0,
+    );
+
+    function updateCase(index: number, patch: Partial<CaseSpec>) {
+        update(
+            'cases',
+            cases.map((c, i) => (i === index ? { ...c, ...patch } : c)),
+        );
+    }
 
     const refKind = REFERENCE_KINDS[form.reference_type];
 
@@ -904,6 +953,140 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
 
                                 <Separator />
 
+                                {/* Input cases */}
+                                <div className="space-y-2">
+                                    <Label title="Named shapes this kernel is built, validated and tuned at. One kernels.cu serves all of them; each gets its own tuned configuration.">
+                                        Input Cases (optional)
+                                    </Label>
+                                    <p className="text-xs text-zinc-500">
+                                        Every case is compiled, validated and tuned each iteration, and a kernel
+                                        that fails <span className="text-zinc-300">any</span> case fails the
+                                        iteration. Leave empty to run the declared values only. The first case is
+                                        primary: it is the number shown in the tree, the shape NCU profiles, and
+                                        the one whose baseline is <code>reference_time_us</code>.
+                                    </p>
+
+                                    {cases.length > 0 && (
+                                        <p className="text-xs text-zinc-500">
+                                            Tuning cost per iteration:{' '}
+                                            <span className="text-zinc-300">{totalCaseBudget}s</span> across{' '}
+                                            {cases.length} case{cases.length === 1 ? '' : 's'}.
+                                        </p>
+                                    )}
+
+                                    {cases.map((c, i) => (
+                                        <div key={i} className="rounded-md border p-2 space-y-2">
+                                            <div className="flex gap-2 items-center">
+                                                <Input
+                                                    className="text-xs font-mono w-40"
+                                                    placeholder="case name"
+                                                    value={c.name}
+                                                    onChange={(e) => updateCase(i, { name: e.target.value })}
+                                                />
+                                                {i === 0 && (
+                                                    <span className="text-[10px] uppercase tracking-wide text-zinc-500">
+                                                        primary
+                                                    </span>
+                                                )}
+                                                <Input
+                                                    type="number"
+                                                    min={1}
+                                                    className="text-xs w-28"
+                                                    placeholder={`${form.tuning?.duration_s ?? 100}s`}
+                                                    title="Tuning budget for this case. Blank uses the problem's tuner budget."
+                                                    value={c.duration_s ?? ''}
+                                                    onChange={(e) =>
+                                                        updateCase(i, {
+                                                            duration_s: e.target.value
+                                                                ? parseInt(e.target.value, 10)
+                                                                : null,
+                                                        })
+                                                    }
+                                                />
+                                                <div className="flex-1" />
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    className="text-xs"
+                                                    onClick={() => update('cases', cases.filter((_, j) => j !== i))}
+                                                >
+                                                    <Trash2 className="h-3 w-3" />
+                                                </Button>
+                                            </div>
+
+                                            <div className="grid grid-cols-3 gap-2">
+                                                {scalarArgs.map((s) => (
+                                                    <div key={s.name} className="space-y-1">
+                                                        <Label className="text-[10px] font-mono text-zinc-500">
+                                                            {s.name}
+                                                        </Label>
+                                                        <Input
+                                                            type="number"
+                                                            className="text-xs font-mono"
+                                                            placeholder={String(s.value)}
+                                                            title="Blank uses the declared value."
+                                                            value={c.scalars[s.name] ?? ''}
+                                                            onChange={(e) => {
+                                                                const scalars = { ...c.scalars };
+                                                                if (e.target.value === '') delete scalars[s.name];
+                                                                else scalars[s.name] = Number(e.target.value);
+                                                                updateCase(i, { scalars });
+                                                            }}
+                                                        />
+                                                    </div>
+                                                ))}
+                                            </div>
+
+                                            {fileBuffers.length > 0 && (
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    {fileBuffers.map((b) => (
+                                                        <div key={b.name} className="space-y-1">
+                                                            <Label className="text-[10px] font-mono text-zinc-500">
+                                                                {b.name} file
+                                                            </Label>
+                                                            <Input
+                                                                className="text-xs font-mono"
+                                                                placeholder={b.file_name ?? ''}
+                                                                title="Blank uses the declared file_name."
+                                                                value={c.files[b.name] ?? ''}
+                                                                onChange={(e) => {
+                                                                    const files = { ...c.files };
+                                                                    if (e.target.value === '') delete files[b.name];
+                                                                    else files[b.name] = e.target.value;
+                                                                    updateCase(i, { files });
+                                                                }}
+                                                            />
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        className="text-xs"
+                                        onClick={() =>
+                                            update('cases', [
+                                                ...cases,
+                                                {
+                                                    name: `case${cases.length + 1}`,
+                                                    scalars: {},
+                                                    files: {},
+                                                    duration_s: null,
+                                                },
+                                            ])
+                                        }
+                                    >
+                                        <Plus className="h-3 w-3 mr-1" /> Case
+                                    </Button>
+                                </div>
+
+                                <Separator />
+
                                 {/* Kernel rules */}
                                 <div className="space-y-2">
                                     <Label title="Constraints on how the kernel may be written. Prose goes in every prompt; patterns are checked before the compiler and fail the iteration.">
@@ -1012,6 +1195,13 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                             )}
                                         </div>
                                         <div><span className="text-zinc-500">grid:</span> [{form.grid_x}, {form.grid_y}, {form.grid_z}] ({form.global_size_type})  tolerance={form.tolerance}  tuner={form.tuning?.duration_s ?? 100}s</div>
+                                        {cases.length > 0 && (
+                                            <div>
+                                                <span className="text-zinc-500">cases:</span>{' '}
+                                                {cases.map((c) => c.name).join(', ')}{' '}
+                                                <span className="text-zinc-500">({totalCaseBudget}s/iteration)</span>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
 

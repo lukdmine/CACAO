@@ -592,8 +592,26 @@ def ensure_inputs_hpp(problem_dir) -> Path:
     problem_yaml = problem_dir / "problem.yaml"
     if problem_yaml.exists():
         reference = (_yaml.safe_load(problem_yaml.read_text(encoding="utf-8")) or {}).get("reference")
+    else:
+        problem_yaml = None
 
     spec = load_inputs_spec(inputs_yaml)
+    # The PRIMARY case's values, not the declared ones. This header is what every prompt
+    # shows the model as the I/O boundary, and what the authoring loop's fast compile
+    # check parses its -D macros from; generating the declared values would show the
+    # model a shape no case actually runs. Identical to the declared spec when there is
+    # no `cases:` block, or when the primary overrides nothing.
+    try:
+        from utils.cases import case_list
+
+        if problem_yaml is not None:
+            cfg = _yaml.safe_load(problem_yaml.read_text(encoding="utf-8")) or {}
+            spec = spec.for_case(case_list(cfg)[0])
+    except Exception as e:
+        from utils.log import log
+
+        log(f"Could not apply the primary case to inputs.hpp: {e}", "WARN")
+
     missing = check_input_files(problem_dir, spec)
     if missing:
         raise FileNotFoundError("Missing input files: " + "; ".join(missing))

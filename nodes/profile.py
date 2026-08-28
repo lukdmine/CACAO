@@ -133,6 +133,28 @@ async def profile_node(state: WorkingState) -> WorkingState:
     print("=" * 60)
 
     iter_dir = get_iter_dir(state)
+
+    # NCU profiles the PRIMARY case only. Its job is diagnosing *why* a kernel is slow —
+    # occupancy, stall reasons, DRAM throughput — and that mechanism does not change with
+    # the input shape; the per-case timing table already shows *where* it degrades.
+    # Profiling every case would multiply the slowest node in the loop.
+    primary_case = None
+    try:
+        import yaml as _yaml
+
+        from utils.cases import case_dir, case_list
+
+        meta = _yaml.safe_load(
+            (get_problem_dir() / "problem.yaml").read_text(encoding="utf-8")
+        ) or {}
+        cases = case_list(meta)
+        primary_case = cases[0]
+        if len(cases) > 1:
+            iter_dir = case_dir(iter_dir, cases, primary_case)
+            log(f"Profiling the primary case '{primary_case.name}'")
+    except Exception as e:
+        log(f"Could not resolve input cases, profiling the iteration root: {e}", "WARN")
+
     results_path = iter_dir / "results.json"
 
     has_success, num_ok, num_total = check_results(results_path)
@@ -151,7 +173,7 @@ async def profile_node(state: WorkingState) -> WorkingState:
     # The driver from the run node should exist; rebuild if missing.
     driver = iter_dir / "driver"
     if not driver.exists():
-        extra_sources, extra_flags = reference_build_extras(get_problem_dir())
+        extra_sources, extra_flags = reference_build_extras(get_problem_dir(), primary_case)
         build_result = compile_framework(
             iter_dir, extra_sources=extra_sources, extra_flags=extra_flags
         )

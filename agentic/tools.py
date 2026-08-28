@@ -70,6 +70,13 @@ class tuning_landscape(BaseModel):
     mode: str = Field(description="'top' (fastest configs), 'sweep' (one parameter), 'failures'.")
     param: Optional[str] = Field(default=None, description="Parameter name, for mode='sweep'.")
     n: int = Field(default=10, description="Row count for mode='top'.")
+    case: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which input case's results to read. Omit for the primary case. Only "
+            "meaningful when the problem declares several input cases."
+        ),
+    )
 
 
 class grep_tuner_output(BaseModel):
@@ -282,6 +289,33 @@ class Toolbox:
         return self.gpu_info.get("compute_capability") or (
             (self.meta.get("gpu") or {}).get("compute_capability")
         )
+    def _case_headers(self) -> list:
+        """(case_name, inputs.hpp text) for every case, primary first.
+
+        NVRTC never sees inputs.hpp — it sees the -D macros parsed out of it — so where a
+        `define`-placement scalar varies per case, each case is a genuinely different
+        compile. Where the varying scalars are `runtime`-placed, every case yields the
+        same defines and the extra checks collapse to one on their own, with no special
+        case needed here.
+
+        Falls back to the problem's generated inputs.hpp if the spec cannot be resolved:
+        a compile check that refuses to run is worse than one that checks the primary.
+        """
+        from utils.cases import case_list
+        from utils.inputs import generate_inputs_hpp, load_inputs_spec
+
+        try:
+            cases = case_list(self.meta)
+            spec = load_inputs_spec(self.problem_dir / "inputs.yaml")
+            reference = self.meta.get("reference")
+            return [
+                (c.name, generate_inputs_hpp(spec.for_case(c), reference, self.problem_dir))
+                for c in cases
+            ]
+        except Exception:
+            src = self.problem_dir / "inputs.hpp"
+            text = src.read_text(encoding="utf-8") if src.exists() else ""
+            return [("default", text)]
 
     def check_compilation(self) -> str:
         """Host-compile the assembled driver and NVRTC-compile the kernel."""
@@ -323,13 +357,20 @@ class Toolbox:
         framework_cpp = assemble_framework_cpp(self.meta, self.ws.regions())
         (self.ws.staging / "framework.cpp").write_text(framework_cpp, encoding="utf-8")
 
-        inputs_hpp_src = self.problem_dir / "inputs.hpp"
-        if inputs_hpp_src.exists():
-            (self.ws.staging / "inputs.hpp").write_text(
-                inputs_hpp_src.read_text(encoding="utf-8"), encoding="utf-8"
-            )
+        # The primary case only: this runs on every check and the inner loop has to stay
+        # fast. end_step is where every case is gated.
+        headers = self._case_headers()
+        primary_header = headers[0][1]
+        if primary_header:
+            (self.ws.staging / "inputs.hpp").write_text(primary_header, encoding="utf-8")
 
-        extra_sources, extra_flags = reference_build_extras(self.problem_dir)
+        from utils.cases import case_list
+
+        try:
+            primary_case = case_list(self.meta)[0]
+        except Exception:
+            primary_case = None
+        extra_sources, extra_flags = reference_build_extras(self.problem_dir, primary_case)
         build = compile_framework(
             self.ws.staging, extra_sources=extra_sources, extra_flags=extra_flags
         )
@@ -342,11 +383,7 @@ class Toolbox:
         # --- NVRTC compile of the kernel, exactly as KTT will ---
         params_src = self.ws.read("region_params.cpp")
         scalar_defines = (
-            nvrtc.parse_defines_from_inputs_hpp(
-                inputs_hpp_src.read_text(encoding="utf-8")
-            )
-            if inputs_hpp_src.exists()
-            else []
+            nvrtc.parse_defines_from_inputs_hpp(primary_header) if primary_header else []
         )
         checks = nvrtc.check_kernel(
             self.ws.read("kernels.cu"),
@@ -391,6 +428,33 @@ class Toolbox:
                 else "Cannot end the step — the last check_compilation did not pass, "
                 "or a file changed after it. Run it again."
             )
+        # The complete gate. check_compilation covers the primary case on every call so
+        # the inner loop stays fast; this is the one place a kernel that compiles only at
+        # the primary shape must not get through. headers[1:] because the primary was
+        # already checked by the check_compilation this gate requires.
+        from utils import nvrtc
+        from utils.framework import resolve_cuda_include
+
+        headers = self._case_headers()
+        for case_name, header in headers[1:]:
+            checks = nvrtc.check_kernel(
+                self.ws.read("kernels.cu"),
+                self.ws.read("region_params.cpp"),
+                cuda_include=resolve_cuda_include(),
+                scalar_defines=nvrtc.parse_defines_from_inputs_hpp(header),
+                compute_capability=self._compute_capability(),
+            )
+            bad = [c for c in checks if not c.ok]
+            if bad:
+                raise ToolError(
+                    f"The kernel compiles at case '{headers[0][0]}' but not at case "
+                    f"'{case_name}':\n"
+                    + "\n".join(f"- {c.label}: {c.log.strip()}" for c in bad)
+                    + "\n\nEvery case is built and validated, and a kernel that fails "
+                    "any of them fails the iteration. Fix it so it compiles at all of "
+                    "them, then run check_compilation again."
+                )
+
         self.ended = True
         self.end_summary = summary or ""
         return "Step complete."
@@ -398,13 +462,31 @@ class Toolbox:
     # -- read/query tools --------------------------------------------------
 
     def tuning_landscape(
-        self, iteration: int, mode: str = "top", param: Optional[str] = None, n: int = 10
+        self,
+        iteration: int,
+        mode: str = "top",
+        param: Optional[str] = None,
+        n: int = 10,
+        case: Optional[str] = None,
     ) -> str:
+        from utils.cases import case_dir, case_list
         from utils.landscape import describe
 
-        results = self._iter_dir(iteration) / "results.json"
+        cases = case_list(self.meta)
+        target = (
+            cases[0] if case is None else next((c for c in cases if c.name == case), None)
+        )
+        if target is None:
+            raise ToolError(
+                f"No case named '{case}'. This problem's cases are: "
+                + ", ".join(c.name for c in cases)
+            )
+        results = case_dir(self._iter_dir(iteration), cases, target) / "results.json"
         if not results.exists():
-            raise ToolError(f"iter{iteration} has no results.json (it may not have run).")
+            where = "" if len(cases) == 1 else f" case '{target.name}'"
+            raise ToolError(
+                f"iter{iteration}{where} has no results.json (it may not have run)."
+            )
         return describe(results, mode=mode, param=param, n=n)
 
     def grep_tuner_output(self, iteration: int, pattern: str) -> str:
