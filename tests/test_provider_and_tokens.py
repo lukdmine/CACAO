@@ -4,6 +4,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 import config
+from llm import providers
 
 
 # -- token accounting -------------------------------------------------------
@@ -91,22 +92,22 @@ def test_total_is_derived_when_the_provider_omits_it(tracker):
 
 @pytest.mark.parametrize("name", ["openai", "anthropic", "gemini", "cerit"])
 def test_canonical_provider_names_resolve(name):
-    assert config._normalise_provider(name) == name
+    assert providers._normalise_provider(name) == name
 
 
 def test_claude_resolves_to_anthropic():
     """The name this project's own docs used; it fell through to key detection."""
-    assert config._normalise_provider("claude") == "anthropic"
+    assert providers._normalise_provider("claude") == "anthropic"
 
 
 def test_names_are_case_and_space_insensitive():
-    assert config._normalise_provider("  Anthropic ") == "anthropic"
+    assert providers._normalise_provider("  Anthropic ") == "anthropic"
 
 
 def test_an_unknown_name_does_not_resolve():
-    assert config._normalise_provider("bedrock") is None
-    assert config._normalise_provider("") is None
-    assert config._normalise_provider(None) is None
+    assert providers._normalise_provider("bedrock") is None
+    assert providers._normalise_provider("") is None
+    assert providers._normalise_provider(None) is None
 
 
 def test_the_error_message_names_only_accepted_values(monkeypatch):
@@ -122,10 +123,10 @@ def test_the_error_message_names_only_accepted_values(monkeypatch):
         "GEMINI_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(config, "LLM_PROVIDER", None)
+    monkeypatch.setattr(providers, "LLM_PROVIDER", None)
 
     with pytest.raises(ValueError) as excinfo:
-        config._detect_provider()
+        providers._detect_provider()
 
     message = str(excinfo.value)
     assert "LLM_PROVIDER=openai|anthropic|gemini|cerit" in message
@@ -133,23 +134,23 @@ def test_the_error_message_names_only_accepted_values(monkeypatch):
 
 def test_an_unrecognised_env_provider_warns_rather_than_silently_switching(monkeypatch):
     warnings = []
-    monkeypatch.setattr(config, "LLM_PROVIDER", None)
+    monkeypatch.setattr(providers, "LLM_PROVIDER", None)
     monkeypatch.setenv("LLM_PROVIDER", "bedrock")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     for var in ("CERIT_API_KEY", "CERIT_API_BASE", "ANTHROPIC_API_KEY", "CLAUDE_API_KEY"):
         monkeypatch.delenv(var, raising=False)
 
-    monkeypatch.setattr(config, "log", lambda msg, level="INFO": warnings.append((level, msg)))
+    monkeypatch.setattr(providers, "log", lambda msg, level="INFO": warnings.append((level, msg)))
 
-    assert config._detect_provider() == "openai"
+    assert providers._detect_provider() == "openai"
     assert any(level == "WARN" and "bedrock" in msg for level, msg in warnings)
 
 
 def test_env_claude_selects_anthropic_over_key_detection(monkeypatch):
     """LLM_PROVIDER=claude with both keys set used to run entirely on cerit."""
-    monkeypatch.setattr(config, "LLM_PROVIDER", None)
+    monkeypatch.setattr(providers, "LLM_PROVIDER", None)
     monkeypatch.setenv("LLM_PROVIDER", "claude")
     monkeypatch.setenv("CERIT_API_KEY", "cerit-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
-    assert config._detect_provider() == "anthropic"
+    assert providers._detect_provider() == "anthropic"

@@ -455,20 +455,20 @@ async def run_optimization_engine(
     strategy_queue: asyncio.Queue = asyncio.Queue()
 
     if resume_states:
-        global_tracker.load()
+        global_tracker.load(get_output_dir())
         log(f"Resuming {len(resume_states)} branches directly into the queue!", "INFO")
         for branch_path in resume_states:
             strategy_queue.put_nowait(Path(branch_path))
     else:
         main_state = await analyze_node(main_state)
-        global_tracker.save()
+        global_tracker.save(get_output_dir())
 
         if not main_state.analysis:
             log("Analysis failed. Aborting.", "ERROR")
             return
 
         main_state = await strategize_node(main_state)
-        global_tracker.save()
+        global_tracker.save(get_output_dir())
         strategies = main_state.strategies
 
         if not strategies:
@@ -555,7 +555,7 @@ async def run_optimization_engine(
 
     _write_final_results()
 
-    global_tracker.save()
+    global_tracker.save(get_output_dir())
 
     from config import get_tracker_stats
 

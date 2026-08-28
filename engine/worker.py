@@ -323,9 +323,9 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
             save_iter_state(branch_path, iter_num, iter_state)
 
             # Flush token stats to disk after every node
-            from config import global_tracker
+            from config import get_output_dir, global_tracker
 
-            global_tracker.save()
+            global_tracker.save(get_output_dir())
 
             # On iteration complete: advance or finish
             if current_status == "deciding":
