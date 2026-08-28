@@ -1,9 +1,4 @@
-"""Control-signal handling in the branch worker.
-
-These drive ``engine.worker._handle_signal`` directly rather than through a running
-loop: the failure it guards against is a state-machine one — a field that survives
-across signals — and a loop would only reproduce it after minutes of real polling.
-"""
+"""Control-signal handling and the main loop's exit conditions."""
 
 import json
 from pathlib import Path
@@ -53,15 +48,8 @@ def test_resume_restores_the_pre_stop_status(branch, manifest, iter_state):
 
 
 def test_second_stop_does_not_overwrite_the_saved_status(branch, manifest, iter_state):
-    """A stop delivered to an already-stopped branch must not make "stopped" the
-    thing resume comes back to.
-
-    The API applies no status check before writing a stop signal, and the UI leaves
-    the button clickable for up to one poll interval after a branch parks, so this
-    is reachable without a race. When it stored pre_stop_status="stopped", resume
-    restored "stopped" and cleared the field, and the branch could never leave
-    _wait_for_resume again — taking the whole run's termination check with it.
-    """
+    """A stop on an already-stopped branch must not make "stopped" what resume
+    returns to — that wedges _wait_for_resume, and the run's termination check."""
     _handle_signal(_signal("stop"), manifest, iter_state, branch)
     _handle_signal(_signal("stop"), manifest, iter_state, branch)
 
@@ -102,14 +90,8 @@ from state import save_branch_manifest
 async def test_a_deleted_branch_directory_exits_instead_of_rebuilding_itself(
     tmp_path, monkeypatch
 ):
-    """A parent revert rmtree's the subtree; every write path recreates it.
-
-    _atomic_write_json mkdirs its parent, so save_iter_state and
-    save_branch_manifest rebuilt a directory the user had just deleted and the
-    branch carried on — reappearing in the tree and still spending LLM calls and
-    GPU lock time. The cooperative stop cannot help: the rmtree destroys the
-    signal file before the worker's next poll.
-    """
+    """Every write path mkdirs its parent, so the branch used to rebuild the subtree
+    a parent revert had deleted and carry on running."""
     branch = tmp_path / "branches" / "vectorized"
     branch.mkdir(parents=True)
     manifest = BranchManifest(
@@ -134,9 +116,8 @@ async def test_a_deleted_branch_directory_exits_instead_of_rebuilding_itself(
 async def test_a_crash_before_the_iteration_loads_still_marks_the_branch_failed(
     tmp_path, monkeypatch
 ):
-    """iter_state is bound inside the try, so a failure loading it used to raise
-    UnboundLocalError out of the handler — and the branch died with its status
-    never set to failed."""
+    """A failure loading iter_state used to raise UnboundLocalError from the handler,
+    leaving the branch dead with no status."""
     import engine.worker as worker
 
     branch = tmp_path / "branches" / "tiled"

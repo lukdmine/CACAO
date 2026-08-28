@@ -43,12 +43,8 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
             branch_path = branch_file.parent
             manifest = load_branch_manifest(branch_path)
             strategy = manifest.strategy or {}
-            # The parameter values that produced the best time exist only in an
-            # iteration's results.json — the manifest carries the time and nothing
-            # else. This scan is therefore unconditional: it used to run only when the
-            # manifest had no time, and it discarded everything except best_time_us,
-            # so final_results.json reported "best_config": null on every run ever
-            # written, for a value that was sitting in results_summary all along.
+            # Unconditional: the winning parameters exist only in an iteration's
+            # results.json, so scanning only when the manifest lacks a time lost them.
             scanned_time = None
             best_config = None
             for iter_dir in sorted(branch_path.glob("iter*")):
@@ -86,13 +82,8 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
 
 
 def build_final_summary(branch_results: List[dict], best: dict) -> dict:
-    """The contents of ``output/final_results.json``.
-
-    One builder, because there used to be two. cli.py wrote a summary with
-    total_branches and a per-branch path and iteration count; merge_node wrote one
-    without any of the three. ``cli.py --best`` runs merge_node, so looking at your
-    results silently rewrote the richer file with the poorer one.
-    """
+    """The contents of ``output/final_results.json``. One builder; there were two,
+    with different shapes, and ``--best`` overwrote the richer with the poorer."""
     return {
         "best_branch": best.get("branch_name"),
         "best_config": best.get("best_config"),

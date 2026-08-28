@@ -1,9 +1,7 @@
 """A branch's budget, and how a raised one reaches the children it spawns.
 
-max_iter lives in branch_config.json, which the UI owns. Raising it there says "this
-subtree needs more room". Sizing children from config.MAX_ITERATIONS / config.PATH_BUDGET
-instead meant the grant died on the branch it was made on: a branch given 12 iterations
-spawned children with 5.
+Sizing children from config rather than the parent's effective max_iter meant a grant
+died on the branch it was made on.
 """
 
 import pytest
@@ -103,8 +101,8 @@ def test_child_gets_the_remaining_path_budget(output_dir, monkeypatch):
 def test_a_grant_extends_the_path_budget_rather_than_the_childrens_share(
     output_dir, monkeypatch
 ):
-    """A parent allocated 30 and raised to 34 was granted 4. Its children must see a
-    34-iteration path, not 30 with 4 already spent."""
+    """Allocated 30, raised to 34: children see a 34-iteration path, not 30 with 4
+    already spent."""
     monkeypatch.setattr(_cfg, "PATH_BUDGET", 30)
 
     parent = _init_branch(STRATEGY)
@@ -161,8 +159,7 @@ def test_a_grant_compounds_down_the_path(output_dir, monkeypatch):
 
 
 def test_an_exhausted_path_still_gives_a_child_one_iteration(output_dir, monkeypatch):
-    """A branch the master decided to spawn but that cannot run at all is worse than
-    one that runs once and stops on its own budget."""
+    """A spawned branch that cannot run at all is worse than one that runs once."""
     monkeypatch.setattr(_cfg, "PATH_BUDGET", 30)
 
     parent = _init_branch(STRATEGY)
@@ -287,8 +284,7 @@ def test_spawn_discards_children_on_an_exhausted_path_budget(output_dir, monkeyp
 
 
 def test_a_grant_can_revive_an_otherwise_exhausted_path(output_dir, monkeypatch):
-    """A path budget spent to the last iteration discards sub-strategies. Raising the
-    branch's budget is exactly how a user says "keep going" — so it must now spawn."""
+    """Raising the budget is how a user says "keep going", so it must now spawn."""
     monkeypatch.setattr(_cfg, "PATH_BUDGET", 30)
 
     parent = _parent(output_dir, monkeypatch, current_iter=30, total=30)

@@ -196,12 +196,8 @@ def _init_branch(
     Creates the directory for a new branch and initializes its branch.json.
     Returns the path to the newly created branch directory.
 
-    ``inherited_max_iter`` and ``path_budget_total`` carry the parent's *effective*
-    budget down. A user who raises a branch's max_iter in the UI is saying that
-    subtree needs more room, so its children have to start from the raised number —
-    reading config.MAX_ITERATIONS / config.PATH_BUDGET here meant the grant stopped
-    at the branch it was made on. Both are None for a root branch, which is the only
-    place config is still the source.
+    ``inherited_max_iter`` and ``path_budget_total`` carry the parent's effective
+    budget down; both are None for a root branch, the only place config still applies.
     """
     if parent_branch:
         parent_path = Path(parent_branch)
@@ -224,8 +220,8 @@ def _init_branch(
     # Compute max_iter based on mode; depth always tracked so both constraints can apply
     if _cfg.PATH_BUDGET > 0:
         budget_total = path_budget_total or _cfg.PATH_BUDGET
-        # At least one iteration: a branch the master decided to spawn but that cannot
-        # run at all is worse than one that runs once and stops on its own budget.
+        # At least one: a spawned branch that cannot run at all is worse than one that
+        # runs once and stops.
         max_iter = max(budget_total - path_iters_consumed, 1)
     else:
         budget_total = 0
@@ -254,14 +250,9 @@ def _init_branch(
 def _write_final_results() -> None:
     """Write ``output/final_results.json`` at the end of a run.
 
-    It belongs here, not in cli.py, because cli.py is not the only entry point: the
-    API's run target calls run_optimization_engine and nothing else, so every run
-    started from the web UI's Run button finished without ever producing this file —
-    and GET /api/problems/{name}/results, whose only job is to serve it, returned
-    {"results": null} permanently.
-
-    Failure is logged, never raised: the run itself has already succeeded by this
-    point and its per-branch results are on disk regardless.
+    Here rather than cli.py because the API's run target calls only this engine, so
+    UI-started runs never produced the file. Failure is logged: the run has already
+    succeeded and its per-branch results are on disk.
     """
     from nodes.merge import build_final_summary, find_branch_results, get_best_branch_result
     from utils.files import save_json
@@ -285,14 +276,9 @@ def _write_final_results() -> None:
 def _spawn_sub_branches(branch_path: Path, sub_strategies: list) -> List[Path]:
     """Create the child branches a branch asked for, and return their paths.
 
-    Sizing them is the whole job. Depth is a simple decrement, but the iteration
-    budget has to come from the parent's *effective* max_iter — the value in
-    branch_config.json, which the UI can raise and which grant_one_more_iteration
-    raises when an exhausted branch is revived — not from config. Reading config here
-    meant a grant died on the branch it was made on: a branch given 12 iterations
-    spawned children with MAX_ITERATIONS.
-
-    Returns an empty list, with a reason logged, when depth or budget is exhausted.
+    The budget comes from the parent's effective max_iter (branch_config.json, which
+    the UI can raise), not from config — otherwise a grant dies on the branch it was
+    made on. Empty list, with a reason logged, when depth or budget is exhausted.
     """
     manifest = load_branch_manifest(branch_path)
     new_depth = manifest.branch_depth - 1
@@ -308,10 +294,7 @@ def _spawn_sub_branches(branch_path: Path, sub_strategies: list) -> List[Path]:
 
     if _cfg.PATH_BUDGET > 0:
         budget_total = manifest.path_budget_total or _cfg.PATH_BUDGET
-        # Whatever the parent was granted beyond its allocated share extends the path
-        # budget rather than being taken out of its children's. The point of raising a
-        # branch's budget is to buy more work on that path, not to move work off the
-        # branches below it.
+        # A grant extends the path budget rather than coming out of the children's.
         allocated = max(budget_total - manifest.path_iters_consumed, 1)
         granted = max(effective_max_iter - allocated, 0)
         child_budget_total = budget_total + granted

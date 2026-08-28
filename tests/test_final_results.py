@@ -1,8 +1,4 @@
-"""output/final_results.json — its contents, and who writes it.
-
-It had two writers with two different shapes, and the entry point most runs go
-through had none at all.
-"""
+"""output/final_results.json — its contents, and who writes it."""
 
 import json
 
@@ -63,9 +59,7 @@ def output_dir(tmp_path, monkeypatch):
 
 
 def test_best_config_reaches_the_summary(output_dir):
-    """It was unconditionally null: find_branch_results never put a best_config key
-    on any code path, so best.get("best_config") could only ever be None — for a
-    value get_results_summary computes and stores in every results_summary."""
+    """It was unconditionally null: find_branch_results never set the key."""
     branch = _branch(output_dir, "tiled", best_time=305.0)
     _results_json(branch, 1, 305.0, {"TILE": 16, "VECTOR": 4})
 
@@ -95,9 +89,8 @@ def test_a_branch_with_no_results_has_no_config(output_dir):
 
 
 def test_the_summary_keeps_the_richer_per_branch_fields(output_dir):
-    """merge_node's shape dropped total_branches, and every branch's path and
-    iteration count. `cli.py --best` runs merge_node, so looking at your results
-    silently rewrote the richer file with the poorer one."""
+    """merge_node's shape dropped total_branches, path and iterations, and `--best`
+    runs merge_node — so reading your results rewrote the richer file."""
     branch = _branch(output_dir, "tiled", best_time=305.0, speedup=2.5, iters=4)
     _results_json(branch, 1, 305.0, {"TILE": 16})
 
@@ -113,9 +106,7 @@ def test_the_summary_keeps_the_richer_per_branch_fields(output_dir):
 
 
 def test_the_engine_writes_the_file_itself(output_dir, monkeypatch):
-    """The API's run target calls run_optimization_engine and nothing else, so every
-    run started from the UI's Run button used to finish without this file —
-    and GET /api/problems/{name}/results returned {"results": null} forever."""
+    """The API's run target calls only the engine, so UI runs produced no file."""
     import engine.master as master
 
     monkeypatch.setattr(master, "get_output_dir", lambda: output_dir)
@@ -130,8 +121,7 @@ def test_the_engine_writes_the_file_itself(output_dir, monkeypatch):
 
 
 def test_writing_the_summary_never_raises_into_the_run(output_dir, monkeypatch):
-    """The run has already succeeded by this point and its per-branch results are on
-    disk; a reporting failure must not turn that into a crash."""
+    """A reporting failure must not crash a run that already succeeded."""
     import engine.master as master
 
     monkeypatch.setattr(master, "get_output_dir", lambda: output_dir)

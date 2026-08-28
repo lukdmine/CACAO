@@ -15,32 +15,14 @@ import pytest
 from agentic.loop import StepOutcome, run_agentic_step
 from agentic.replay import ScriptedLLM
 from agentic.tools import Toolbox
+from conftest import call  # noqa: F401
 
 pytestmark = pytest.mark.asyncio
 
 
 @pytest.fixture
-def toolbox(filled_workspace, tmp_path, monkeypatch):
-    """A toolbox whose compile check passes without invoking g++ or NVRTC."""
-
-    def fake_check(self):
-        self.checks_run += 1
-        self.check_passed = True
-        self.last_check = "Compilation check: PASS"
-        return self.last_check
-
-    monkeypatch.setattr(Toolbox, "check_compilation", fake_check)
-    return Toolbox(
-        filled_workspace,
-        branch_path=tmp_path / "branch",
-        output_dir=tmp_path / "out",
-        problem_dir=tmp_path / "problem",
-        meta={},
-    )
-
-
-def call(tool, **args):
-    return {"tool": tool, "args": args}
+def toolbox(passing_toolbox):
+    return passing_toolbox
 
 
 async def test_completes_on_end_step(toolbox, tmp_path):

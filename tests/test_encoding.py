@@ -20,11 +20,8 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Directories that are not the engine: vendored code, the frontend's TypeScript, and
-# the tests themselves (which construct their own fixtures and control their own
-# encoding). Note "frontend" is NOT skipped wholesale — frontend/scripts holds
-# project-owned Python that CLAUDE.md tells you to run, and excluding the whole tree
-# hid a bare write_text emitting an em dash from this audit.
+# Not the engine: vendored code, build output, and the tests' own fixtures. "frontend"
+# is deliberately not skipped wholesale — frontend/scripts is project-owned Python.
 SKIP_PARTS = (
     "KTT",
     "node_modules",

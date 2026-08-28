@@ -29,9 +29,8 @@ from typing import Dict, List, Optional, Tuple
 # the tail rather than truncating arbitrarily.
 _MAX_INDEX_ROWS = 8
 
-# Branch statuses after which the worker stops advancing current_iter, so it names the
-# last decided iteration rather than one in flight. Mirrors engine/worker.py's check
-# after a `deciding` step.
+# After these the worker stops advancing current_iter, so it names the last decided
+# iteration rather than one in flight.
 _TERMINAL_STATUSES = ("success", "failed", "branching")
 
 
@@ -142,15 +141,8 @@ def branch_index(output_dir, exclude_path=None) -> str:
 def _completed_count(manifest: dict) -> int:
     """How many iterations of this branch have been decided.
 
-    current_iter is the in-progress iteration only while the branch is still running,
-    which is what makes it an exclusive bound. It stops being one on termination:
-    engine/worker.py advances current_iter after a `deciding` step only when
-    next_status is not terminal, so a branch that finished at iteration 5 keeps
-    current_iter == 5 and that iteration is decided, not in flight.
-
-    Treating it as exclusive regardless hid the final iteration of every finished
-    branch — including the terminal error_analysis, which is the whole reason
-    CROSS_BRANCH_ACCESS="errors" exists.
+    current_iter is an exclusive bound only while the branch runs; a finished branch
+    keeps it pointing at its last decided iteration.
     """
     current = int(manifest.get("current_iter") or 1)
     if manifest.get("status") in _TERMINAL_STATUSES:

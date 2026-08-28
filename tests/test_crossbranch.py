@@ -66,9 +66,7 @@ def test_errors_are_the_deepest_cross_branch_read_available():
 
 
 def test_errors_returns_failure_analyses(cov_output):
-    # The assertion used to be `"Failures recorded" in text or "no failure analyses"
-    # in text` — the union of the function's two possible outcomes, so it could only
-    # fail by raising. This branch has recorded analyses; say so.
+    # Was asserting the union of both outcomes, so it could only fail by raising.
     text = crossbranch.branch_errors(cov_output, "register_coarsened_syrk")
     assert "Failures recorded" in text
     assert "no failure analyses" not in text
@@ -115,11 +113,7 @@ def test_list_iterations_distinguishes_ran_from_failed(cov_branch):
 
 
 def _finished_branch(tmp_path, status: str, last_iter: int = 3):
-    """A branch that terminated at ``last_iter``.
-
-    The worker stops advancing current_iter on a terminal decision, so it names that
-    iteration rather than the next one.
-    """
+    """A branch that terminated at ``last_iter``, so current_iter names it."""
     root = tmp_path / "branches" / "b"
     for n in range(1, last_iter + 1):
         (root / f"iter{n}").mkdir(parents=True, exist_ok=True)
@@ -143,12 +137,8 @@ def _finished_branch(tmp_path, status: str, last_iter: int = 3):
 
 @pytest.mark.parametrize("status", ["success", "failed", "branching"])
 def test_a_finished_branch_shows_its_final_iteration(tmp_path, status):
-    """current_iter is an exclusive bound only while a branch is running.
-
-    A branch that stopped at iteration 3 keeps current_iter == 3, so treating it as
-    exclusive hid iteration 3 from every cross-branch read — including the terminal
-    error_analysis, which is the one CROSS_BRANCH_ACCESS="errors" exists to share.
-    """
+    """A branch stopped at iteration 3 keeps current_iter == 3, so an exclusive bound
+    hid its terminal error_analysis from every cross-branch read."""
     root = _finished_branch(tmp_path, status)
 
     assert "summary 3" in crossbranch.branch_log(tmp_path, "b")

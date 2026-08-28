@@ -91,12 +91,7 @@ def _seed_from_previous(ws: Workspace, branch_path: Optional[Path], iteration: i
     contents = _read_owned_files(prev)
 
     if not contents:
-        # The previous step aborted. _fail_iteration returns before ws.commit(), so
-        # nothing reached the iteration directory — but whatever the step did write is
-        # still in its staging directory. That is a strictly better start for a retry
-        # than an empty workspace, and without it the retry prompt lies: it says "the
-        # previous attempt failed... the current files are shown below" with no files
-        # below, so the model is told to make the smallest correct fix to nothing.
+        # An aborted step never reached ws.commit(), so its work is only in staging.
         contents = _read_owned_files(Workspace(prev).staging)
 
     if len(contents) <= 1:
@@ -156,10 +151,7 @@ def _task_text(state: WorkingState, seeded: list) -> str:
         "plan or the strategy, follow the feedback."
     )
 
-    # Both of these used to promise files unconditionally. When nothing could be
-    # seeded — the previous step aborted before committing, and left no staging either
-    # — the model was told to make the smallest correct fix to an empty workspace, and
-    # to edit files that were not there. Say which situation it is actually in.
+    # Both wordings promised files unconditionally, including when none were seeded.
     if state.mode == "retry":
         lines.append(
             (
@@ -357,13 +349,8 @@ async def author_node(state: WorkingState) -> WorkingState:
         f"{len(schemas)} tools bound (history={has_history}, siblings={has_siblings})"
     )
 
-    # An aborted outcome says the step ended badly, not that it produced nothing. If
-    # all four files are there and the compile check passed, the work is done and
-    # verified — the model just failed to say end_step. Throwing that away and failing
-    # the iteration costs one of the user's max_iter slots and four LLM calls to
-    # re-derive a kernel that is sitting in staging. This is the same reasoning that
-    # already excludes BUDGET_EXHAUSTED from `aborted`; the outcome simply cannot tell
-    # "never called a tool" from "called forty tools and then stalled".
+    # `aborted` cannot tell "never called a tool" from "stalled after finishing", so
+    # a complete, compile-checked workspace is committed either way.
     salvageable = ws.complete() and toolbox.check_passed
 
     if result.outcome.aborted and salvageable:

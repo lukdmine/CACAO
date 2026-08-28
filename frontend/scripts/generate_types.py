@@ -282,9 +282,7 @@ def main():
     output = "\n".join(sections) + "\n"
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # Explicit codec: the banner this file emits carries an em dash, so under a
-    # locale-derived ASCII stream the write raises UnicodeEncodeError after all the
-    # work is done and leaves the generated file missing or truncated.
+    # Explicit codec: the banner carries an em dash.
     OUTPUT_FILE.write_text(output, encoding="utf-8")
 
     print(f"  Generated {OUTPUT_FILE.name} ({len(output)} bytes)")

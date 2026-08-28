@@ -1,12 +1,5 @@
-"""TrackedLLM's empty-content retry must not fire underneath the agentic loop.
-
-Both layers detect the same event — a reply cut off at the output token cap before it
-reached a tool call — and both correct it. Stacked, they multiply: the loop's three
-escalating nudges each cost the wrapper's five backoff retries underneath. The wrapper
-is the one that has to yield, because the loop's correction is the better one (it
-shrinks the unit of work) and the wrapper's appended nudge never reached the model
-anyway: the loop keeps its own message list.
-"""
+"""TrackedLLM's empty-content retry must not fire underneath the agentic loop, which
+has its own truncation policy. Stacked, the two multiply."""
 
 import asyncio
 
@@ -15,7 +8,6 @@ from langchain_core.messages import AIMessage
 
 import config
 from agentic.loop import StepOutcome, run_agentic_step
-from agentic.tools import Toolbox
 
 pytestmark = pytest.mark.asyncio
 
@@ -35,24 +27,6 @@ class AlwaysTruncated:
 
 
 @pytest.fixture
-def toolbox(filled_workspace, tmp_path, monkeypatch):
-    def fake_check(self):
-        self.checks_run += 1
-        self.check_passed = True
-        self.last_check = "Compilation check: PASS"
-        return self.last_check
-
-    monkeypatch.setattr(Toolbox, "check_compilation", fake_check)
-    return Toolbox(
-        filled_workspace,
-        branch_path=tmp_path / "branch",
-        output_dir=tmp_path / "out",
-        problem_dir=tmp_path / "problem",
-        meta={},
-    )
-
-
-@pytest.fixture
 def no_sleep(monkeypatch):
     """Record what would have been slept instead of sleeping it."""
     slept = []
@@ -67,7 +41,7 @@ def no_sleep(monkeypatch):
 
 
 async def test_bound_wrapper_hands_a_truncated_reply_straight_to_the_loop(
-    toolbox, tmp_path, no_sleep
+    passing_toolbox, tmp_path, no_sleep
 ):
     provider = AlwaysTruncated()
     llm = config.TrackedLLM(provider).bind_tools([])
@@ -76,7 +50,7 @@ async def test_bound_wrapper_hands_a_truncated_reply_straight_to_the_loop(
         llm,
         "sys",
         "usr",
-        toolbox,
+        passing_toolbox,
         trace_path=tmp_path / "t.jsonl",
         truncation_retries=3,
     )
@@ -89,8 +63,7 @@ async def test_bound_wrapper_hands_a_truncated_reply_straight_to_the_loop(
 
 
 async def test_unbound_wrapper_still_retries_an_empty_reply(no_sleep):
-    """The retry is still right for the single-shot nodes, which have no loop above
-    them to apply a correction."""
+    """Still right for the single-shot nodes, which have no loop above them."""
     provider = AlwaysTruncated()
     llm = config.TrackedLLM(provider)
 

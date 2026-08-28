@@ -92,11 +92,8 @@ class BranchManifest(BaseModel):
     path_iters_consumed: int = (
         0  # Total iterations used by ancestors (path budget mode)
     )
-    # The path budget this branch's root-to-leaf path actually runs on (path budget
-    # mode only; 0 means "not set, use config.PATH_BUDGET"). It starts at
-    # config.PATH_BUDGET and grows by whatever a user granted an ancestor beyond its
-    # allocated share, so raising one branch's max_iter in the UI extends the budget
-    # for the subtree below it instead of being spent out of its children's.
+    # Path budget this root-to-leaf path runs on; 0 means use config.PATH_BUDGET.
+    # Grows by whatever an ancestor was granted beyond its allocated share.
     path_budget_total: int = 0
     current_iter: int = 1
     status: str = (

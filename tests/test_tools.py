@@ -9,6 +9,7 @@ import pytest
 
 from agentic.tools import Toolbox, schemas_for
 from agentic.workspace import ToolError
+from conftest import make_toolbox
 from utils.rules import ForbiddenPattern, Rules
 
 
@@ -279,20 +280,11 @@ def test_passing_check_does_not_nag_about_editing(filled_workspace, tmp_path, mo
 
 
 def test_a_rules_violation_records_its_own_verdict(filled_workspace, tmp_path):
-    """last_check is what author_node reports when a step ends without a passing
-    check, so the rules branch must write it like every other exit does.
-
-    It used to return its FAIL text without assigning last_check, leaving whatever
-    the previous check said — possibly PASS — as the reported reason.
-    """
-    from utils.rules import ForbiddenPattern, Rules
-
-    box = Toolbox(
+    """author_node reports last_check as the failure reason, so this branch must set
+    it rather than leave the previous — possibly PASSing — verdict."""
+    box = make_toolbox(
         filled_workspace,
-        branch_path=tmp_path / "branch",
-        output_dir=tmp_path / "out",
-        problem_dir=tmp_path / "problem",
-        meta={},
+        tmp_path,
         rules=Rules(forbid=[ForbiddenPattern(pattern="TILE", reason="no tiling")]),
     )
     box.last_check = "Compilation check: PASS\n\nstale"
@@ -305,41 +297,20 @@ def test_a_rules_violation_records_its_own_verdict(filled_workspace, tmp_path):
     assert "PASS" not in box.last_check.splitlines()[0]
 
 
-def test_compute_capability_falls_back_to_problem_yaml(filled_workspace, tmp_path):
-    """gpu_info is empty whenever NCU is unavailable or permission-restricted. The
-    declared capability has to be used then, or the check targets compute_52 and
-    rejects cp.async / wmma / bf16 kernels the real device compiles fine."""
-    box = Toolbox(
-        filled_workspace,
-        branch_path=tmp_path / "branch",
-        output_dir=tmp_path / "out",
-        problem_dir=tmp_path / "problem",
-        meta={"gpu": {"index": 0, "compute_capability": "8.6"}},
-        gpu_info=None,
-    )
-    assert box._compute_capability() == "8.6"
-
-
-def test_detected_capability_wins_over_the_declared_one(filled_workspace, tmp_path):
-    box = Toolbox(
-        filled_workspace,
-        branch_path=tmp_path / "branch",
-        output_dir=tmp_path / "out",
-        problem_dir=tmp_path / "problem",
-        meta={"gpu": {"compute_capability": "7.0"}},
-        gpu_info={"compute_capability": "8.6"},
-    )
-    assert box._compute_capability() == "8.6"
-
-
-def test_capability_is_none_when_nothing_declares_one(filled_workspace, tmp_path):
-    """nvrtc.arch_option's compute_52 default is still the right answer when the
-    architecture is genuinely unknown."""
-    box = Toolbox(
-        filled_workspace,
-        branch_path=tmp_path / "branch",
-        output_dir=tmp_path / "out",
-        problem_dir=tmp_path / "problem",
-        meta={},
-    )
-    assert box._compute_capability() is None
+@pytest.mark.parametrize(
+    "meta, gpu_info, expected",
+    [
+        # gpu_info is empty whenever NCU is missing or permission-restricted; without
+        # the problem.yaml fallback the check targets compute_52 and rejects
+        # cp.async / wmma / bf16 kernels the real device compiles fine.
+        ({"gpu": {"compute_capability": "8.6"}}, None, "8.6"),
+        ({"gpu": {"compute_capability": "7.0"}}, {"compute_capability": "8.6"}, "8.6"),
+        # nvrtc's compute_52 default is right when the architecture is unknown.
+        ({}, None, None),
+    ],
+)
+def test_compute_capability_resolution(
+    filled_workspace, tmp_path, meta, gpu_info, expected
+):
+    box = make_toolbox(filled_workspace, tmp_path, meta=meta, gpu_info=gpu_info)
+    assert box._compute_capability() == expected

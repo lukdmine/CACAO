@@ -148,13 +148,8 @@ def _handle_signal(
 
     try:
         if action == "stop":
-            # Only the first stop records where to come back to. A second stop — the API
-            # applies no status check (api/branches.py), and the UI leaves the button
-            # clickable for up to one 3 s poll after a branch parks — would otherwise
-            # store pre_stop_status="stopped". Resume then restores "stopped", clears the
-            # field, and _wait_for_resume's `status != "stopped"` exit test can never pass
-            # again: the branch ignores every later signal while still counting towards
-            # master's `busy`, so the whole run stops terminating.
+            # Only the first stop records where to resume to; a second would store
+            # "stopped" and wedge _wait_for_resume forever.
             if manifest.status != "stopped":
                 manifest.pre_stop_status = manifest.status
                 manifest.status = "stopped"
@@ -258,14 +253,8 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
         try:
             iter_num = manifest.current_iter
 
-            # A parent revert rmtree's this whole subtree, and every write path below
-            # recreates it: _atomic_write_json mkdirs the parent, so save_iter_state
-            # and save_branch_manifest rebuild a directory the user just deleted, and
-            # the branch reappears in the tree and keeps spending LLM calls and GPU
-            # lock time. The cooperative stop that state/control.py writes cannot help
-            # — the rmtree destroys the signal file on the very next line, long before
-            # this loop's next poll. _wait_for_resume has had this check all along;
-            # the main loop, where the worker actually spends its time, did not.
+            # Every write path mkdirs its parent, so without this a branch deleted by a
+            # parent revert rebuilds itself and keeps running.
             if not branch_path.exists():
                 log(
                     f"Branch {strategy_name} directory deleted (parent reverted). Exiting.",
@@ -355,12 +344,7 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
         except Exception as e:
             log(f"Unhandled exception in branch {strategy_name}: {e}", "ERROR")
             traceback.print_exc()
-            # iter_state is bound inside the try, so a failure in loading it — a
-            # corrupt state.json on the first pass, say — used to raise
-            # UnboundLocalError from the handler itself. That escaped run_branch_loop
-            # with manifest.status never set to "failed", so the branch died without
-            # recording why. Mark the branch failed first; annotate the iteration only
-            # if there is one.
+            # Status first: iter_state may be unbound if the failure was in loading it.
             manifest.status = "failed"
             try:
                 if iter_state is not None:

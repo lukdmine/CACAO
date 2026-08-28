@@ -273,16 +273,11 @@ class Toolbox:
     # -- compilation -------------------------------------------------------
 
     def _compute_capability(self):
-        """The architecture the NVRTC check should target.
+        """Detected capability, else whatever problem.yaml declares.
 
-        Auto-detection first, then whatever problem.yaml declares. gpu_info is
-        populated only by engine/master's get_gpu_details, which returns None whenever
-        NCU is unavailable or permission-restricted — a common setup, since NCU counter
-        access needs perf_event or root. Falling straight through to nvrtc's own
-        compute_52 default there meant a hand-written gpu.compute_capability was
-        ignored, and any kernel using cp.async, wmma or bf16 could never pass a check
-        it would pass on the real device: check_passed stays False, end_step refuses,
-        and the step burns its whole budget on a kernel that was fine.
+        gpu_info is empty whenever NCU is missing or permission-restricted, and
+        nvrtc's compute_52 default rejects cp.async / wmma / bf16 kernels the real
+        device compiles fine.
         """
         return self.gpu_info.get("compute_capability") or (
             (self.meta.get("gpu") or {}).get("compute_capability")
@@ -311,10 +306,7 @@ class Toolbox:
         violations = self.rules.violations(self.ws.read("kernels.cu"))
         if violations:
             self.check_passed = False
-            # last_check has to be written on this path too. It is what
-            # nodes/author.py reports as the reason when a step ends without a passing
-            # check, so leaving it holding an earlier — possibly PASSing — verdict made
-            # a rules violation look like something else entirely.
+            # Written here too: author_node reports last_check as the failure reason.
             self.last_check = (
                 "Compilation check: FAIL\n\n"
                 "Problem rules: VIOLATED\n"

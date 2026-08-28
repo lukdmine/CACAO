@@ -1,8 +1,4 @@
-"""Provider resolution and token accounting.
-
-Both are silent-failure surfaces: a run that picks the wrong provider still runs, and
-a run that counts no tokens still finishes. Nothing downstream can tell.
-"""
+"""Provider resolution and token accounting — both silent-failure surfaces."""
 
 import pytest
 from langchain_core.messages import AIMessage
@@ -19,8 +15,7 @@ def tracker():
 
 
 def test_usage_metadata_is_counted(tracker):
-    """langchain's normalised field. anthropic and gemini report only this one, and
-    reading response_metadata alone made every such run record zero tokens."""
+    """anthropic and gemini report only this one."""
     tracker.add(
         AIMessage(
             content="x",
@@ -80,8 +75,7 @@ def test_a_response_with_no_usage_still_counts_the_call(tracker):
 
 
 def test_total_is_derived_when_the_provider_omits_it(tracker):
-    """AIMessage requires total_tokens, but responses reach the tracker duck-typed
-    from wrappers and replay harnesses too."""
+    """AIMessage requires total_tokens; duck-typed responses need not."""
 
     class Response:
         usage_metadata = {"input_tokens": 4, "output_tokens": 6}
@@ -101,9 +95,7 @@ def test_canonical_provider_names_resolve(name):
 
 
 def test_claude_resolves_to_anthropic():
-    """The name this project's own docs, CLAUDE.md and the "no provider detected"
-    error message all used. It used to be silently ignored, falling through to
-    key-based detection — which prefers cerit."""
+    """The name this project's own docs used; it fell through to key detection."""
     assert config._normalise_provider("claude") == "anthropic"
 
 
@@ -118,8 +110,7 @@ def test_an_unknown_name_does_not_resolve():
 
 
 def test_the_error_message_names_only_accepted_values(monkeypatch):
-    """It used to tell users to set LLM_PROVIDER=...|claude|..., which the accepted
-    set did not contain."""
+    """It used to name "claude", which the accepted set did not contain."""
     for var in (
         "LLM_PROVIDER",
         "CERIT_API_KEY",
@@ -155,8 +146,7 @@ def test_an_unrecognised_env_provider_warns_rather_than_silently_switching(monke
 
 
 def test_env_claude_selects_anthropic_over_key_detection(monkeypatch):
-    """The exact reported case: LLM_PROVIDER=claude with both cerit and anthropic keys
-    set ran entirely on cerit."""
+    """LLM_PROVIDER=claude with both keys set used to run entirely on cerit."""
     monkeypatch.setattr(config, "LLM_PROVIDER", None)
     monkeypatch.setenv("LLM_PROVIDER", "claude")
     monkeypatch.setenv("CERIT_API_KEY", "cerit-test")

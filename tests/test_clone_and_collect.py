@@ -1,7 +1,4 @@
-"""Cloning a problem, and reading its scalars back out.
-
-Both are places where the schema moved and one reader did not follow.
-"""
+"""Cloning a problem, and reading its scalars back out."""
 
 import json
 
@@ -44,9 +41,8 @@ def test_clone_copies_the_definition(problem, tmp_path):
 
 
 def test_clone_leaves_the_run_history_behind(problem, tmp_path):
-    """output/ and archive/ are the run history, not the definition. Copying them
-    duplicated 71 GB for gdn_chunk, and left the clone looking already-run: the API
-    reports results for it and run_eval.sh skips it as completed."""
+    """Copying them duplicated 71 GB for gdn_chunk and left the clone looking
+    already-run."""
     target = clone_problem_dir(problem, tmp_path / "mmul_v2")
 
     assert not (target / "output").exists()
@@ -74,10 +70,8 @@ def test_clone_survives_a_broken_symlink(problem, tmp_path):
 
 
 def test_scalars_are_read_from_inputs_yaml(tmp_path):
-    """They moved out of problem.yaml's `scalars:` block into inputs.yaml's `args`.
-    Reading the old location returned {} for every problem in the repo, so the
-    work-unit formulas raised KeyError into a bare except and the report printed "?"
-    for input size and "-" for throughput on every row."""
+    """They moved to inputs.yaml's `args`; the old location returned {} for every
+    problem, and the work formulas raised KeyError into a bare except."""
     import collect_results
 
     d = tmp_path / "p"

@@ -44,12 +44,8 @@ def cov_branch() -> Path:
 
 @pytest.fixture(scope="session")
 def cov_inputs_hpp() -> Path:
-    """A real generated inputs.hpp.
-
-    Its own fixture rather than ``cov_problem / "inputs.hpp"``: the problem directory
-    is tracked but inputs.hpp is a gitignored build artifact, so on a fresh clone the
-    directory check passes and the read then raises instead of skipping.
-    """
+    """A real generated inputs.hpp. Its own fixture because the directory is tracked
+    but this file is a gitignored artifact, so cov_problem alone would not skip."""
     return _require(COVARIANCE / "inputs.hpp")
 
 
@@ -95,3 +91,42 @@ def filled_workspace(workspace):
     )
     workspace.write("region_launcher.cpp", "// default launcher\n")
     return workspace
+
+
+def call(tool, **args):
+    """A scripted tool call for ScriptedLLM."""
+    return {"tool": tool, "args": args}
+
+
+def pass_check(monkeypatch, checks_run=True):
+    """Make Toolbox.check_compilation pass without invoking g++ or NVRTC."""
+    from agentic.tools import Toolbox
+
+    def fake(self):
+        if checks_run:
+            self.checks_run += 1
+        self.check_passed = True
+        self.last_check = "Compilation check: PASS"
+        return self.last_check
+
+    monkeypatch.setattr(Toolbox, "check_compilation", fake)
+
+
+def make_toolbox(workspace, tmp_path, **overrides):
+    from agentic.tools import Toolbox
+
+    kwargs = {
+        "branch_path": tmp_path / "branch",
+        "output_dir": tmp_path / "out",
+        "problem_dir": tmp_path / "problem",
+        "meta": {},
+    }
+    kwargs.update(overrides)
+    return Toolbox(workspace, **kwargs)
+
+
+@pytest.fixture
+def passing_toolbox(filled_workspace, tmp_path, monkeypatch):
+    """A toolbox whose compile check passes."""
+    pass_check(monkeypatch)
+    return make_toolbox(filled_workspace, tmp_path)

@@ -75,20 +75,7 @@ def script(llm_turns):
     return ScriptedLLM(llm_turns)
 
 
-def call(tool, **args):
-    return {"tool": tool, "args": args}
-
-
-def _passing_check(monkeypatch):
-    from agentic.tools import Toolbox
-
-    def fake(self):
-        self.checks_run += 1
-        self.check_passed = True
-        self.last_check = "Compilation check: PASS"
-        return self.last_check
-
-    monkeypatch.setattr(Toolbox, "check_compilation", fake)
+from conftest import call, pass_check as _passing_check  # noqa: F401
 
 
 HAPPY_TURNS = [
@@ -437,13 +424,8 @@ async def test_second_iteration_binds_the_history_tools(env, monkeypatch):
 
 
 async def test_seeding_recovers_an_aborted_step_from_its_staging(env, monkeypatch):
-    """A step that failed never committed, so its work is only in .staging/.
-
-    _fail_iteration returns before ws.commit(), so iter{N} holds no kernels.cu and no
-    region files. Reading only the iteration directory made every retry start from an
-    empty workspace — while the retry prompt told the model its current files were
-    shown below.
-    """
+    """_fail_iteration returns before ws.commit(), so a failed step's work is only in
+    .staging/ and reading the iteration directory alone left the retry empty."""
     iter1 = env["branch"] / "iter1"
     staging = author_mod.Workspace(iter1).staging
     staging.mkdir(parents=True, exist_ok=True)
@@ -463,8 +445,7 @@ async def test_seeding_recovers_an_aborted_step_from_its_staging(env, monkeypatc
 
 
 async def test_committed_files_win_over_stale_staging(env):
-    """Staging is only the fallback. A committed iteration must not be overridden by
-    an abandoned attempt left beside it."""
+    """Staging is only the fallback."""
     iter1 = env["branch"] / "iter1"
     iter1.mkdir(parents=True, exist_ok=True)
     (iter1 / "kernels.cu").write_text("// committed\n", encoding="utf-8")
@@ -479,8 +460,7 @@ async def test_committed_files_win_over_stale_staging(env):
 
 
 def test_retry_prompt_does_not_promise_files_it_has_none_of(env):
-    """The retry and followup wordings both claimed "the current files are shown
-    below" unconditionally."""
+    """Both wordings promised files unconditionally."""
     empty = author_mod._task_text(make_state(env, iter_num=2, current_iter=2, mode="retry"), [])
     assert "current files are shown below" not in empty
     assert "workspace is empty" in empty.lower()
@@ -503,13 +483,8 @@ def test_followup_prompt_does_not_promise_files_it_has_none_of(env):
 
 
 async def test_a_stalled_step_with_passing_files_is_committed(env, monkeypatch):
-    """The model wrote everything, got a PASS, then answered in prose instead of
-    calling end_step.
-
-    NO_TOOL_CALLS made author_node fail the iteration, discarding a complete and
-    compile-verified workspace — costing one of the user's max_iter slots and four
-    LLM calls to re-derive a kernel that was already sitting in staging.
-    """
+    """Wrote everything, got a PASS, then answered in prose instead of calling
+    end_step. NO_TOOL_CALLS used to discard the whole verified workspace."""
     _passing_check(monkeypatch)
     turns = [
         [call("write_file", name="kernels.cu", content='extern "C" __global__ void k(){}\n')],
@@ -537,8 +512,7 @@ async def test_a_stalled_step_with_passing_files_is_committed(env, monkeypatch):
 
 
 async def test_a_stalled_step_without_a_passing_check_still_fails(env, monkeypatch):
-    """Salvage requires a verified workspace. Files that never compiled are not a
-    result, and committing them would send a broken kernel to the tuner."""
+    """Files that never compiled are not a result."""
     def failing_check(self):
         self.checks_run += 1
         self.check_passed = False
@@ -564,8 +538,7 @@ async def test_a_stalled_step_without_a_passing_check_still_fails(env, monkeypat
 
 
 async def test_a_stalled_step_with_missing_files_still_fails(env, monkeypatch):
-    """A passing check on an incomplete workspace cannot happen in practice, but the
-    salvage must require both conditions regardless."""
+    """Salvage requires both conditions, not just the check."""
     _passing_check(monkeypatch)
     turns = [
         [call("write_file", name="kernels.cu", content='extern "C" __global__ void k(){}\n')],

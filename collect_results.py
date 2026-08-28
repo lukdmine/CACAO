@@ -86,14 +86,7 @@ def load_json(path: Path) -> Optional[dict]:
 
 
 def problem_scalars(base_problem_dir: Path) -> dict:
-    """The problem's scalar values, by name.
-
-    These live in inputs.yaml as ``args`` entries with ``kind: scalar``. They used to
-    be a ``scalars:`` block in problem.yaml and this read the old location, so it
-    returned {} for every problem in the repo — the work-unit formulas below then
-    raised KeyError into a bare except, and every row of the report printed "?" for
-    input size and "-" for throughput.
-    """
+    """The problem's scalar values, by name — inputs.yaml ``args`` with kind: scalar."""
     spec = load_yaml(base_problem_dir / "inputs.yaml")
     return {
         arg["name"]: arg["value"]
