@@ -371,15 +371,12 @@ def get_tree(
     # Read model/provider from run_meta.json (written by optimizer subprocess)
     run_meta = _load_run_meta(output_dir)
 
-    tuning_duration_s = (config.get("tuning") or {}).get("duration_s")
-
     return {
         "nodes": nodes,
         "running": is_problem_running(name),
         "llm_model": run_meta.get("model"),
         "llm_provider": run_meta.get("provider"),
         "token_usage": _load_token_usage(output_dir),
-        "tuning_duration_s": tuning_duration_s,
     }
 
 

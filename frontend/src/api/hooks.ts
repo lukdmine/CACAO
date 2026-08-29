@@ -31,7 +31,7 @@ export async function refreshTree() {
     try {
         treeEtag = null;
         const data = await fetchTree(activeProblem);
-        setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage, data.tuning_duration_s);
+        setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage);
         setRunStatus(data.running ? 'running' : 'completed');
     } catch {
         // silent — next poll will pick it up
@@ -178,7 +178,7 @@ export function usePollTree() {
                 if (!cancelled && data) {
                     treeEtag = etag;
                     const { setTreeFromAPI, setRunStatus } = useAppStore.getState();
-                    setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage, data.tuning_duration_s);
+                    setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage);
                     setRunStatus(data.running ? 'running' : (data.nodes.length > 1 ? 'completed' : 'idle'));
                 }
             } catch (err) {

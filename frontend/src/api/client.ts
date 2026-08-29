@@ -97,7 +97,6 @@ export interface TreeResponse {
     llm_model?: string;
     llm_provider?: string;
     token_usage?: TokenUsage | null;
-    tuning_duration_s?: number | null;
 }
 
 /**

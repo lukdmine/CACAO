@@ -37,9 +37,6 @@ interface AppState {
     llmModel: string | null;
     llmProvider: string | null;
 
-    // Per-problem tuning budget default (from problem.yaml tuning.duration_s)
-    problemTuningDurationS: number | null;
-
     // Model selection (user choice for next run)
     availableModels: ModelsResponse | null;
     selectedProvider: string | null;
@@ -55,7 +52,7 @@ interface AppActions {
     selectNode: (id: string | null) => void;
     toggleSidebar: () => void;
     setProblems: (problems: Problem[], llmModel?: string, llmProvider?: string) => void;
-    setTreeFromAPI: (nodes: TreeNode[], llmModel?: string, llmProvider?: string, tokenUsage?: TokenUsage | null, tuningDurationS?: number | null) => void;
+    setTreeFromAPI: (nodes: TreeNode[], llmModel?: string, llmProvider?: string, tokenUsage?: TokenUsage | null) => void;
     setRunStatus: (status: AppState['runStatus']) => void;
     setConnected: () => void;
     setAvailableModels: (models: ModelsResponse) => void;
@@ -77,7 +74,6 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
     maxWorkers: 4,
     llmModel: null,
     llmProvider: null,
-    problemTuningDurationS: null,
     availableModels: null,
     selectedProvider: saved.provider,
     selectedModel: saved.model,
@@ -85,7 +81,7 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
     connected: false,
 
     // Actions
-    setActiveProblem: (name) => set({ activeProblem: name, selectedNodeId: null, treeNodes: [], tokenUsage: { api_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }, problemTuningDurationS: null }),
+    setActiveProblem: (name) => set({ activeProblem: name, selectedNodeId: null, treeNodes: [], tokenUsage: { api_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }),
     selectNode: (id) => set({ selectedNodeId: id }),
     toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
 
@@ -96,13 +92,12 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
         ...(llmModel != null && { llmModel }),
         ...(llmProvider != null && { llmProvider }),
     }),
-    setTreeFromAPI: (nodes, llmModel, llmProvider, tokenUsage, tuningDurationS) => set({
+    setTreeFromAPI: (nodes, llmModel, llmProvider, tokenUsage) => set({
         treeNodes: nodes,
         connected: true,
         ...(llmModel != null && { llmModel }),
         ...(llmProvider != null && { llmProvider }),
         tokenUsage: tokenUsage ?? { api_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-        ...(tuningDurationS !== undefined && { problemTuningDurationS: tuningDurationS ?? null }),
     }),
     setRunStatus: (status) => set({ runStatus: status }),
     setConnected: () => set({ connected: true }),
