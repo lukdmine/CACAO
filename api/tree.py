@@ -380,6 +380,53 @@ def get_tree(
     }
 
 
+@router.get("/api/problems/{name}/analysis")
+def get_analysis(
+    name: str, response: Response, if_none_match: str | None = Header(None)
+):
+    """The phase-1 analysis of the problem and its reference kernel.
+
+    Its own endpoint rather than a field on the tree payload: it is written once,
+    before the first branch exists, and never changes — while the tree is polled for
+    the life of the run and re-sends everything whenever any branch touches its
+    manifest. ``analysis: null`` means phase 1 has not produced it yet, which is a
+    state the root panel shows rather than an error.
+    """
+    problem_dir = get_problem_dir(name)
+    output_dir = problem_dir / "output"
+    context_path = output_dir / "context.json"
+    md_path = output_dir / "analysis.md"
+
+    h = hashlib.blake2b(digest_size=16)
+    h.update(b"1|")
+    for p in (context_path, md_path):
+        st = p.stat() if p.exists() else None
+        h.update(f"{p.name}:{st.st_mtime_ns if st else 0}:{st.st_size if st else 0}|".encode())
+    etag = f'W/"{h.hexdigest()}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+
+    analysis = None
+    if context_path.exists():
+        try:
+            analysis = (load_json(context_path) or {}).get("analysis") or None
+        except Exception:
+            # Whatever is wrong with the file, the panel is where you go to look at
+            # the run — it has to load and say "not available" rather than 500.
+            analysis = None
+    # nodes/analyze writes analysis.md before the engine writes context.json, so a
+    # run killed in between leaves only the dump. Reading it back is the difference
+    # between the panel having the analysis and reporting that there is none.
+    if analysis is None and md_path.exists():
+        try:
+            analysis = md_path.read_text(encoding="utf-8", errors="replace") or None
+        except Exception:
+            analysis = None
+
+    return {"analysis": analysis}
+
+
 @router.get("/api/problems/{name}/results")
 def get_results(name: str):
     """Get aggregated final results."""

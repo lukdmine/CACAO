@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '@/store/appStore';
-import { fetchProblems, fetchTree, fetchTreeConditional, fetchIteration, fetchModels } from './client';
+import { fetchProblems, fetchTree, fetchTreeConditional, fetchIteration, fetchAnalysis, fetchModels } from './client';
 import type { IterationDetail } from './types.generated';
 
 export const POLL_INTERVAL_MS = 3000;
@@ -92,6 +92,68 @@ function cacheIteration(key: string, detail: IterationDetail, etag: string | nul
     while (iterCache.size > ITER_CACHE_MAX) {
         iterCache.delete(iterCache.keys().next().value!);
     }
+}
+
+// One analysis per problem, kept for the session: it is written once in phase 1 and
+// never rewritten, so a revisit to the root node should not refetch its 7 KB.
+const analysisCache = new Map<string, { analysis: string | null; etag: string | null }>();
+
+/**
+ * The phase-1 analysis, fetched when the root node is selected.
+ *
+ * `live` keeps polling while a run is going and the analysis has not landed yet, so
+ * it appears the moment phase 1 finishes rather than on the next click. Once it is
+ * there, polling stops — nothing rewrites it.
+ */
+export function useAnalysis(problem: string | null, enabled: boolean, running: boolean) {
+    const [analysis, setAnalysis] = useState<string | null>(
+        () => (problem && analysisCache.get(problem)?.analysis) || null,
+    );
+    const [loading, setLoading] = useState(false);
+
+    useEffect(() => {
+        if (!problem || !enabled) {
+            setAnalysis(null);
+            return;
+        }
+
+        const cached = analysisCache.get(problem);
+        setAnalysis(cached?.analysis ?? null);
+        setLoading(!cached);
+
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout>;
+
+        async function poll() {
+            try {
+                const { data, etag } = await fetchAnalysis(
+                    problem!, analysisCache.get(problem!)?.etag ?? null,
+                );
+                if (cancelled) return;
+                if (data) {
+                    analysisCache.set(problem!, { analysis: data.analysis, etag });
+                    setAnalysis(data.analysis);
+                }
+            } catch (err) {
+                console.debug('[useAnalysis] Error:', err);
+            } finally {
+                if (!cancelled) {
+                    setLoading(false);
+                    // Only while it is still missing: the analysis never changes once
+                    // written, so a landed one needs no further polling.
+                    if (running && !analysisCache.get(problem!)?.analysis) {
+                        timer = setTimeout(poll, POLL_INTERVAL_MS);
+                    }
+                }
+            }
+        }
+
+        void poll();
+
+        return () => { cancelled = true; clearTimeout(timer); };
+    }, [problem, enabled, running]);
+
+    return { analysis, loading };
 }
 
 /**

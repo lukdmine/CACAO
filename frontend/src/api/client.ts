@@ -156,6 +156,17 @@ export function fetchTreeConditional(problemName: string, etag: string | null) {
 /**
  * Full work products for one iteration — the fields the tree omits.
  */
+/**
+ * The phase-1 analysis of the problem and its reference kernel. `analysis: null`
+ * means the run has not produced it yet — a state, not an error.
+ */
+export function fetchAnalysis(problemName: string, etag: string | null) {
+    return apiFetchConditional<{ analysis: string | null }>(
+        `/api/problems/${problemName}/analysis`,
+        etag,
+    );
+}
+
 export function fetchIteration(
     problemName: string,
     branchId: string,
