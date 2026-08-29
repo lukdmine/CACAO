@@ -32,6 +32,11 @@ from utils.python_ref_runner import DTYPE_MAP, eval_size
 
 router = APIRouter()
 
+# Cap on the inputs/ listing in the detail payload. A problem has a handful of
+# binaries; the cap only stops a directory someone used as a scratch space from
+# turning every Edit into a megabyte of JSON.
+_MAX_LISTED_INPUTS = 500
+
 
 _REF_SIGNATURE = re.compile(
     r'extern\s+"C"\s+__global__\s+void\s+(\w+)\s*\(([^)]*)\)', re.S
@@ -443,7 +448,9 @@ async def upload_input_file(
     return {
         "status": "uploaded",
         "buffer": buffer_name,
-        "file_name": buf.file_name,
+        # The name actually written, which is the case's override when one was named —
+        # not buf.file_name, the declared one the other cases read.
+        "file_name": file_name,
         "bytes": want,
     }
 
@@ -519,6 +526,22 @@ def get_problem(name: str):
                     "bytes": p.stat().st_size if p.is_file() else None,
                 }
 
+    # What inputs/ actually holds, keyed by path relative to it (file_name may name a
+    # subdirectory). A flat listing rather than a per-case resolution because the
+    # question the editor asks is "is the name in THIS field on the server" — for a
+    # name typed a second ago, against a case that may not be in problem.yaml yet.
+    # Resolving cases here would answer only for the ones already saved.
+    inputs_dir_files: dict = {}
+    inputs_dir = problem_dir / INPUTS_SUBDIR
+    if inputs_dir.is_dir():
+        for f in sorted(inputs_dir.rglob("*")):
+            if len(inputs_dir_files) >= _MAX_LISTED_INPUTS:
+                break
+            # .part is the temp file an interrupted upload leaves; listing it would
+            # show a rejected binary as present.
+            if f.is_file() and not f.name.endswith(".part"):
+                inputs_dir_files[f.relative_to(inputs_dir).as_posix()] = f.stat().st_size
+
     return {
         "name": name,
         "config": config,
@@ -528,5 +551,8 @@ def get_problem(name: str):
         "inputs": inputs,
         # Upload status per init=file buffer; the Edit dialog shows/replaces from this.
         "input_files": input_files,
+        # Every binary under inputs/, by relative path -> bytes. What the case editor
+        # checks a typed file name against.
+        "inputs_dir_files": inputs_dir_files,
         "has_output": (problem_dir / "output").is_dir(),
     }

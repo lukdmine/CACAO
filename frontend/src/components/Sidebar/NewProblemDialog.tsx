@@ -138,6 +138,26 @@ function normalizeCases(raw: unknown): CaseSpec[] {
     });
 }
 
+/** Default name for a case's own copy of a buffer's binary: the declared file with the
+ *  case name before the extension (`A.bin` + `t127` -> `A_t127.bin`). Only a default —
+ *  the field stays editable, so two cases can still point at one shared binary. */
+function caseFileName(declared: string | null | undefined, buffer: string, caseName: string): string {
+    const base = (declared ?? '').trim();
+    if (!base) return `${buffer}_${caseName}.bin`;
+    // Only a dot in the last path segment is an extension: `data.v2/A` has none.
+    const slash = Math.max(base.lastIndexOf('/'), base.lastIndexOf('\\'));
+    const dot = base.lastIndexOf('.');
+    return dot > slash + 1
+        ? `${base.slice(0, dot)}_${caseName}${base.slice(dot)}`
+        : `${base}_${caseName}`;
+}
+
+/** Key for a picked per-case binary. Buffer names are C identifiers and case names are
+ *  [A-Za-z0-9_-] once saved, so '::' cannot occur in either half of a valid pair. */
+function caseFileKey(caseName: string, buffer: string): string {
+    return `${caseName}::${buffer}`;
+}
+
 const PLACEMENTS: Placement[] = ['host', 'define', 'runtime'];
 
 const PLACEMENT_HELP: Record<Placement, string> = {
@@ -168,8 +188,15 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
     const [previewHpp, setPreviewHpp] = useState('');
     // Picked binaries for init=file buffers, keyed by buffer name; uploaded after save.
     const [inputFiles, setInputFiles] = useState<Record<string, File>>({});
+    // The same for a buffer a case rebinds, keyed "<case>::<buffer>" — a case's binary
+    // is a different file from the declared one, so it needs its own slot.
+    const [caseInputFiles, setCaseInputFiles] = useState<Record<string, File>>({});
     // What the server already holds for each file buffer (edit mode only).
     const [serverInputFiles, setServerInputFiles] = useState<ProblemDetailResponse['input_files']>({});
+    // Every binary the server holds under inputs/, by name. Keyed by FILE, not by case:
+    // the badge has to answer for the name currently in the field, which may belong to
+    // a case that has not been saved yet.
+    const [serverFiles, setServerFiles] = useState<ProblemDetailResponse['inputs_dir_files']>({});
 
     useEffect(() => {
         if (open && gpuDevices.length === 0) {
@@ -207,7 +234,9 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setWarnings([]);
         setPreviewHpp('');
         setInputFiles({});
+        setCaseInputFiles({});
         setServerInputFiles({});
+        setServerFiles({});
     }
 
     async function loadProblemData() {
@@ -216,6 +245,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         try {
             const data = await fetchProblemDetail(editProblemName);
             setServerInputFiles(data.input_files ?? {});
+            setServerFiles(data.inputs_dir_files ?? {});
             const ref = (data.config.reference ?? {}) as { type?: ReferenceType; function?: string; block?: { x?: number; y?: number; z?: number } };
             const grid = (data.config.grid ?? {}) as { x?: string; y?: string; z?: string };
 
@@ -284,6 +314,47 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
             'cases',
             cases.map((c, i) => (i === index ? { ...c, ...patch } : c)),
         );
+    }
+
+    // Picked binaries are keyed by case NAME, so a rename has to migrate them the way
+    // renameArg does for buffers — otherwise the pick is orphaned and silently dropped.
+    function renameCase(index: number, newName: string) {
+        const oldName = cases[index]?.name;
+        updateCase(index, { name: newName });
+        if (!oldName || oldName === newName) return;
+        setCaseInputFiles((prev) => {
+            const next: Record<string, File> = {};
+            for (const [k, v] of Object.entries(prev)) {
+                const sep = k.indexOf('::');
+                next[k.slice(0, sep) === oldName ? caseFileKey(newName, k.slice(sep + 2)) : k] = v;
+            }
+            return next;
+        });
+    }
+
+    function removeCase(index: number) {
+        const gone = cases[index]?.name;
+        update('cases', cases.filter((_, j) => j !== index));
+        if (!gone) return;
+        setCaseInputFiles((prev) =>
+            Object.fromEntries(Object.entries(prev).filter(([k]) => k.slice(0, k.indexOf('::')) !== gone)),
+        );
+    }
+
+    function pickCaseInputFile(index: number, buffer: BufferSpec, e: React.ChangeEvent<HTMLInputElement>) {
+        const f = e.target.files?.[0];
+        e.target.value = ''; // re-picking the same file must fire onChange again
+        const c = cases[index];
+        if (!f || !c || !c.name) return;
+        setCaseInputFiles((prev) => ({ ...prev, [caseFileKey(c.name, buffer.name)]: f }));
+        // Fill the override if it is blank: the upload resolves its destination through
+        // this field, so leaving it empty would write the bytes over the declared
+        // binary — the one every other case reads.
+        if (!c.files[buffer.name]) {
+            updateCase(index, {
+                files: { ...c.files, [buffer.name]: caseFileName(buffer.file_name, buffer.name, c.name) },
+            });
+        }
     }
 
     const refKind = REFERENCE_KINDS[form.reference_type];
@@ -385,11 +456,14 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 try {
                     await uploadProblemInput(res.name, a.name, f);
                     uploaded.push(a.name);
-                    // Keep the Edit-mode status truthful while the dialog stays open.
+                    // Keep the Edit-mode status truthful while the dialog stays open —
+                    // in both places, since a case with no override of its own reads
+                    // this very binary and shows its size.
                     setServerInputFiles((prev) => ({
                         ...prev,
                         [a.name]: { file_name: a.file_name ?? '', exists: true, bytes: f.size },
                     }));
+                    if (a.file_name) setServerFiles((prev) => ({ ...prev, [a.file_name!]: f.size }));
                 } catch (err) {
                     uploadWarnings.push(
                         `'${a.name}': ${err instanceof Error ? err.message : String(err)}`
@@ -400,6 +474,44 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 setInputFiles((prev) => {
                     const next = { ...prev };
                     for (const n of uploaded) delete next[n];
+                    return next;
+                });
+            }
+
+            // Then the per-case binaries. The endpoint resolves both the destination and
+            // the expected byte count through the case's `files` override in
+            // problem.yaml, so the save above had to land first — it did.
+            const caseUploaded: string[] = [];
+            for (const c of form.cases ?? []) {
+                for (const b of form.inputs.args) {
+                    if (b.kind !== 'buffer' || b.init !== 'file') continue;
+                    const key = caseFileKey(c.name, b.name);
+                    const f = caseInputFiles[key];
+                    if (!f) continue;
+                    const dest = c.files[b.name];
+                    if (!dest) {
+                        uploadWarnings.push(
+                            `case '${c.name}', buffer '${b.name}': not uploaded — the case has `
+                            + `no file name of its own, and sending it would overwrite `
+                            + `${b.file_name || 'the declared binary'} for every other case`
+                        );
+                        continue;
+                    }
+                    try {
+                        await uploadProblemInput(res.name, b.name, f, c.name);
+                        caseUploaded.push(key);
+                        setServerFiles((prev) => ({ ...prev, [dest]: f.size }));
+                    } catch (err) {
+                        uploadWarnings.push(
+                            `case '${c.name}', buffer '${b.name}': ${err instanceof Error ? err.message : String(err)}`
+                        );
+                    }
+                }
+            }
+            if (caseUploaded.length) {
+                setCaseInputFiles((prev) => {
+                    const next = { ...prev };
+                    for (const k of caseUploaded) delete next[k];
                     return next;
                 });
             }
@@ -981,7 +1093,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                                     className="text-xs font-mono w-40"
                                                     placeholder="case name"
                                                     value={c.name}
-                                                    onChange={(e) => updateCase(i, { name: e.target.value })}
+                                                    onChange={(e) => renameCase(i, e.target.value)}
                                                 />
                                                 {i === 0 && (
                                                     <span className="text-[10px] uppercase tracking-wide text-zinc-500">
@@ -1009,7 +1121,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                                     variant="ghost"
                                                     size="sm"
                                                     className="text-xs"
-                                                    onClick={() => update('cases', cases.filter((_, j) => j !== i))}
+                                                    onClick={() => removeCase(i)}
                                                 >
                                                     <Trash2 className="h-3 w-3" />
                                                 </Button>
@@ -1040,25 +1152,64 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
 
                                             {fileBuffers.length > 0 && (
                                                 <div className="grid grid-cols-2 gap-2">
-                                                    {fileBuffers.map((b) => (
+                                                    {fileBuffers.map((b) => {
+                                                        const picked = caseInputFiles[caseFileKey(c.name, b.name)];
+                                                        // Blank means the case reads the declared binary, shared with
+                                                        // every other case that does not override it.
+                                                        const dest = c.files[b.name] || (b.file_name ?? '');
+                                                        const shared = !c.files[b.name];
+                                                        const bytes = dest ? serverFiles[dest] : undefined;
+                                                        return (
                                                         <div key={b.name} className="space-y-1">
                                                             <Label className="text-[10px] font-mono text-zinc-500">
                                                                 {b.name} file
                                                             </Label>
-                                                            <Input
-                                                                className="text-xs font-mono"
-                                                                placeholder={b.file_name ?? ''}
-                                                                title="Blank uses the declared file_name."
-                                                                value={c.files[b.name] ?? ''}
-                                                                onChange={(e) => {
-                                                                    const files = { ...c.files };
-                                                                    if (e.target.value === '') delete files[b.name];
-                                                                    else files[b.name] = e.target.value;
-                                                                    updateCase(i, { files });
-                                                                }}
-                                                            />
+                                                            <div className="flex gap-1">
+                                                                <label
+                                                                    className="h-8 flex-1 min-w-0 inline-flex items-center gap-1 rounded border px-2 text-xs cursor-pointer hover:bg-accent"
+                                                                    title="This case's own binary. Raw little-endian of the buffer dtype; the byte count must equal THIS case's size × sizeof(dtype). Uploaded when the problem is saved."
+                                                                >
+                                                                    <input
+                                                                        type="file"
+                                                                        className="hidden"
+                                                                        onChange={(e) => pickCaseInputFile(i, b, e)}
+                                                                    />
+                                                                    <Upload size={12} className="shrink-0" />
+                                                                    <span className="truncate">
+                                                                        {picked ? picked.name : 'choose file…'}
+                                                                    </span>
+                                                                </label>
+                                                                <Input
+                                                                    className="text-xs font-mono w-32 h-8"
+                                                                    placeholder={b.file_name ?? ''}
+                                                                    title="Stored under inputs/ as this name. Blank uses the declared file_name — which every other case reads, so a case with its own binary needs its own name."
+                                                                    value={c.files[b.name] ?? ''}
+                                                                    onChange={(e) => {
+                                                                        const files = { ...c.files };
+                                                                        if (e.target.value === '') delete files[b.name];
+                                                                        else files[b.name] = e.target.value;
+                                                                        updateCase(i, { files });
+                                                                    }}
+                                                                />
+                                                            </div>
+                                                            {mode === 'edit' && dest && (
+                                                                <span
+                                                                    className={`text-[10px] block truncate ${bytes !== undefined ? 'text-emerald-400' : 'text-amber-400'}`}
+                                                                    title={`inputs/${dest}`}
+                                                                >
+                                                                    {bytes !== undefined
+                                                                        ? `${shared ? 'shared ' : ''}${dest} on server (${fmtBytes(bytes)})${picked ? ' — will be replaced' : ''}`
+                                                                        : `${dest} not uploaded yet`}
+                                                                </span>
+                                                            )}
+                                                            {picked && shared && (
+                                                                <span className="text-[10px] text-amber-400">
+                                                                    give this case its own file name, or the upload overwrites the shared one
+                                                                </span>
+                                                            )}
                                                         </div>
-                                                    ))}
+                                                        );
+                                                    })}
                                                 </div>
                                             )}
                                         </div>

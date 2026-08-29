@@ -184,3 +184,103 @@ def test_ensure_inputs_hpp_is_unchanged_without_cases(tmp_path):
     }), encoding="utf-8")
 
     assert "N = 1024" in ensure_inputs_hpp(problem).read_text(encoding="utf-8")
+
+
+# ── Per-case input files ─────────────────────────────────────────────────────
+#
+# A case may bind its own binary for an init=file buffer. The header still comes from
+# the primary case, but every case's files must exist before the run starts: the
+# alternative is the driver aborting at static-init minutes in, with the failure
+# reported as a tuner crash rather than a missing file.
+
+
+def _file_problem(tmp_path, cases):
+    """A problem dir whose one buffer is init=file, with the given cases block."""
+    import yaml as _yaml
+
+    (tmp_path / "inputs.yaml").write_text(
+        _yaml.safe_dump(
+            {
+                "args": [
+                    {"kind": "scalar", "name": "N", "dtype": "int", "value": 16},
+                    {
+                        "kind": "buffer",
+                        "name": "A",
+                        "dtype": "float",
+                        "size": "N",
+                        "init": "file",
+                        "file_name": "A.bin",
+                        "validate": True,
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "problem.yaml").write_text(
+        _yaml.safe_dump({"name": "t", "cases": cases}), encoding="utf-8"
+    )
+    (tmp_path / "inputs").mkdir(exist_ok=True)
+    return tmp_path
+
+
+def _put(problem_dir, name, elems=16):
+    (problem_dir / "inputs" / name).write_bytes(b"\0" * 4 * elems)
+
+
+def test_preflight_names_the_case_whose_binary_is_missing(tmp_path):
+    from utils.inputs import ensure_inputs_hpp
+
+    p = _file_problem(
+        tmp_path,
+        [{"name": "base"}, {"name": "alt", "files": {"A": "A_alt.bin"}}],
+    )
+    _put(p, "A.bin")  # the primary's file is there; the alt case's is not
+
+    with pytest.raises(FileNotFoundError) as e:
+        ensure_inputs_hpp(p)
+    assert "A_alt.bin" in str(e.value)
+    assert "alt" in str(e.value)
+
+
+def test_preflight_passes_once_every_case_binary_exists(tmp_path):
+    from utils.inputs import ensure_inputs_hpp
+
+    p = _file_problem(
+        tmp_path,
+        [{"name": "base"}, {"name": "alt", "files": {"A": "A_alt.bin"}}],
+    )
+    _put(p, "A.bin")
+    _put(p, "A_alt.bin")
+
+    assert ensure_inputs_hpp(p).is_file()
+
+
+def test_preflight_reports_a_missing_file_once_per_case_that_wants_it(tmp_path):
+    """Two cases sharing one override name is legal — the message should not say it
+    twice."""
+    from utils.inputs import ensure_inputs_hpp
+
+    p = _file_problem(
+        tmp_path,
+        [
+            {"name": "a", "files": {"A": "shared.bin"}},
+            {"name": "b", "files": {"A": "shared.bin"}},
+        ],
+    )
+
+    with pytest.raises(FileNotFoundError) as e:
+        ensure_inputs_hpp(p)
+    assert str(e.value).count("shared.bin") == 1
+
+
+def test_single_case_preflight_message_names_no_case(tmp_path):
+    """The wording every problem without a cases: block has always seen."""
+    from utils.inputs import ensure_inputs_hpp
+
+    p = _file_problem(tmp_path, [])
+
+    with pytest.raises(FileNotFoundError) as e:
+        ensure_inputs_hpp(p)
+    assert "buffer 'A' (init=file)" in str(e.value)
+    assert "case '" not in str(e.value)

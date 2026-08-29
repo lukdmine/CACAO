@@ -50,6 +50,12 @@ export async function fetchProblems(): Promise<ProblemsResponse> {
     return apiFetch<ProblemsResponse>('/api/problems');
 }
 
+export interface InputFileStatus {
+    file_name: string;
+    exists: boolean;
+    bytes: number | null;
+}
+
 export interface ProblemDetailResponse {
     name: string;
     config: Record<string, unknown>;
@@ -60,7 +66,11 @@ export interface ProblemDetailResponse {
     // it never reconstructs form state from C++. Null for a problem with no inputs.yaml.
     inputs: InputsSpec | null;
     // Upload status per init=file buffer (by buffer name); empty for problems without.
-    input_files: Record<string, { file_name: string; exists: boolean; bytes: number | null }>;
+    input_files: Record<string, InputFileStatus>;
+    // Every binary under inputs/, by path relative to it -> bytes. The case editor
+    // checks a typed file name against this, so it can answer for a name that is not
+    // saved yet and for a case problem.yaml has never seen.
+    inputs_dir_files: Record<string, number>;
     has_output: boolean;
 }
 
@@ -72,10 +82,21 @@ export async function fetchProblemDetail(name: string): Promise<ProblemDetailRes
  * Upload a buffer's binary for init=file. Raw body (no multipart): the file IS the
  * body. The server derives file_name from the saved spec and checks the byte count
  * against size * sizeof(dtype) — call it AFTER saving the problem.
+ *
+ * `caseName` targets one of problem.yaml's cases: the destination becomes that case's
+ * `files` override and the byte count is checked against that case's scalars. Both
+ * come from the case — so the case's override must be SAVED before the upload, or the
+ * bytes land on the declared file_name and overwrite the shared binary.
  */
-export async function uploadProblemInput(name: string, buffer: string, file: File) {
+export async function uploadProblemInput(
+    name: string,
+    buffer: string,
+    file: File,
+    caseName?: string,
+) {
+    const q = caseName ? `?case=${encodeURIComponent(caseName)}` : '';
     const res = await fetch(
-        `${API_BASE}/api/problems/${name}/inputs/${encodeURIComponent(buffer)}`,
+        `${API_BASE}/api/problems/${name}/inputs/${encodeURIComponent(buffer)}${q}`,
         { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file },
     );
     if (!res.ok) {

@@ -543,20 +543,26 @@ def load_inputs_spec(path: Path) -> InputsSpec:
     return InputsSpec.model_validate(yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {})
 
 
-def check_input_files(problem_dir, spec: InputsSpec) -> list:
+def check_input_files(problem_dir, spec: InputsSpec, case_name: str = "") -> list:
     """List the init=file buffers whose binary is missing under inputs/.
 
     Callers decide the severity: the save flow reports these as warnings (the UI
     uploads right after saving); the run-start flow must treat any as fatal —
     better than the driver aborting at static-init minutes later with an
     std::runtime_error dug out of a log.
+
+    ``spec`` is a *resolved* spec when a case is being checked, so ``file_name`` is
+    already that case's override. ``case_name`` only labels the message: which case
+    wants the file is the first thing you need and the last thing the path tells you,
+    since two cases may legitimately point at one binary.
     """
     problem_dir = Path(problem_dir)
+    where = f"case '{case_name}': " if case_name else ""
     missing = []
     for b in spec.buffers:
         if b.init == "file" and not (problem_dir / INPUTS_SUBDIR / b.file_name).is_file():
             missing.append(
-                f"buffer '{b.name}' (init=file): "
+                f"{where}buffer '{b.name}' (init=file): "
                 f"{problem_dir / INPUTS_SUBDIR / b.file_name} does not exist — put or "
                 f"upload the binary ({b.size} {b.dtype} elements, raw "
                 f"little-endian) in the problem's {INPUTS_SUBDIR}/ directory"
@@ -598,24 +604,63 @@ def ensure_inputs_hpp(problem_dir) -> Path:
     else:
         problem_yaml = None
 
-    spec = load_inputs_spec(inputs_yaml)
-    # The PRIMARY case's values, not the declared ones. This header is what every prompt
-    # shows the model as the I/O boundary, and what the authoring loop's fast compile
-    # check parses its -D macros from; generating the declared values would show the
-    # model a shape no case actually runs. Identical to the declared spec when there is
-    # no `cases:` block, or when the primary overrides nothing.
+    declared = load_inputs_spec(inputs_yaml)
+    cases = []
     try:
         from utils.cases import case_list
 
         if problem_yaml is not None:
             cfg = _yaml.safe_load(problem_yaml.read_text(encoding="utf-8")) or {}
-            spec = spec.for_case(case_list(cfg)[0])
+            cases = case_list(cfg)
     except Exception as e:
         from utils.log import log
 
-        log(f"Could not apply the primary case to inputs.hpp: {e}", "WARN")
+        log(f"Could not read this problem's cases: {e}", "WARN")
 
-    missing = check_input_files(problem_dir, spec)
+    # The header carries the PRIMARY case's values, not the declared ones. It is what
+    # every prompt shows the model as the I/O boundary, and what the authoring loop's
+    # fast compile check parses its -D macros from; generating the declared values
+    # would show the model a shape no case actually runs. Identical to the declared
+    # spec when there is no `cases:` block, or when the primary overrides nothing.
+    spec = declared
+    if cases:
+        try:
+            spec = declared.for_case(cases[0])
+        except Exception as e:
+            from utils.log import log
+
+            log(f"Could not apply the primary case to inputs.hpp: {e}", "WARN")
+
+    # The files check covers EVERY case, not just the primary. A run compiles, tunes
+    # and validates all of them, so a binary only case 3 names is just as fatal — and
+    # left unchecked it surfaces as the driver aborting at static-init, minutes in,
+    # reported as a tuner crash rather than a missing file. Cases legitimately share a
+    # binary, so each (buffer, file) pair is reported once however many name it.
+    def is_file_buffer(a) -> bool:
+        return a.kind == "buffer" and a.init == "file"
+
+    missing: list = []
+    seen: set = set()
+    for case in cases or [None]:
+        try:
+            resolved = declared.for_case(case) if case is not None else declared
+        except Exception as e:
+            from utils.log import log
+
+            log(f"Could not resolve case '{case.name}' to check its files: {e}", "WARN")
+            continue
+        fresh = [
+            a
+            for a in resolved.args
+            if not (is_file_buffer(a) and (a.name, a.file_name) in seen)
+        ]
+        seen.update(
+            (a.name, a.file_name) for a in resolved.args if is_file_buffer(a)
+        )
+        label = case.name if case is not None and len(cases) > 1 else ""
+        missing += check_input_files(
+            problem_dir, resolved.model_copy(update={"args": fresh}), label
+        )
     if missing:
         raise FileNotFoundError("Missing input files: " + "; ".join(missing))
     out = problem_dir / "inputs.hpp"
