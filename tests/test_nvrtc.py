@@ -39,8 +39,9 @@ def test_values_are_not_round_tripped_through_numbers():
         ("8.6", "--gpu-architecture=compute_86"),
         ("9.0", "--gpu-architecture=compute_90"),
         ("7", "--gpu-architecture=compute_70"),
-        (None, "--gpu-architecture=compute_52"),
-        ("nonsense", "--gpu-architecture=compute_52"),
+        # Unknown capability: no flag — NVRTC targets its lowest supported arch.
+        (None, None),
+        ("nonsense", None),
     ],
 )
 def test_arch_option_matches_ktt_format(capability, expected):
