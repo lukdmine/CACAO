@@ -22,15 +22,82 @@ from utils.log import log
 from utils.results import check_results, ensure_results_loadable
 from state.types import WorkingState
 
-# Key metrics for CUDA optimization.
+# Key metrics for CUDA optimization. Names verified against NCU's metric databases
+# for every supported chip (ncu --list-chips: Turing -> Blackwell, incl. Jetson/DGX
+# Spark SoCs). A name unknown to the local GPU/NCU is skipped with an stderr warning
+# and exit 0, so generation-specific spellings can be listed freely - coverage was
+# audited as: dram bytes spellings differ per generation, SoCs (ga10b/gb10b) expose
+# DRAM only via mcc__ (gb20b/c expose no DRAM counter at all), and l2__throughput
+# exists on no chip this NCU knows - but Pascal/Volta databases are no longer
+# shipped to audit, so it stays as fallback insurance for CUDA-12-era toolchains.
 NCU_METRICS = [
     "gpu__time_duration.sum",
     "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+    # SoC DRAM throughput (read/write are separate on Jetson/DGX-Spark).
+    "mcc__dram_throughput_op_read.avg.pct_of_peak_sustained_elapsed",
+    "mcc__dram_throughput_op_write.avg.pct_of_peak_sustained_elapsed",
     "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+    # Issue-slot utilization + FMA/tensor pipe saturation: separates issue-bound,
+    # compute-bound and latency-bound kernels.
+    "smsp__issue_active.avg.pct_of_peak_sustained_elapsed",
+    "sm__inst_executed_pipe_fma.avg.pct_of_peak_sustained_active",
+    # Achieved occupancy.
     "sm__warps_active.avg.pct_of_peak_sustained_active",
-    "l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum.per_second",
+    # L2/L1 throughput and hit rates (reuse from tiling/staging). l2__ is the
+    # fallback spelling for toolchains whose chips predate the audit (see header).
+    "lts__throughput.avg.pct_of_peak_sustained_elapsed",
     "l2__throughput.avg.pct_of_peak_sustained_elapsed",
+    "lts__t_sector_hit_rate.pct",
+    "l2__t_sector_hit_rate.pct",
+    "l1tex__t_sector_hit_rate.pct",
+    # Register-spill traffic into local memory (~0 = register pressure is contained)
+    # and branch uniformity (100% = no divergence from boundary conditions).
+    "l1tex__t_sectors_pipe_lsu_mem_local_op_ld.sum",
+    "l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum",
+    "sm__sass_average_branch_targets_threads_uniform.pct",
+    # Actual DRAM traffic -> real arithmetic intensity.
+    "dram__bytes_op_read.sum",
+    "dram__bytes_read.sum",
+    "dram__bytes_op_write.sum",
+    "dram__bytes_write.sum",
+    # Tensor-pipe utilization (0% = WMMA/WGMMA not engaging) and shared-memory bank
+    # conflicts. Stable names Turing->Blackwell; Pascal lacks both pipes (metric is
+    # absent -> skipped), which is itself the correct signal there.
+    "sm__inst_executed_pipe_tensor.avg.pct_of_peak_sustained_active",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum",
+    "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum",
+    # Global-load bandwidth at L1 and access coalescing (4 sectors/request = perfect
+    # fp32, 32 = fully scattered).
+    "l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum.per_second",
+    "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio",
+    "l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio",
+    # Top stall reasons: memory latency vs. dependency vs. sync bound.
+    "smsp__average_warp_latency_issue_stalled_long_scoreboard.ratio",
+    "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio",
+    "smsp__average_warp_latency_issue_stalled_wait.ratio",
+    "smsp__average_warps_issue_stalled_wait_per_issue_active.ratio",
+    "smsp__average_warp_latency_issue_stalled_barrier.ratio",
+    "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio",
 ]
+
+# Columns worth keeping besides NCU_METRICS. --page raw always emits ~300 columns
+# (device attributes, nvlink/numa/c2clink, profiler bookkeeping) that no flag
+# removes, so the parser whitelists instead. Only launch facts the LLM cannot
+# already know are kept: registers/thread is compiler-decided, the occupancy limits
+# name the binding constraint, waves captures grid-vs-SM fit. Grid/block sizes are
+# the LLM's own launch config (also in results_summary) and are dropped.
+# "Kernel Name" is not optimization signal either, but the parser needs it to
+# attribute rows to stages of a multi-kernel pipeline — it is never emitted.
+_NCU_KEEP_COLUMNS = {
+    # Theoretical occupancy ceiling: paired with achieved (sm__warps_active), the gap
+    # separates a register/smem cap from launch-tail loss.
+    "sm__maximum_warps_per_active_cycle_pct",
+    "launch__registers_per_thread",
+    "launch__occupancy_limit_blocks",
+    "launch__occupancy_limit_registers",
+    "launch__occupancy_limit_shared_mem",
+    "launch__waves_per_multiprocessor",
+} | set(NCU_METRICS)
 
 
 async def check_ncu_available() -> bool:
@@ -72,10 +139,12 @@ def parse_ncu_csv(csv_output: str) -> dict:
     """
     Parse NCU CSV (--page raw) into a metrics dict.
 
-    One row per kernel launch (header + a units row + data rows). For a single
-    kernel the metrics are returned flat; for a multi-kernel pipeline each row's
-    metrics are prefixed with the kernel name (duplicates get a #N suffix), so a
-    pipeline yields isolated per-stage metrics.
+    Only columns in _NCU_KEEP_COLUMNS survive — the raw page emits hundreds of
+    device-attribute/bookkeeping columns that would otherwise land verbatim in the
+    LLM prompt. One row per kernel launch (header + a units row + data rows). For a
+    single kernel the metrics are returned flat; for a multi-kernel pipeline each
+    row's metrics are prefixed with the kernel name (duplicates get a #N suffix), so
+    a pipeline yields isolated per-stage metrics.
     """
     try:
         csv_lines = [
@@ -96,9 +165,9 @@ def parse_ncu_csv(csv_output: str) -> dict:
             name = r.get("Kernel Name", "") or "kernel"
             metrics = {}
             for col, raw_value in r.items():
-                if not col or not raw_value or raw_value in ("no data", ""):
+                if col not in _NCU_KEEP_COLUMNS:
                     continue
-                if col.startswith("device__attribute_"):
+                if not raw_value or raw_value in ("no data", ""):
                     continue
                 try:
                     metrics[col] = _to_number(raw_value)
@@ -201,6 +270,13 @@ async def profile_node(state: WorkingState) -> WorkingState:
         "--csv",
         "--page",
         "raw",
+        # Skip the default section set; collect launch/occupancy stats explicitly.
+        "--set",
+        "none",
+        "--section",
+        "LaunchStats",
+        "--section",
+        "Occupancy",
         "--metrics",
         ",".join(NCU_METRICS),
         "--target-processes",
