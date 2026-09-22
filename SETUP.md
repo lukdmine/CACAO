@@ -50,7 +50,9 @@ cd KTT && git checkout v2.3.1
 # For a dedicated install, use its root, e.g. /usr/local/cuda.
 export CUDA_PATH=/usr
 
-./premake5 gmake
+# --no-opencl: the framework driver uses KTT's CUDA backend only, and CUDA 12
+# no longer ships the CL/cl.h headers the OpenCL backend needs.
+./premake5 gmake --no-opencl
 cd Build
 make config=release_x86_64 Ktt -j$(nproc)
 
@@ -174,7 +176,7 @@ is pure C++ and does not need them. Rebuild without the flag — and delete the
 stale objects first, or make will silently relink the old Python ones:
 
 ```bash
-cd KTT && CUDA_PATH=/usr ./premake5 gmake
+cd KTT && CUDA_PATH=/usr ./premake5 gmake --no-opencl
 cd Build && rm -rf x86_64_Release/obj
 make config=release_x86_64 Ktt -j$(nproc)
 ```

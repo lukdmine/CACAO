@@ -445,7 +445,7 @@ else
     # the bindings compiles them into libktt.so itself (premake5.lua copies the
     # same .so to pyktt.so), leaving a NEEDED entry for libpython that ld cannot
     # resolve — every driver link then fails with undefined Py* references.
-    "$PREMAKE" gmake
+    "$PREMAKE" gmake --no-opencl
     cd Build
     make config=release_x86_64 Ktt -j"$(nproc)"
     cd "$SCRIPT_DIR"
