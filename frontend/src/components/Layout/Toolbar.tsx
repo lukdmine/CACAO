@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { useAppStore } from '@/store/appStore';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
@@ -159,14 +158,14 @@ export function Toolbar() {
             {runStatus === 'running' && (
                 <div className="flex items-center gap-1.5">
                     {(llmProvider || llmModel) && (
-                        <Badge variant="secondary" className="text-xs font-normal">
+                        <span className="text-xs text-muted-foreground">
                             {[llmProvider, llmModel].filter(Boolean).join(' · ')}
-                        </Badge>
+                        </span>
                     )}
-                    <Badge variant="outline" className="text-xs text-amber-400 border-amber-500/30">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse mr-1.5 inline-block" />
-                        Running...
-                    </Badge>
+                    <span className="flex items-center gap-1.5 text-xs text-amber-400">
+                        <span className="inline-block size-1.5 animate-pulse rounded-full bg-amber-400" />
+                        Running
+                    </span>
                     <Button
                         size="sm"
                         variant="destructive"
@@ -197,9 +196,10 @@ export function Toolbar() {
 
             {/* Status badge */}
             {runStatus === 'completed' && (
-                <Badge variant="outline" className="text-xs text-emerald-400 border-emerald-500/30">
+                <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+                    <span className="inline-block size-1.5 rounded-full bg-emerald-400" />
                     completed
-                </Badge>
+                </span>
             )}
 
             {/* Spacer */}

@@ -1,20 +1,38 @@
 import { useState, type ReactNode } from 'react';
 import { useSelectedNode } from '@/store/appStore';
 import { useAppStore } from '@/store/appStore';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
+import { Facts } from '@/components/Facts';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from '@/components/ui/dialog';
 import { getStatusStyle, formatTime, formatSpeedup } from '@/utils/statusColors';
+import { CaseResults } from './CaseResults';
+import { BranchHistory } from './BranchHistory';
+import { branchCaseRange } from './caseScale';
 import { stopBranch, resumeBranch, messageBranch, changeDecision, configureBranch, deleteBranch } from '@/api/client';
-import { refreshTree, useIterationDetail } from '@/api/hooks';
+import { refreshTree, useAnalysis, useIterationDetail } from '@/api/hooks';
 import { toast } from 'sonner';
-import { X, Square, Play, MessageSquare, Send, Settings2, Timer, Zap, CheckCircle2, XCircle, Trash2, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react';
+import { X, Square, Play, MessageSquare, Send, Settings2, CheckCircle2, XCircle, Trash2, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react';
 
 function branchIdFromNodeId(nodeId: string): string {
     return nodeId.replace(/^branch\//, '');
+}
+
+/** Section label. The one place medium weight is used besides the title. */
+function Caption({ children }: { children: ReactNode }) {
+    return <span className="block text-xs font-medium text-muted-foreground">{children}</span>;
+}
+
+/** Every block of code or output shares one quiet surface; colour is reserved for data. */
+const PRE = 'mt-1 rounded-md bg-muted/40 p-2 text-[11px] font-mono whitespace-pre-wrap overflow-x-auto';
+
+/** A decision word is coloured only when it is an outcome, not a continuation. */
+function decisionTone(action: string): string {
+    if (action === 'retry') return 'text-red-400';
+    if (action === 'stop') return 'text-emerald-400';
+    return 'text-muted-foreground';
 }
 
 /** Stand-in for a section whose body is still in flight, or never arrived.
@@ -73,8 +91,26 @@ export function DetailPanel() {
         && !['success', 'failed', 'branching'].includes(node.status);
 
     const iterations = node?.iterations ?? [];
+    // One axis for every per-case mark in this branch. Derived from the whole
+    // history so a case at the same speedup lands in the same place every time.
+    const caseRange = branchCaseRange(iterations);
     const lastIterNum = iterations.length ? iterations[iterations.length - 1].iter_num : null;
     const openIter = openState.nodeId === nodeId ? openState.iter : lastIterNum;
+
+    // A click in the branch history opens that iteration and brings it into view.
+    // The scroll waits a frame so the accordion has re-rendered with it open.
+    const selectIter = (iter: number) => {
+        setOpenState({ nodeId, iter });
+        requestAnimationFrame(() => {
+            document
+                .getElementById(`iter-item-${iter}`)
+                ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        });
+    };
+
+    // Phase-1 work product, and the root node is the only place it belongs: it is
+    // about the problem, not about any one branch's bet on it.
+    const { analysis, loading: analysisLoading } = useAnalysis(activeProblem, isRoot, isRunning);
 
     // Only the newest iteration of a running branch can still change; everything
     // else is immutable and served from cache after the first open.
@@ -171,49 +207,53 @@ export function DetailPanel() {
 
     return (
         <ScrollArea className="h-full">
-            <div className="p-4 space-y-4">
-                {/* Header */}
-                <div className="flex items-center justify-between">
-                    <h2 className="font-bold text-lg">{node.strategy.name}</h2>
-                    <button onClick={() => selectNode(null)} className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
-                        <X size={18} />
+            <div className="space-y-5 p-4">
+                {/* Header: the name, then status and the headline numbers as one line. */}
+                <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 space-y-1">
+                        <h2 className="text-base font-medium leading-tight">{node.strategy.name}</h2>
+                        <Facts
+                            className="text-xs text-muted-foreground"
+                            items={[
+                                <span key="status" className={`flex items-center gap-1.5 ${style.text}`}>
+                                    <span
+                                        className={`inline-block size-1.5 rounded-full ${style.color} ${
+                                            style.animate ? 'animate-pulse' : ''
+                                        }`}
+                                    />
+                                    {style.label}
+                                </span>,
+                                node.iter_num > 0 && <span key="iter">iter {node.iter_num}/{node.max_iter}</span>,
+                                node.best_time_us !== null && (
+                                    <span key="time" className="font-mono">{formatTime(node.best_time_us)}</span>
+                                ),
+                                node.speedup !== null && (
+                                    <span key="speedup" className="font-mono text-foreground">
+                                        {formatSpeedup(node.speedup)}
+                                    </span>
+                                ),
+                            ]}
+                        />
+                    </div>
+                    <button
+                        onClick={() => selectNode(null)}
+                        className="shrink-0 cursor-pointer text-muted-foreground transition-colors hover:text-foreground"
+                    >
+                        <X size={16} />
                     </button>
-                </div>
-
-                {/* Status + metrics */}
-                <div className="flex items-center gap-2 flex-wrap">
-                    <Badge variant="outline" className={`${style.text} ${style.border}`}>
-                        <span className={`w-2 h-2 rounded-full ${style.color} mr-1.5 inline-block ${style.animate ? 'animate-pulse' : ''}`} />
-                        {style.label}
-                    </Badge>
-                    {node.iter_num > 0 && (
-                        <Badge variant="secondary" className="text-xs">
-                            Iter {node.iter_num}/{node.max_iter}
-                        </Badge>
-                    )}
-                    {node.best_time_us !== null && (
-                        <Badge variant="secondary" className="text-xs font-mono">
-                            {formatTime(node.best_time_us)}
-                        </Badge>
-                    )}
-                    {node.speedup !== null && (
-                        <Badge variant="secondary" className="text-xs font-mono text-emerald-400">
-                            {formatSpeedup(node.speedup)}
-                        </Badge>
-                    )}
                 </div>
 
                 {/* Branch controls */}
                 {!isRoot && (
-                    <div className="flex items-center gap-1.5 flex-wrap">
+                    <div className="-ml-2 flex flex-wrap items-center gap-0.5">
                         {isActive && !isStopped && (
-                            <Button size="sm" variant="outline" className="text-xs h-7" onClick={handleStop} disabled={isStopping}>
+                            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={handleStop} disabled={isStopping}>
                                 {isStopping ? <Loader2 size={10} className="mr-1 animate-spin" /> : <Square size={10} className="mr-1" />}
                                 {isStopping ? 'Stopping...' : 'Stop'}
                             </Button>
                         )}
                         {isStopped && (
-                            <Button size="sm" variant="outline" className="text-xs h-7 text-emerald-400 border-emerald-500/30" onClick={handleResume} disabled={isResuming}>
+                            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={handleResume} disabled={isResuming}>
                                 {isResuming ? <Loader2 size={10} className="mr-1 animate-spin" /> : <Play size={10} className="mr-1" />}
                                 {isResuming ? 'Resuming...' : 'Resume'}
                             </Button>
@@ -221,7 +261,7 @@ export function DetailPanel() {
                         <Button
                             size="sm"
                             variant="ghost"
-                            className="text-xs h-7"
+                            className="h-7 text-xs text-muted-foreground"
                             onClick={() => { setEditingMaxIter(true); setMaxIterValue(String(node.max_iter)); }}
                         >
                             <Settings2 size={10} className="mr-1" />
@@ -232,7 +272,7 @@ export function DetailPanel() {
                                 <Button
                                     size="sm"
                                     variant="ghost"
-                                    className="text-xs h-7 text-red-400 hover:text-red-300 hover:bg-red-500/10"
+                                    className="h-7 text-xs text-red-400/80 hover:bg-red-500/10 hover:text-red-300"
                                     disabled={isRunning}
                                     style={isRunning ? { pointerEvents: "none" } : {}}
                                     onClick={() => setConfirmDelete(true)}
@@ -277,84 +317,108 @@ export function DetailPanel() {
                             onChange={(e) => setMessageText(e.target.value)}
                             onKeyDown={(e) => e.key === 'Enter' && handleSendMessage()}
                             placeholder="Send a message to this branch..."
-                            className="flex-1 rounded border bg-muted px-3 py-1.5 text-xs placeholder:text-muted-foreground/50"
+                            className="flex-1 rounded-md border bg-transparent px-3 py-1.5 text-xs placeholder:text-muted-foreground/50"
                         />
-                        <Button size="sm" variant="outline" className="h-7 px-2" onClick={handleSendMessage} disabled={isSending || !messageText.trim()}>
+                        <Button size="sm" variant="ghost" className="h-7 px-2" onClick={handleSendMessage} disabled={isSending || !messageText.trim()}>
                             <Send size={12} />
                         </Button>
                     </div>
                 )}
 
-                {/* User messages display */}
+                {/* User messages */}
                 {(node.user_messages?.length ?? 0) > 0 && (
-                    <>
-                        <Separator />
-                        <div>
-                            <span className="text-xs font-medium text-muted-foreground mb-1.5 block flex items-center gap-1">
-                                <MessageSquare size={12} /> User Messages
-                            </span>
-                            <div className="space-y-1">
-                                {node.user_messages!.map((m, i) => (
-                                    <div key={i} className="text-xs p-2 bg-blue-950/30 border border-blue-500/20 rounded">
-                                        <span className="text-muted-foreground">iter {m.iter_num}:</span>{' '}
-                                        <span>{m.content}</span>
-                                    </div>
-                                ))}
-                            </div>
+                    <div>
+                        <Caption>
+                            <span className="flex items-center gap-1"><MessageSquare size={12} /> Messages</span>
+                        </Caption>
+                        <div className="mt-1.5 space-y-1 border-l border-border pl-2.5 text-xs">
+                            {node.user_messages!.map((m, i) => (
+                                <div key={i}>
+                                    <span className="text-muted-foreground">iter {m.iter_num}</span>{' '}
+                                    <span>{m.content}</span>
+                                </div>
+                            ))}
                         </div>
-                    </>
+                    </div>
                 )}
 
-                <Separator />
-
-                {/* Strategy info */}
-                <div className="space-y-2 text-sm">
+                {/* Strategy */}
+                <div className="space-y-2.5 text-sm">
                     <div>
-                        <span className="text-muted-foreground text-xs font-medium">Description</span>
+                        <Caption>Description</Caption>
                         <p className="mt-0.5">{node.strategy.description}</p>
                     </div>
                     <div>
-                        <span className="text-muted-foreground text-xs font-medium">Hypothesis</span>
+                        <Caption>Hypothesis</Caption>
                         <p className="mt-0.5">{node.strategy.hypothesis}</p>
                     </div>
                     {node.strategy.key_parameters.length > 0 && (
                         <div>
-                            <span className="text-muted-foreground text-xs font-medium">Parameters</span>
-                            <div className="flex flex-wrap gap-1 mt-1">
+                            <Caption>Parameters</Caption>
+                            <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px] text-muted-foreground">
                                 {node.strategy.key_parameters.map((p) => (
-                                    <Badge key={p} variant="outline" className="text-xs font-mono">{p}</Badge>
+                                    <span key={p}>{p}</span>
                                 ))}
                             </div>
                         </div>
                     )}
                 </div>
 
+                {/* Phase 1's read of the problem and its reference kernel. Root only —
+                    every branch inherits it, so repeating it per branch would say the
+                    same thing four times. Collapsed for the same reason as the plan. */}
+                {isRoot && (analysis || analysisLoading || isRunning) && (
+                    analysis ? (
+                        <Accordion type="single" collapsible className="text-xs">
+                            <AccordionItem value="analysis" className="border-b-0">
+                                <AccordionTrigger className="py-1.5 text-xs font-medium text-muted-foreground hover:no-underline hover:text-foreground">
+                                    Analysis
+                                </AccordionTrigger>
+                                <AccordionContent>
+                                    <pre className={PRE}>{analysis}</pre>
+                                </AccordionContent>
+                            </AccordionItem>
+                        </Accordion>
+                    ) : (
+                        <p className="flex items-center gap-1.5 py-1.5 text-xs text-muted-foreground">
+                            <Loader2 size={11} className="animate-spin" />
+                            {analysisLoading ? 'Loading analysis…' : 'Analyzing the reference kernel…'}
+                        </p>
+                    )
+                )}
+
                 {/* Branch-level: planning runs once per branch, so the plan sits outside
                     the iteration list rather than being repeated inside iteration 1.
                     Collapsed by default — it is ~10k chars and read once. */}
                 {node.plan && (
-                    <>
-                        <Separator />
-                        <Accordion type="single" collapsible className="text-xs">
-                            <AccordionItem value="branch-plan" className="border-b-0">
-                                <AccordionTrigger className="py-1.5 text-xs">Plan</AccordionTrigger>
-                                <AccordionContent>
-                                    <pre className="mt-1 p-2 bg-muted rounded text-[11px] whitespace-pre-wrap overflow-x-auto">{node.plan}</pre>
-                                </AccordionContent>
-                            </AccordionItem>
-                        </Accordion>
-                    </>
+                    <Accordion type="single" collapsible className="text-xs">
+                        <AccordionItem value="branch-plan" className="border-b-0">
+                            <AccordionTrigger className="py-1.5 text-xs font-medium text-muted-foreground hover:no-underline hover:text-foreground">
+                                Plan
+                            </AccordionTrigger>
+                            <AccordionContent>
+                                <pre className={PRE}>{node.plan}</pre>
+                            </AccordionContent>
+                        </AccordionItem>
+                    </Accordion>
                 )}
 
-                {/* Iteration accordion */}
+                {/* Branch history — every iteration's speedup at once, with the
+                    per-case grid underneath when the problem declares cases. Renders
+                    once there are two iterations with results to compare. Clicking a
+                    column opens that iteration below. */}
+                <BranchHistory iterations={iterations} activeIter={openIter} onSelectIter={selectIter} />
+
+                {/* Iterations */}
                 {node.iterations.length > 0 && (
                     <>
                         <Separator />
                         <div>
-                            <span className="text-xs font-medium text-muted-foreground mb-2 block">Iterations</span>
+                            <Caption>Iterations</Caption>
                             <Accordion
                                 type="single"
                                 collapsible
+                                className="mt-1"
                                 value={openIter !== null ? `iter-${openIter}` : ''}
                                 onValueChange={(v) => setOpenState({
                                     nodeId,
@@ -367,111 +431,83 @@ export function DetailPanel() {
                                     function body<T>(v: T | null | undefined, render: (v: T) => ReactNode) {
                                         return v ? render(v) : <Pending loading={detailLoading} />;
                                     }
+                                    const rs = iter.results_summary;
+                                    const canChange = !isRoot && (iter.decision || iter.status === 'decided');
                                     return (
                                     <AccordionItem
                                         key={iter.iter_num}
+                                        id={`iter-item-${iter.iter_num}`}
                                         value={`iter-${iter.iter_num}`}
-                                        className="data-[state=open]:pl-3 data-[state=open]:pr-1"
                                     >
-                                        <AccordionTrigger className="text-sm py-2">
-                                            <div className="flex items-center gap-2">
-                                                <span>Iteration {iter.iter_num}</span>
-                                                {iter.decision && (
-                                                    <Badge
-                                                        variant="outline"
-                                                        className={`text-[10px] px-1.5 py-0 ${iter.decision.action === 'stop' ? 'text-emerald-400 border-emerald-500/30' :
-                                                            iter.decision.action === 'retry' ? 'text-red-400 border-red-500/30' :
-                                                                iter.decision.action === 'branch' ? 'text-cyan-400 border-cyan-500/30' :
-                                                                    'text-blue-400 border-blue-500/30'
-                                                            }`}
-                                                    >
-                                                        {iter.decision.action}
-                                                    </Badge>
-                                                )}
-                                                {iter.results_summary?.best_time_us != null && (
-                                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-mono">
-                                                        <Timer size={10} className="mr-0.5" />
-                                                        {formatTime(iter.results_summary.best_time_us)}
-                                                    </Badge>
-                                                )}
-                                                {iter.results_summary?.speedup != null && (
-                                                    <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-mono text-emerald-400">
-                                                        <Zap size={10} className="mr-0.5" />
-                                                        {formatSpeedup(iter.results_summary.speedup)}
-                                                    </Badge>
-                                                )}
-                                            </div>
+                                        <AccordionTrigger className="py-2 text-sm hover:no-underline">
+                                            <Facts
+                                                className="text-xs"
+                                                items={[
+                                                    <span key="name" className="text-sm text-foreground">Iteration {iter.iter_num}</span>,
+                                                    iter.decision && (
+                                                        <span key="decision" className={decisionTone(iter.decision.action)}>
+                                                            {iter.decision.action}
+                                                        </span>
+                                                    ),
+                                                    rs?.best_time_us != null && (
+                                                        <span key="time" className="font-mono text-muted-foreground">
+                                                            {formatTime(rs.best_time_us)}
+                                                        </span>
+                                                    ),
+                                                    rs?.speedup != null && (
+                                                        <span key="speedup" className="font-mono text-foreground/80">
+                                                            {formatSpeedup(rs.speedup)}
+                                                        </span>
+                                                    ),
+                                                ]}
+                                            />
                                         </AccordionTrigger>
                                         <AccordionContent>
-                                            <div className="ml-1 border-l-2 border-primary/30 pl-3">
-                                                {((!isRoot && iter.decision) || iter.results_summary) && (
-                                                    <div className="space-y-2 mb-3">
-                                                        {!isRoot && (iter.decision || iter.status === 'decided') && (
-                                                            <div className="flex items-start justify-start">
-                                                                <Button
-                                                                    size="sm"
-                                                                    variant="outline"
-                                                                    className="text-xs h-6 text-amber-400 border-amber-500/30 hover:bg-amber-500/10"
-                                                                    onClick={() => { setChangeIter(iter.iter_num); setChangeMessage(''); }}
-                                                                >
-                                                                    <RefreshCw size={10} className="mr-1" />
-                                                                    {iter.decision ? 'Change Decision' : 'Retry Iteration'}
-                                                                </Button>
-                                                            </div>
-                                                        )}
-
-                                                        {iter.results_summary && (
-                                                            <div className={`w-full p-2.5 rounded border ${iter.results_summary.has_success
-                                                                ? 'bg-emerald-950/20 border-emerald-500/20'
-                                                                : iter.results_summary.num_total > 0
-                                                                    ? 'bg-red-950/20 border-red-500/20'
-                                                                    : 'bg-muted border-border'
-                                                                }`}>
-                                                                <div className="flex items-center gap-1.5 mb-2">
-                                                                    {iter.results_summary.has_success
-                                                                        ? <CheckCircle2 size={13} className="text-emerald-400" />
-                                                                        : iter.results_summary.num_total > 0
-                                                                            ? <XCircle size={13} className="text-red-400" />
-                                                                            : null
-                                                                    }
-                                                                    <span className="font-medium">Tuning Results</span>
-                                                                    <span className="text-muted-foreground ml-auto">
-                                                                        {iter.results_summary.num_successful}/{iter.results_summary.num_total} configs passed
-                                                                    </span>
-                                                                </div>
-                                                                {iter.results_summary.best_time_us != null && (
-                                                                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
-                                                                        <div>
-                                                                            <span className="text-muted-foreground">Best time:</span>{' '}
-                                                                            <span className="font-mono font-medium">{formatTime(iter.results_summary.best_time_us)}</span>
-                                                                        </div>
-                                                                        {iter.results_summary.reference_time_us != null && (
-                                                                            <div>
-                                                                                <span className="text-muted-foreground">Ref time:</span>{' '}
-                                                                                <span className="font-mono">{formatTime(iter.results_summary.reference_time_us)}</span>
-                                                                            </div>
-                                                                        )}
-                                                                        {iter.results_summary.speedup != null && (
-                                                                            <div>
-                                                                                <span className="text-muted-foreground">Speedup:</span>{' '}
-                                                                                <span className={`font-mono font-medium ${iter.results_summary.speedup >= 1 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                                                                    {formatSpeedup(iter.results_summary.speedup)}
-                                                                                </span>
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
+                                            <div className="ml-1 space-y-3 border-l border-border pl-3">
+                                                {rs && (
+                                                    <div className="space-y-1.5 text-xs">
+                                                        <div className="flex items-center gap-1.5">
+                                                            {rs.has_success
+                                                                ? <CheckCircle2 size={12} className="text-emerald-400" />
+                                                                : rs.num_total > 0
+                                                                    ? <XCircle size={12} className="text-red-400" />
+                                                                    : null
+                                                            }
+                                                            <span className="font-medium">Tuning results</span>
+                                                            <span className="text-muted-foreground">
+                                                                {rs.num_successful}/{rs.num_total} configs passed
+                                                                {rs.cases ? ' · primary case' : ''}
+                                                            </span>
+                                                        </div>
+                                                        {rs.best_time_us != null && (
+                                                            <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-[11px]">
+                                                                <span className="text-muted-foreground">Best time</span>
+                                                                <span className="font-mono">{formatTime(rs.best_time_us)}</span>
+                                                                {rs.reference_time_us != null && (
+                                                                    <>
+                                                                        <span className="text-muted-foreground">Reference</span>
+                                                                        <span className="font-mono">{formatTime(rs.reference_time_us)}</span>
+                                                                    </>
                                                                 )}
-                                                                {iter.results_summary.best_config && (
-                                                                    <div className="mt-1.5 flex flex-wrap gap-1">
-                                                                        {Object.entries(iter.results_summary.best_config).map(([k, v]) => (
-                                                                            <Badge key={k} variant="outline" className="text-[10px] font-mono px-1.5 py-0">
-                                                                                {k}={v}
-                                                                            </Badge>
-                                                                        ))}
-                                                                    </div>
+                                                                {rs.speedup != null && (
+                                                                    <>
+                                                                        <span className="text-muted-foreground">
+                                                                            {rs.cases ? 'Speedup (geomean)' : 'Speedup'}
+                                                                        </span>
+                                                                        <span className="font-mono">{formatSpeedup(rs.speedup)}</span>
+                                                                    </>
                                                                 )}
                                                             </div>
                                                         )}
+                                                        {rs.best_config && (
+                                                            <div className="flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[11px] text-muted-foreground">
+                                                                {rs.cases && <span>primary:</span>}
+                                                                {Object.entries(rs.best_config).map(([k, v]) => (
+                                                                    <span key={k}>{k}={v}</span>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                        <CaseResults summary={rs} range={caseRange} />
                                                     </div>
                                                 )}
 
@@ -481,105 +517,114 @@ export function DetailPanel() {
                                                 <Accordion type="multiple" className="text-xs">
                                                     {iter.has.kernel_code && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-kernel`}>
-                                                            <AccordionTrigger className="py-1.5 text-xs">Kernel Code</AccordionTrigger>
+                                                            <AccordionTrigger className="py-1.5 text-xs hover:no-underline">Kernel code</AccordionTrigger>
                                                             <AccordionContent>
-                                                                <div className="border-l border-primary/20 pl-3">
-                                                                    {body(detail?.kernel_code, (v) => (
-                                                                        <pre className="mt-1 p-2 bg-zinc-900 rounded text-[11px] text-green-300 whitespace-pre-wrap overflow-x-auto font-mono">{v}</pre>
-                                                                    ))}
-                                                                </div>
+                                                                {body(detail?.kernel_code, (v) => <pre className={PRE}>{v}</pre>)}
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
 
                                                     {iter.has.framework_cpp && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-framework`}>
-                                                            <AccordionTrigger className="py-1.5 text-xs">Framework Driver</AccordionTrigger>
+                                                            <AccordionTrigger className="py-1.5 text-xs hover:no-underline">Framework driver</AccordionTrigger>
                                                             <AccordionContent>
-                                                                <div className="border-l border-primary/20 pl-3">
-                                                                    {body(detail?.framework_cpp, (v) => (
-                                                                        <pre className="mt-1 p-2 bg-zinc-900 rounded text-[11px] text-green-300 whitespace-pre-wrap overflow-x-auto font-mono">{v}</pre>
-                                                                    ))}
-                                                                </div>
+                                                                {body(detail?.framework_cpp, (v) => <pre className={PRE}>{v}</pre>)}
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
 
                                                     {iter.has.run_output && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-output`}>
-                                                            <AccordionTrigger className="py-1.5 text-xs">Run Output</AccordionTrigger>
+                                                            <AccordionTrigger className="py-1.5 text-xs hover:no-underline">Run output</AccordionTrigger>
                                                             <AccordionContent>
-                                                                <div className="border-l border-primary/20 pl-3">
-                                                                    {body(detail?.run_output, (v) => (
-                                                                        <pre className={`mt-1 p-2 rounded text-[11px] whitespace-pre-wrap overflow-x-auto font-mono ${v.includes('ERROR') ? 'bg-red-950/50 text-red-300' : 'bg-zinc-900 text-zinc-300'}`}>
-                                                                            {v}
-                                                                        </pre>
-                                                                    ))}
-                                                                </div>
+                                                                {body(detail?.run_output, (v) => (
+                                                                    <pre className={`${PRE} ${v.includes('ERROR') ? 'border-l-2 border-red-500/60' : ''}`}>
+                                                                        {v}
+                                                                    </pre>
+                                                                ))}
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
 
                                                     {iter.has.ncu_metrics && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-ncu`}>
-                                                            <AccordionTrigger className="py-1.5 text-xs">NCU Metrics</AccordionTrigger>
+                                                            <AccordionTrigger className="py-1.5 text-xs hover:no-underline">NCU metrics</AccordionTrigger>
                                                             <AccordionContent>
-                                                                <div className="border-l border-primary/20 pl-3">
-                                                                    {body(detail?.ncu_metrics, (metrics) => (
-                                                                        <div className="mt-1 overflow-hidden">
-                                                                            <table className="text-[11px]">
-                                                                                <tbody>
-                                                                                    {Object.entries(metrics).map(([key, val]) => (
-                                                                                        <tr key={key} className="border-b last:border-0">
-                                                                                            <td className="py-1 px-2 text-muted-foreground font-mono truncate max-w-[380px]">{key}</td>
-                                                                                            <td className="py-1 px-2 font-mono whitespace-nowrap">{String(val)}</td>
-                                                                                        </tr>
-                                                                                    ))}
-                                                                                </tbody>
-                                                                            </table>
-                                                                        </div>
-                                                                    ))}
-                                                                </div>
+                                                                {body(detail?.ncu_metrics, (metrics) => (
+                                                                    <div className="mt-1 overflow-hidden">
+                                                                        <table className="text-[11px]">
+                                                                            <tbody>
+                                                                                {Object.entries(metrics).map(([key, val]) => (
+                                                                                    <tr key={key} className="border-b last:border-0">
+                                                                                        <td className="max-w-[380px] truncate px-2 py-1 font-mono text-muted-foreground">{key}</td>
+                                                                                        <td className="whitespace-nowrap px-2 py-1 font-mono">{String(val)}</td>
+                                                                                    </tr>
+                                                                                ))}
+                                                                            </tbody>
+                                                                        </table>
+                                                                    </div>
+                                                                ))}
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
 
                                                     {iter.has.proposal && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-proposal`}>
-                                                            <AccordionTrigger className="py-1.5 text-xs">Optimization Proposal</AccordionTrigger>
+                                                            <AccordionTrigger className="py-1.5 text-xs hover:no-underline">Optimization proposal</AccordionTrigger>
                                                             <AccordionContent>
-                                                                <div className="border-l border-pink-500/30 pl-3">
-                                                                    {body(detail?.proposal, (v) => (
-                                                                        <pre className="mt-1 p-2 bg-pink-950/20 border border-pink-500/20 rounded text-[11px] whitespace-pre-wrap overflow-x-auto text-pink-100">{v}</pre>
-                                                                    ))}
-                                                                </div>
+                                                                {body(detail?.proposal, (v) => (
+                                                                    <div className="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed">{v}</div>
+                                                                ))}
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
 
                                                     {iter.decision && (
                                                         <AccordionItem value={`iter-${iter.iter_num}-decision`}>
-                                                            <AccordionTrigger className="py-1.5 text-xs">Decision</AccordionTrigger>
+                                                            <AccordionTrigger className="py-1.5 text-xs hover:no-underline">Decision</AccordionTrigger>
                                                             <AccordionContent>
-                                                                <div className="border-l border-primary/20 pl-3">
-                                                                    <div className="mt-1 p-2 bg-muted rounded space-y-1">
-                                                                        <div><span className="text-muted-foreground">Action:</span> <span className="font-medium">{iter.decision.action}</span></div>
-                                                                        <div><span className="text-muted-foreground">Reasoning:</span> {iter.decision.reasoning}</div>
-                                                                        {iter.decision.feedback && <div><span className="text-muted-foreground">Feedback:</span> {iter.decision.feedback}</div>}
-                                                                        {iter.decision.error_analysis && (
-                                                                            <div className="mt-1 p-2 bg-red-950/30 rounded border border-red-500/20">
-                                                                                <div className="font-medium text-red-400 mb-1">Error Analysis</div>
-                                                                                <div><span className="text-muted-foreground">Type:</span> {iter.decision.error_analysis.error_type}</div>
-                                                                                <div><span className="text-muted-foreground">Cause:</span> {iter.decision.error_analysis.root_cause}</div>
-                                                                                <div><span className="text-muted-foreground">Fix:</span> {iter.decision.error_analysis.suggested_fix}</div>
-                                                                            </div>
-                                                                        )}
-                                                                    </div>
+                                                                <div className="mt-1 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
+                                                                    <span className="text-muted-foreground">Action</span>
+                                                                    <span className="font-medium">{iter.decision.action}</span>
+                                                                    <span className="text-muted-foreground">Reasoning</span>
+                                                                    <span>{iter.decision.reasoning}</span>
+                                                                    {iter.decision.feedback && (
+                                                                        <>
+                                                                            <span className="text-muted-foreground">Feedback</span>
+                                                                            <span>{iter.decision.feedback}</span>
+                                                                        </>
+                                                                    )}
                                                                 </div>
+                                                                {iter.decision.error_analysis && (
+                                                                    <div className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 border-l-2 border-red-500/60 pl-2 text-[11px]">
+                                                                        <span className="col-span-2 font-medium text-red-400">Error analysis</span>
+                                                                        <span className="text-muted-foreground">Type</span>
+                                                                        <span>{iter.decision.error_analysis.error_type}</span>
+                                                                        <span className="text-muted-foreground">Cause</span>
+                                                                        <span>{iter.decision.error_analysis.root_cause}</span>
+                                                                        <span className="text-muted-foreground">Fix</span>
+                                                                        <span>{iter.decision.error_analysis.suggested_fix}</span>
+                                                                    </div>
+                                                                )}
                                                             </AccordionContent>
                                                         </AccordionItem>
                                                     )}
                                                 </Accordion>
+
+                                                {/* The override lives after everything it overrides. A real button,
+                                                    because a text link here was missed; neutral, because amber made
+                                                    it look like a status. */}
+                                                {canChange && (
+                                                    <Button
+                                                        size="sm"
+                                                        variant="outline"
+                                                        className="h-7 text-xs"
+                                                        onClick={() => { setChangeIter(iter.iter_num); setChangeMessage(''); }}
+                                                    >
+                                                        <RefreshCw size={11} className="mr-1" />
+                                                        {iter.decision ? 'Change decision' : 'Retry iteration'}
+                                                    </Button>
+                                                )}
                                             </div>
                                         </AccordionContent>
                                     </AccordionItem>

@@ -1,6 +1,4 @@
 import { useAppStore } from '@/store/appStore';
-import { Badge } from '@/components/ui/badge';
-import { Card } from '@/components/ui/card';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Separator } from '@/components/ui/separator';
 import { NewProblemDialog } from './NewProblemDialog';
@@ -11,6 +9,13 @@ import { refreshProblems } from '@/api/hooks';
 import { toast } from 'sonner';
 
 import { useState } from 'react';
+
+// The problem list has its own three states, none of them an iteration phase.
+const PROBLEM_TONE: Record<string, { text: string; dot: string; animate?: boolean }> = {
+    running: { text: 'text-amber-400', dot: 'bg-amber-400', animate: true },
+    completed: { text: 'text-emerald-400', dot: 'bg-emerald-400' },
+};
+const IDLE_TONE = { text: 'text-muted-foreground', dot: 'bg-muted-foreground/50' };
 
 export function ProblemSidebar() {
     const problems = useAppStore((s) => s.problems);
@@ -49,41 +54,40 @@ export function ProblemSidebar() {
 
             {/* Problem list */}
             <ScrollArea className="flex-1 min-h-0">
-                <div className="p-2 space-y-1.5">
+                <div className="p-2 space-y-0.5">
                     {problems.map((problem) => {
                         const isActive = problem.name === activeProblem;
+                        const tone = PROBLEM_TONE[problem.status] ?? IDLE_TONE;
                         return (
-                            <Card
+                            <div
                                 key={problem.name}
                                 onClick={() => setActiveProblem(problem.name)}
-                                className={`p-3 gap-0 cursor-pointer transition-all duration-150 relative group ${isActive
-                                    ? 'border-primary bg-primary/5 shadow-sm'
-                                    : 'hover:bg-accent border-transparent'
-                                    }`}
+                                className={`group relative cursor-pointer rounded-md px-2.5 py-2 transition-colors ${
+                                    isActive ? 'bg-accent' : 'hover:bg-accent/50'
+                                }`}
                             >
-                                <div className="flex items-center justify-between gap-1 min-w-0">
-                                    <span className={`text-sm font-medium truncate min-w-0 ${isActive ? 'text-primary' : ''}`} title={problem.name}>
+                                <div className="flex items-center justify-between gap-2 min-w-0">
+                                    <span className={`truncate text-sm ${isActive ? 'font-medium' : ''}`} title={problem.name}>
                                         {problem.name}
                                     </span>
-                                    <Badge
-                                        variant="outline"
-                                        className={`shrink-0 text-[10px] px-1.5 py-0 ${problem.status === 'running' ? 'text-amber-400 border-amber-500/30' :
-                                            problem.status === 'completed' ? 'text-emerald-400 border-emerald-500/30' :
-                                                'text-zinc-400 border-zinc-500/30'
+                                    <span className={`flex shrink-0 items-center gap-1 text-[10px] ${tone.text}`}>
+                                        <span
+                                            className={`inline-block size-1.5 rounded-full ${tone.dot} ${
+                                                tone.animate ? 'animate-pulse' : ''
                                             }`}
-                                    >
+                                        />
                                         {problem.status}
-                                    </Badge>
+                                    </span>
                                 </div>
                                 {problem.description && (
                                     <p
-                                        className="text-[11px] text-muted-foreground mt-1 pr-20 line-clamp-2 break-words"
+                                        className="mt-0.5 line-clamp-2 break-words pr-16 text-[11px] text-muted-foreground"
                                         title={problem.description}
                                     >
                                         {problem.description}
                                     </p>
                                 )}
-                                <div className="absolute bottom-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                                <div className="absolute bottom-1.5 right-1.5 flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
                                     <div onClick={(e) => e.stopPropagation()}>
                                         <NewProblemDialog
                                             mode="edit"
@@ -113,7 +117,7 @@ export function ProblemSidebar() {
                                         <Trash2 size={13} />
                                     </button>
                                 </div>
-                            </Card>
+                            </div>
                         );
                     })}
                 </div>
