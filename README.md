@@ -19,9 +19,16 @@ python cli.py --dir problems/mmul
 ```bash
 python cli.py --dir problems/mmul --resume         # resume an interrupted run
 python cli.py --dir problems/mmul --max-iter 5 --max-depth 2
+python cli.py --dir problems/mmul --path-budget 20 # per-path iteration budget (instead of --max-iter)
+python cli.py --dir problems/mmul --timeout 300    # tuner wall-clock budget in seconds
+python cli.py --dir problems/mmul --provider anthropic --model claude-opus-4-6
+python cli.py --dir problems/mmul --no-clean       # keep the current output/ on a fresh run
+python cli.py --dir problems/mmul --clone mmul_v2  # copy this problem to problems/mmul_v2 and exit
 python cli.py --dir problems/mmul --best           # show results without running
 python cli.py --dir problems/mmul --prune-archives # shrink archived runs on disk
 ```
+
+Run `python cli.py --help` for the full list.
 
 `--dir` may be relative or absolute — the optimizer can be invoked from any working directory.
 
@@ -49,6 +56,8 @@ python server.py                    # http://localhost:8003
 # Terminal 2: Frontend
 cd frontend && npm install && npm run dev   # http://localhost:5003
 ```
+
+Or launch both in one tmux session with `./start.sh` (backend logs to `server.log`).
 
 Features: tree visualization of optimization branches, live log streaming, llm outputs, NCU metrics, problem creation dialog.
 

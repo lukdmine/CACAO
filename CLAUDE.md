@@ -25,9 +25,13 @@ cp .env.example .env   # or create manually
 # Run the optimizer CLI on a problem directory
 python cli.py --dir problems/mmul
 
-# Options
+# Options (python cli.py --help for the full list)
 python cli.py --dir problems/mmul --resume       # resume interrupted run
 python cli.py --dir problems/mmul --max-iter 3 --max-depth 1
+python cli.py --dir problems/mmul --path-budget 20  # per-path iteration budget (replaces --max-iter)
+python cli.py --dir problems/mmul --timeout 300     # tuner wall-clock budget override (seconds)
+python cli.py --dir problems/mmul --no-clean     # fresh run without archiving output/
+python cli.py --dir problems/mmul --clone mmul_v2   # clone the problem and exit
 python cli.py --dir problems/mmul --best         # show results without running
 python cli.py --dir problems/mmul --prune-archives  # shrink archive/output_* on disk
 
@@ -119,7 +123,7 @@ State is split into three typed Pydantic models, plus one input file:
 | `output/context.json` | `Context` | Shared problem data (written once, read by all branches) |
 | `output/branches/<name>/branch.json` | `BranchManifest` | Branch identity, control, aggregated results |
 | `output/branches/<name>/branch_config.json` | `BranchConfig` | Settings the frontend owns (`max_iter`) — API writes, worker only reads |
-| `output/branches/<name>/iter_N/state.json` | `IterState` | Per-iteration work products (kernel, params, results, decision) |
+| `output/branches/<name>/iterN/state.json` | `IterState` | Per-iteration work products (kernel, params, results, decision) |
 
 Nodes receive a `WorkingState` (composed from all three), then the worker decomposes it back after each step. See `state/types.py` for full field definitions.
 
@@ -220,7 +224,7 @@ prompt; `forbid` regexes are checked before the compiler runs and fail the check
 
 ```bash
 conda activate ktt
-python -m pytest tests/ -q                       # 221 tests, ~14 s
+python -m pytest tests/ -q                       # ~2 s
 python -m pytest tests/ -m "not integration" -q  # skip the real g++/NVRTC link
 ```
 
@@ -232,11 +236,26 @@ tool calls, a string (prose, no calls), or a dict carrying response metadata —
 The `integration` marker covers the real toolchain — it links the driver against
 `libktt.so` and NVRTC-compiles recorded kernels whose real outcome is known.
 
+Many tests replay recorded run data under `problems/` (e.g. `problems/covariance/output/`);
+when that data is not on disk those tests skip cleanly, so the passing count depends on
+what is checked out. Note `problems/*/inputs.hpp` is gitignored — the engine regenerates
+it from `inputs.yaml` at every run start (`utils/inputs.ensure_inputs_hpp`), and a test
+that reads one (e.g. `test_nvrtc.py`) needs a problem whose header has been generated.
+
 ### LLM Provider Configuration
 
-Provider is set via `LLM_PROVIDER` in `config.py` (default: `"claude"`). Auto-detected from env vars if not set. All LLM calls go through `TrackedLLM` / `TrackedStructuredLLM` wrappers in `config.py` that handle retries with exponential backoff and token usage tracking.
+All LLM calls go through `TrackedLLM` / `TrackedStructuredLLM` wrappers in `config.py` that handle retries with exponential backoff and token usage tracking.
 
 Supported providers: `openai`, `anthropic`, `gemini`, `cerit` (OpenAI-compatible endpoint).
+
+Provider selection, highest priority first (same order as README):
+
+1. `--provider <name>` CLI flag (or `provider` in a UI run config)
+2. `LLM_PROVIDER` hardcoded in `config.py` (`None` by default — leave as-is to fall through)
+3. `LLM_PROVIDER` env var in `.env`
+4. Auto-detect from whichever API key is set. When multiple are set, this order wins: **CERIT > Anthropic > OpenAI > Gemini**.
+
+The model is set via `--model`; otherwise the provider's default from `MODELS` in `config.py` is used.
 
 ### Output Directory Layout
 
@@ -284,7 +303,7 @@ problems/<name>/output/
 | `api/problems.py` | Problem CRUD (list, create, update, delete, detail, logs) |
 | `api/tree.py` | Tree scanning, results, status, GPU endpoints |
 | `api/optimizer.py` | `/run`, `/stop`, `/resume` with per-GPU locking |
-| `api/branches.py` | Branch control (stop, resume, message, revert, config, delete) |
+| `api/branches.py` | Branch control (stop, resume, message, change-decision, config, iterations, delete) |
 
 Multiple problems can run concurrently on different GPUs (per-GPU `RunEntry` registry).
 

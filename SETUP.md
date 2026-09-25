@@ -29,7 +29,7 @@ if you prefer.
 ### Step 1: Create Python Environment
 
 ```bash
-# Python 3.10 is required — 3.11+ breaks pybind11 in KTT
+# Python 3.10 is what the setup script provisions and what the repo is tested on;
 conda create -n ktt python=3.10 -y
 conda activate ktt
 pip install -r requirements.txt
@@ -83,10 +83,12 @@ Create a `.env` file in the project root:
 cp .env.example .env
 ```
 
-Then set one of:
+Then set one of (auto-detected from whichever key is present, unless you pick a
+provider explicitly — `--provider` on the CLI, the picker in the UI's Run dialog, or
+`LLM_PROVIDER` in `.env` / `config.py`):
 
 ```bash
-# Claude (default)
+# Claude
 ANTHROPIC_API_KEY=your-key-here
 
 # Or OpenAI
@@ -99,8 +101,6 @@ ANTHROPIC_API_KEY=your-key-here
 # CERIT_API_KEY=your-key-here
 # CERIT_API_BASE=https://your-cerit-endpoint
 ```
-
-The provider is auto-detected from which key is set.
 
 ### Step 5: Verify Setup
 
@@ -132,7 +132,7 @@ Options:
 python cli.py --dir problems/mmul --resume         # resume interrupted run
 python cli.py --dir problems/mmul --max-iter 3 --max-depth 1
 python cli.py --dir problems/mmul --best           # show results without running
-python cli.py --dir problems/mmul --provider anthropic --model claude-opus-4-7
+python cli.py --dir problems/mmul --provider anthropic --model claude-opus-4-6
 ```
 
 ## Running the Server + Frontend
@@ -149,7 +149,7 @@ npm install
 npm run dev                         # http://localhost:5003
 ```
 
-The frontend polls `http://localhost:8003`. Override ports via `PORT` / `FRONTEND_PORT` / `VITE_API_BASE` env vars (see `.env.example`). Multiple problems can run concurrently on different GPUs.
+The frontend polls `http://localhost:8003`. Override ports via `PORT` / `FRONTEND_PORT` (see `.env.example`) and the backend URL via `VITE_API_BASE` (see `frontend/.env.example`). Multiple problems can run concurrently on different GPUs.
 
 ## Running a Framework Driver Standalone
 
@@ -157,7 +157,7 @@ Each iteration compiles `framework.cpp` into a `driver` binary and runs it. To d
 that by hand for a generated iteration:
 
 ```bash
-ITER=./problems/mmul/output/branches/my_branch/iter_1
+ITER=./problems/mmul/output/branches/my_branch/iter1
 
 g++ -std=c++17 -m64 -O3 -I"$(pwd)/KTT/Source" \
     "$ITER/framework.cpp" "$(pwd)/libktt.so" -Wl,-rpath,"$(pwd)" -o "$ITER/driver"
@@ -207,7 +207,5 @@ conda create -n ktt python=3.10 -y
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$(pwd):$LD_LIBRARY_PATH
 
 # For building KTT (one-time)
-export CUDA_PATH=/usr/local/cuda
-export PYTHON_HEADERS=/path/to/python3.10/include
-export PYTHON_LIB=/path/to/libpython3.10.so
+export CUDA_PATH=/usr/local/cuda   # or /usr for a system-installed CUDA
 ```
