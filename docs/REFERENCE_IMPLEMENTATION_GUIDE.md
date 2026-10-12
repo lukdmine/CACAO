@@ -56,7 +56,8 @@ Rules:
 - `block` is a **nested** `{x, y, z}` mapping. Flat `block_x`/`block_y`/`block_z` are
   silently ignored, and an absent `block` defaults to `{x: 1}` — one thread per block,
   which makes the reference about a thousand times slower without failing.
-- The reference is launched with the same `grid` as the candidate.
+- The reference's global size is the base `grid` from `problem.yaml`, read per
+  `global_size_type`. The candidate's launch comes from its own driver regions.
 - Keep it obviously correct. It is not tuned and its speed is not the baseline.
 
 ## `type: cpu_c`
@@ -65,25 +66,43 @@ Rules:
 reference:
   type: cpu_c
   file: ref_cpu.c
+  function: savings_reference
 ```
 
 ```c
 // Scalars are -D macros. Only buffers are parameters, in args order.
+extern "C" {
+
 void savings_reference(const float* deposits, float* balances) {
     for (int c = 0; c < CLIENTS; c++)
         for (int p = 0; p < PERIODS; p++)
             balances[c * PERIODS + p] = ...;
 }
+
+}
 ```
 
 Rules:
 
-- Pointer parameters only, one per buffer, in `args` order. No scalar parameters.
-- Every `define`-placement scalar is available as a macro. `utils/build.py` compiles
-  `ref_cpu.c` to a separate object file with those `-D` flags and links it into the
-  driver, so the macros never reach `framework.cpp`.
-- Declared `extern "C"` by the generated `inputs.hpp`; the file itself is plain C.
+- Pointer parameters only, one per buffer, in `args` order. No scalar parameters —
+  nothing passes them, and C linkage means nothing checks the signature either, so an
+  extra parameter reads garbage and a swapped pair silently swaps buffers.
+- **Every** scalar is available as a macro, whatever its `placements` — a `runtime`
+  scalar that is a parameter in a CUDA reference is still a macro here. `utils/build.py`
+  compiles `ref_cpu.c` to a separate object file with those `-D` flags and links it into
+  the driver, so the macros never reach `framework.cpp`.
+- Wrap the function in `extern "C"`. `utils/build.py` compiles the file with `g++`,
+  which treats `.c` as C++, so without it the symbol is name-mangled and the driver
+  fails to link with `undefined reference to '<function>'`. The `extern "C"`
+  declaration in `inputs.hpp` does not change how this file is compiled.
 - Read-only buffers arrive `const`.
+
+How it runs: `inputs.hpp` registers one KTT `SetReferenceComputation` per `validate:
+true` buffer, and each one calls the full C function. The validated buffer is the one
+KTT hands in, read buffers come from kept host copies, readwrite buffers are copied so
+the call cannot mutate the kept inputs, and any other output buffer gets a scratch
+allocation. So compute every output the function logically owns, even if only one is
+validated.
 
 ## `type: python`
 
@@ -137,11 +156,11 @@ which is much larger and inflates every speedup on the run.
 
 ## Checklist
 
-- [ ] `reference.type`, `file` and (for `cuda`/`python`) `function` match reality
+- [ ] `reference.type`, `file` and `function` match reality — `function` is required for every type
 - [ ] Parameter order matches `args` in `inputs.yaml`
 - [ ] `cuda`: runtime scalars are parameters; `define` scalars are not
 - [ ] `cuda`: `block` is nested `{x, y, z}` and is not the default one-thread block
-- [ ] `cpu_c`: buffers only, no scalar parameters
+- [ ] `cpu_c`: buffers only, no scalar parameters, wrapped in `extern "C"`
 - [ ] `python`: the function is defined in `ref.py`, and returns numpy or uses `prepare_input`
 - [ ] At least one buffer in `inputs.yaml` sets `validate: true`
 - [ ] `validation.tolerance` is set deliberately, not left at the 1e-4 default

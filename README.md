@@ -32,6 +32,8 @@ python cli.py --dir problems/mmul --prune-archives  # shrink archived runs on di
 iterations per branch, a whole root-to-leaf path shares N. Raising a branch's budget in
 the UI extends that path rather than spending its children's share.
 
+Run `python cli.py --help` for the full list.
+
 `--dir` may be relative or absolute — the optimizer can be invoked from any working directory.
 
 A fresh run **archives** the previous one rather than deleting it: `output/` is renamed
@@ -58,6 +60,8 @@ python server.py                    # http://localhost:8003
 # Terminal 2: Frontend
 cd frontend && npm install && npm run dev   # http://localhost:5003
 ```
+
+Or launch both in one tmux session with `./start.sh` (backend logs to `server.log`).
 
 Features: tree visualization of optimization branches, live log streaming, llm outputs, NCU metrics, problem creation dialog.
 

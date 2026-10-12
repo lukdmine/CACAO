@@ -25,9 +25,13 @@ cp .env.example .env   # or create manually
 # Run the optimizer CLI on a problem directory
 python cli.py --dir problems/mmul
 
-# Options
+# Options (python cli.py --help for the full list)
 python cli.py --dir problems/mmul --resume       # resume interrupted run
 python cli.py --dir problems/mmul --max-iter 3 --max-depth 1
+python cli.py --dir problems/mmul --path-budget 20  # per-path iteration budget (replaces --max-iter)
+python cli.py --dir problems/mmul --timeout 300     # tuner wall-clock budget override (seconds)
+python cli.py --dir problems/mmul --no-clean     # fresh run without archiving output/
+python cli.py --dir problems/mmul --clone mmul_v2   # clone the problem and exit
 python cli.py --dir problems/mmul --best         # show results without running
 python cli.py --dir problems/mmul --prune-archives  # shrink archive/output_* on disk
 
@@ -123,7 +127,7 @@ State is split into three typed Pydantic models, plus one input file:
 | `output/context.json` | `Context` | Shared problem data (written once, read by all branches) |
 | `output/branches/<name>/branch.json` | `BranchManifest` | Branch identity, control, aggregated results |
 | `output/branches/<name>/branch_config.json` | `BranchConfig` | Settings the frontend owns (`max_iter`) — API writes, worker only reads |
-| `output/branches/<name>/iter_N/state.json` | `IterState` | Per-iteration work products (kernel, params, results, decision) |
+| `output/branches/<name>/iterN/state.json` | `IterState` | Per-iteration work products (kernel, params, results, decision) |
 
 Nodes receive a `WorkingState` (composed from all three), then the worker decomposes it back after each step. See `state/types.py` for full field definitions.
 
@@ -235,7 +239,7 @@ prompt; `forbid` regexes are checked before the compiler runs and fail the check
 
 ```bash
 conda activate ktt
-python -m pytest tests/ -q                       # 221 tests, ~14 s
+python -m pytest tests/ -q                       # ~15 s with recorded run output on disk
 python -m pytest tests/ -m "not integration" -q  # skip the real g++/NVRTC link
 ```
 
@@ -249,17 +253,30 @@ The `integration` marker covers the real toolchain — it links the driver again
 known. Tests needing only `g++` guard on `shutil.which`, so the fast suite is green
 on a machine with no compiler.
 
-32 tests read recorded run output under `problems/*/output/`, which is gitignored.
-They skip cleanly on a fresh clone; the rest still pass.
+Many tests replay recorded run data under `problems/*/output/` (e.g.
+`problems/covariance/output/`), which is gitignored. When that data is not on disk those
+tests skip cleanly, so the passing count depends on what is checked out. Note `problems/*/inputs.hpp` is gitignored — the engine regenerates
+it from `inputs.yaml` at every run start (`utils/inputs.ensure_inputs_hpp`), and a test
+that reads one (e.g. `test_nvrtc.py`) needs a problem whose header has been generated.
 
 ### LLM Provider Configuration
 
-Provider is set via `LLM_PROVIDER` in `config.py` (default: `None`, so it falls
-through). Then the `LLM_PROVIDER` env var, then auto-detection from whichever API
-key is set (cerit > anthropic > openai > gemini). `claude` and `google` are accepted
-as aliases; any other unrecognised value warns and falls through. All LLM calls go through `TrackedLLM` / `TrackedStructuredLLM` wrappers in `config.py` that handle retries with exponential backoff and token usage tracking.
+The LLM stack lives in `llm/` and is re-exported from `config.py` for existing call
+sites. All LLM calls go through the `TrackedLLM` / `TrackedStructuredLLM` wrappers in
+`llm/tracked.py`, which handle retries with exponential backoff and token usage tracking.
 
 Supported providers: `openai`, `anthropic`, `gemini`, `cerit` (OpenAI-compatible endpoint).
+
+Provider selection, highest priority first (same order as README):
+
+1. `--provider <name>` CLI flag (or `provider` in a UI run config)
+2. `LLM_PROVIDER` hardcoded in `llm/providers.py` (`None` by default — leave as-is to fall through)
+3. `LLM_PROVIDER` env var in `.env`
+4. Auto-detect from whichever API key is set. When multiple are set, this order wins: **CERIT > Anthropic > OpenAI > Gemini**.
+
+`claude` and `google` are accepted as aliases; any other unrecognised value warns and
+falls through. The model is set via `--model`; otherwise the provider's default from
+`MODELS` in `llm/providers.py` is used.
 
 ### Output Directory Layout
 
@@ -320,7 +337,7 @@ is every problem with no `cases:` block — keeps the layout above exactly.
 | `api/problems.py` | Problem CRUD (list, create, update, delete, detail, logs) |
 | `api/tree.py` | Tree scanning, results, status, GPU endpoints |
 | `api/optimizer.py` | `/run`, `/stop`, `/resume` with per-GPU locking |
-| `api/branches.py` | Branch control (stop, resume, message, revert, config, delete) |
+| `api/branches.py` | Branch control (stop, resume, message, change-decision, config, iterations, delete) |
 
 Multiple problems can run concurrently on different GPUs (per-GPU `RunEntry` registry).
 

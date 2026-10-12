@@ -301,11 +301,11 @@ def test_a_rules_violation_records_its_own_verdict(filled_workspace, tmp_path):
     "meta, gpu_info, expected",
     [
         # gpu_info is empty whenever NCU is missing or permission-restricted; without
-        # the problem.yaml fallback the check targets compute_52 and rejects
+        # the problem.yaml fallback the check targets NVRTC's lowest arch and rejects
         # cp.async / wmma / bf16 kernels the real device compiles fine.
         ({"gpu": {"compute_capability": "8.6"}}, None, "8.6"),
         ({"gpu": {"compute_capability": "7.0"}}, {"compute_capability": "8.6"}, "8.6"),
-        # nvrtc's compute_52 default is right when the architecture is unknown.
+        # NVRTC's own default is right when the architecture is unknown.
         ({}, None, None),
     ],
 )

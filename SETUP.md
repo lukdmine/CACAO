@@ -60,7 +60,9 @@ export CUDA_PATH=/usr
 # Fetch the pinned one (this is what setup.sh does) or install premake5 yourself:
 curl -sL https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz \
   | tar xz
-./premake5 gmake
+# --no-opencl: the framework driver uses KTT's CUDA backend only, and CUDA 12
+# no longer ships the CL/cl.h headers the OpenCL backend needs.
+./premake5 gmake --no-opencl
 cd Build
 make config=release_x86_64 Ktt -j$(nproc)
 
@@ -91,10 +93,12 @@ Create a `.env` file in the project root:
 cp .env.example .env
 ```
 
-Then set one of:
+Then set one of (auto-detected from whichever key is present, unless you pick a
+provider explicitly — `--provider` on the CLI, the picker in the UI's Run dialog, or
+`LLM_PROVIDER` in `.env` / `llm/providers.py`):
 
 ```bash
-# Claude (default)
+# Claude
 ANTHROPIC_API_KEY=your-key-here
 
 # Or OpenAI
@@ -107,8 +111,6 @@ ANTHROPIC_API_KEY=your-key-here
 # CERIT_API_KEY=your-key-here
 # CERIT_API_BASE=https://your-cerit-endpoint
 ```
-
-The provider is auto-detected from which key is set.
 
 ### Step 5: Verify Setup
 
@@ -136,7 +138,7 @@ python cli.py --dir problems/mmul
 launches, and the driver is linked with an rpath to the project root.
 
 See the flag table in [README.md](README.md#cli-options), or `python cli.py --help`.
-`--model` is not validated against the roster in `config.py`, so a typo fails at the
+`--model` is not validated against the roster in `llm/providers.py`, so a typo fails at the
 provider rather than at startup.
 
 ## Running the Server + Frontend
@@ -154,7 +156,7 @@ npm install
 npm run dev                         # http://localhost:5003
 ```
 
-The frontend polls `http://localhost:8003`. Override ports via `PORT` / `FRONTEND_PORT` / `VITE_API_BASE` env vars (see `.env.example`). Multiple problems can run concurrently on different GPUs.
+The frontend polls `http://localhost:8003`. Override ports via `PORT` / `FRONTEND_PORT` (see `.env.example`) and the backend URL via `VITE_API_BASE` (see `frontend/.env.example`). Multiple problems can run concurrently on different GPUs.
 
 ## Running a Framework Driver Standalone
 
@@ -181,7 +183,7 @@ is pure C++ and does not need them. Rebuild without the flag — and delete the
 stale objects first, or make will silently relink the old Python ones:
 
 ```bash
-cd KTT && CUDA_PATH=/usr ./premake5 gmake
+cd KTT && CUDA_PATH=/usr ./premake5 gmake --no-opencl
 cd Build && rm -rf x86_64_Release/obj
 make config=release_x86_64 Ktt -j$(nproc)
 ```
@@ -212,6 +214,5 @@ conda create -n ktt python=3.10 -y
 export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$(pwd):$LD_LIBRARY_PATH
 
 # For building KTT (one-time)
-export CUDA_PATH=/usr/local/cuda
-
+export CUDA_PATH=/usr/local/cuda   # or /usr for a system-installed CUDA
 ```

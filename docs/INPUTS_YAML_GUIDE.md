@@ -130,6 +130,11 @@ Pydantic does not coerce an int to a str here.
 It is a C++ expression, widened per operand to `size_t`. Only `host`-placement scalars
 are in scope. As with `grid`, `//` is a comment, not integer division.
 
+For a `python` reference, `utils/python_ref_runner.py` also evaluates it in Python, so
+keep it to arithmetic both languages agree on: `+ - * %` and parentheses. Python's `/` is
+float division and the result is truncated only at the end, so `(N / 2) * 3` differs
+between the two; `/` agrees only as the last operation.
+
 ### `init`
 
 - `random` — uniform over `[min, max]`, seeded per buffer name so runs are

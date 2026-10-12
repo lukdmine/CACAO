@@ -49,7 +49,7 @@ tuning:
 | `grid` | **yes** | mapping | `x`/`y`/`z`, pasted into the driver as C++ |
 | `reference` | **yes** | mapping | Validation reference source and function |
 | `validation` | no | mapping | `tolerance`, default `1e-4` |
-| `tuning` | no | mapping | `duration_s`, default `20.0` |
+| `tuning` | no | mapping | `duration_s`, default `100` |
 | `cases` | no | list | Named input variants, all tuned and validated each iteration |
 | `rules` | no | list, string or mapping | Constraints on what a kernel may do |
 
@@ -63,10 +63,15 @@ gpu:
   compute_capability: '8.6'
 ```
 
-`index` selects the device. `compute_capability` is used by the in-step NVRTC compile
-check when auto-detection is unavailable — worth setting when `ncu` is missing or
-permission-restricted, otherwise the check falls back to `compute_52` and rejects
-`cp.async`, `wmma` and `bf16` kernels the device would compile fine.
+`index` selects the device. The other keys (`model`, `compute_capability`, ...) are
+detected through `ncu` at run start (`utils/gpu_info.py`), cached in
+`output/context.json`, and override what the file declares. They feed the prompts.
+
+`compute_capability` is used by the in-step NVRTC compile check when that detection is
+unavailable — worth setting when `ncu` is missing or permission-restricted. Otherwise
+the check passes no architecture flag, NVRTC targets the lowest architecture its
+toolkit supports, and it rejects `cp.async`, `wmma` and `bf16` kernels the device
+would compile fine.
 
 ### `global_size_type`
 
@@ -115,14 +120,16 @@ reference:
 |---|---|---|
 | `type` | all | `cuda` (default), `cpu_c`, or `python` |
 | `file` | all | Path relative to the problem directory |
-| `function` | `cuda`, `python` | Entry symbol. Required for `cuda` |
+| `function` | all | Entry symbol. Required — without it the run fails generating `inputs.hpp` (`cpu_c`, `python`) or the driver (`cuda`) |
 | `block` | `cuda` only | Reference launch block, **nested** `{x, y, z}` |
 
 `block` is a nested mapping. Flat `block_x` / `block_y` / `block_z` keys are silently
 ignored, and an absent `block` defaults to `{x: 1}` — a one-thread block, which makes
 the reference roughly a thousand times slower rather than failing. Set it.
 
-An unrecognised `type` is treated as `cuda` and will fail on the missing `function`.
+An unrecognised or missing `type` is treated as `cuda`: the file is NVRTC-compiled as a
+kernel, so a C reference left untyped fails with an NVRTC error such as
+`cannot open source file "math.h"`.
 
 ### `validation`
 
@@ -145,8 +152,13 @@ tuning:
   duration_s: 100
 ```
 
-Wall-clock budget for one KTT tuning run, in seconds. Default `20.0`. `--timeout`
-overrides it.
+Wall-clock budget for one KTT tuning run, in seconds. The effective budget resolves in
+this order (`nodes/run.py:_resolve_tuning_budget`):
+
+1. `--timeout` on the CLI, or `timeout` in a run config posted to the API
+2. the case's own `duration_s` (see [`cases`](#cases))
+3. `tuning.duration_s`
+4. the system default, `TUNER_TIMEOUT` in `config.py` (100 s)
 
 ### `cases`
 
@@ -229,6 +241,7 @@ grid:
 reference:
   type: cpu_c
   file: ref_cpu.c
+  function: scale_reference
 validation:
   tolerance: 1e-5
 ```

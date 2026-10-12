@@ -153,22 +153,23 @@ def parse_defines_from_inputs_hpp(inputs_hpp: str) -> List[str]:
     return [tok for tok in m.group(1).split(" ") if tok]
 
 
-def arch_option(compute_capability: Optional[str]) -> str:
+def arch_option(compute_capability: Optional[str]) -> Optional[str]:
     """``--gpu-architecture=compute_XY`` from a "8.6"-style capability string.
 
     Mirrors CudaEngine::GetDefaultCompilerOptions, which concatenates major and minor
-    with no separator. Falls back to compute_52 (NVRTC's own default) when the
-    capability is unknown, which is the conservative choice: it under-reports feature
-    availability rather than claiming a kernel compiles for hardware it does not.
+    with no separator. Returns None when the capability is unknown so the caller omits
+    the flag; NVRTC then targets its lowest supported arch, which differs per
+    toolchain. That is the conservative choice: it under-reports feature availability
+    rather than claiming a kernel compiles for hardware it does not.
     """
     if not compute_capability:
-        return "--gpu-architecture=compute_52"
+        return None
     digits = re.findall(r"\d+", str(compute_capability))
     if len(digits) >= 2:
         return f"--gpu-architecture=compute_{digits[0]}{digits[1]}"
     if len(digits) == 1:
         return f"--gpu-architecture=compute_{digits[0]}0"
-    return "--gpu-architecture=compute_52"
+    return None
 
 
 # -------------------------------------------------------------------------
@@ -309,7 +310,10 @@ def check_kernel(
     error — a kernel with no tuning parameters compiles with no prefix.
     """
     params = parse_parameters(params_src)
-    options = [f"-I{cuda_include}"] + list(scalar_defines or []) + [arch_option(compute_capability)]
+    options = [f"-I{cuda_include}"] + list(scalar_defines or [])
+    arch = arch_option(compute_capability)
+    if arch:
+        options.append(arch)
     return [
         compile_source(kernel_src, config, options, label)
         for label, config in sample_configurations(params)

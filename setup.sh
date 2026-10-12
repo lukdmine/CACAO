@@ -445,7 +445,7 @@ else
     # the bindings compiles them into libktt.so itself (premake5.lua copies the
     # same .so to pyktt.so), leaving a NEEDED entry for libpython that ld cannot
     # resolve — every driver link then fails with undefined Py* references.
-    "$PREMAKE" gmake
+    "$PREMAKE" gmake --no-opencl
     cd Build
     make config=release_x86_64 Ktt -j"$(nproc)"
     cd "$SCRIPT_DIR"
@@ -489,7 +489,7 @@ else
         echo "  KTT Python bindings (--python). The framework driver is pure C++ and"
         echo "  does not need them. Rebuild without the flag:"
         echo ""
-        echo "    cd KTT && CUDA_PATH=\"${CUDA_DIR:-/usr}\" ./premake5 gmake"
+        echo "    cd KTT && CUDA_PATH=\"${CUDA_DIR:-/usr}\" ./premake5 gmake --no-opencl"
         echo "    cd Build && rm -rf x86_64_Release/obj && make config=release_x86_64 Ktt -j\$(nproc)"
     else
         sed 's/^/  /' "$LINK_TEST/err" | head -15

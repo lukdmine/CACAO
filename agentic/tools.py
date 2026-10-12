@@ -283,8 +283,8 @@ class Toolbox:
         """Detected capability, else whatever problem.yaml declares.
 
         gpu_info is empty whenever NCU is missing or permission-restricted, and
-        nvrtc's compute_52 default rejects cp.async / wmma / bf16 kernels the real
-        device compiles fine.
+        with no arch flag NVRTC targets its toolkit's lowest architecture, which rejects
+        cp.async / wmma / bf16 kernels the real device compiles fine.
         """
         return self.gpu_info.get("compute_capability") or (
             (self.meta.get("gpu") or {}).get("compute_capability")
