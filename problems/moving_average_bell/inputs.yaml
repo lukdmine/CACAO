@@ -1,0 +1,43 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: N
+  dtype: int
+  value: 33554432
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: R
+  dtype: int
+  value: 128
+  placements:
+  - host
+  - define
+- kind: buffer
+  name: in
+  dtype: float
+  size: N
+  access: read
+  init: custom
+  min: -2
+  max: 2
+  body: "std::vector<float> v(N);\nstd::random_device rd;\nstd::mt19937 gen(rd());\
+    \    \nstd::uniform_real_distribution<float> distrib(0.1, 1.0);\nfor (int i =\
+    \ 0; i < N; i++)\n  v[i] = distrib(gen);\nreturn v;"
+  validate: false
+- kind: buffer
+  name: out
+  dtype: float
+  size: N
+  access: write
+  init: zeros
+  validate: true
+- kind: scalar
+  name: ALPHA
+  dtype: float
+  value: 8
+  placements:
+  - host
+  - define
