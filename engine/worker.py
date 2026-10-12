@@ -19,6 +19,7 @@ from nodes.decide import decide_node
 
 from config import get_problem_dir
 from utils.log import log
+from utils.problem import reference_source
 from state import (
     load_branch_config,
     load_branch_manifest,
@@ -56,14 +57,8 @@ def _read_fresh_problem_yaml(gpu_info: dict | None) -> str:
 
 
 def _read_fresh_ref_kernel() -> str:
-    """Re-read the reference kernel source from the problem directory."""
-    problem_dir = get_problem_dir()
-    with open(problem_dir / "problem.yaml", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
-    ref_file = config.get("reference", {}).get("file", "")
-    if ref_file:
-        return (problem_dir / ref_file).read_text(encoding="utf-8")
-    return ""
+    """Re-read the reference source from the problem directory."""
+    return reference_source(get_problem_dir())
 
 
 def _compose_working_state(
@@ -148,8 +143,11 @@ def _handle_signal(
 
     try:
         if action == "stop":
-            manifest.pre_stop_status = manifest.status
-            manifest.status = "stopped"
+            # Only the first stop records where to resume to; a second would store
+            # "stopped" and wedge _wait_for_resume forever.
+            if manifest.status != "stopped":
+                manifest.pre_stop_status = manifest.status
+                manifest.status = "stopped"
             save_branch_manifest(branch_path, manifest)
             save_iter_state(branch_path, iter_state.iter_num, iter_state)
 
@@ -243,9 +241,21 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
         manifest.status = "running"
         save_branch_manifest(branch_path, manifest)
 
+    iter_state = None
+    iter_num = manifest.current_iter
+
     while manifest.status not in ["success", "failed", "branching"]:
         try:
             iter_num = manifest.current_iter
+
+            # Every write path mkdirs its parent, so without this a branch deleted by a
+            # parent revert rebuilds itself and keeps running.
+            if not branch_path.exists():
+                log(
+                    f"Branch {strategy_name} directory deleted (parent reverted). Exiting.",
+                    "WARN",
+                )
+                return []
 
             # Load or create iteration state
             iter_state = load_iter_state_if_exists(branch_path, iter_num)
@@ -313,9 +323,9 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
             save_iter_state(branch_path, iter_num, iter_state)
 
             # Flush token stats to disk after every node
-            from config import global_tracker
+            from config import get_output_dir, global_tracker
 
-            global_tracker.save()
+            global_tracker.save(get_output_dir())
 
             # On iteration complete: advance or finish
             if current_status == "deciding":
@@ -329,11 +339,19 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
         except Exception as e:
             log(f"Unhandled exception in branch {strategy_name}: {e}", "ERROR")
             traceback.print_exc()
-            iter_state.status = "decided"
-            iter_state.run_output = f"CRITICAL WORKER CRASH: {e}"
-            save_iter_state(branch_path, iter_num, iter_state)
+            # Status first: iter_state may be unbound if the failure was in loading it.
             manifest.status = "failed"
-            save_branch_manifest(branch_path, manifest)
+            try:
+                if iter_state is not None:
+                    iter_state.status = "decided"
+                    iter_state.run_output = f"CRITICAL WORKER CRASH: {e}"
+                    save_iter_state(branch_path, iter_num, iter_state)
+                save_branch_manifest(branch_path, manifest)
+            except Exception as save_error:
+                log(
+                    f"Could not persist the failure for {strategy_name}: {save_error}",
+                    "ERROR",
+                )
 
     if manifest.status == "success":
         log(

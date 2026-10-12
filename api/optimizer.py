@@ -46,8 +46,8 @@ def _run_target(
     max_depth: int,
     path_budget: int,
     timeout: Optional[int],
-    model: str = None,
-    provider: str = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ):
     """Process target for a fresh optimization run."""
     try:
@@ -86,7 +86,7 @@ def _run_target(
         (meta_dir / "run_meta.json").write_text(
             _json.dumps(
                 {
-                    "model": cfg._current_model,
+                    "model": cfg.get_model(),
                     "provider": cfg.get_provider(),
                 }
             ),
@@ -123,8 +123,8 @@ def _resume_target(
     max_depth: int,
     path_budget: int,
     timeout: Optional[int],
-    model: str = None,
-    provider: str = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
 ):
     """Process target for resuming an interrupted optimization."""
     try:
@@ -147,7 +147,7 @@ def _resume_target(
                 import config as cfg
                 from config import OptimizerConfig, init_from_config
                 from engine.master import run_optimization_engine
-                from utils.resume import get_resume_states
+                from engine.resume import get_resume_states
 
                 init_from_config(
                     OptimizerConfig(
@@ -169,7 +169,7 @@ def _resume_target(
                 (problem_dir / "output" / "run_meta.json").write_text(
                     _json.dumps(
                         {
-                            "model": cfg._current_model,
+                            "model": cfg.get_model(),
                             "provider": cfg.get_provider(),
                         }
                     ),

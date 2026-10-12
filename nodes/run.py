@@ -39,16 +39,24 @@ _WATCHDOG_MARGIN_S = 30.0
 _WATCHDOG_MARGIN_FRAC = 0.2
 
 
-def _resolve_tuning_budget(problem_yaml_path: Path) -> tuple[float, str]:
-    """Resolve the effective tuning budget in seconds. Returns (seconds, source_label)."""
+def _resolve_tuning_budget(meta: dict, case) -> tuple[float, str]:
+    """Effective tuning budget for one case, as (seconds, source_label).
+
+    Precedence: the user's runtime override, then the case's own ``duration_s``, then
+    the problem's ``tuning.duration_s``, then the engine default. A tail case exists to
+    catch a correctness bug rather than to find an optimum, so giving it a shorter
+    budget than the primary is the normal configuration, not a degraded one.
+    """
+    from utils.cases import case_duration
+
     if _cfg.TUNER_TIMEOUT_OVERRIDE is not None:
         return float(_cfg.TUNER_TIMEOUT_OVERRIDE), "user override"
+    if case is not None and case.duration_s is not None:
+        return float(case.duration_s), "case"
     try:
-        with open(problem_yaml_path, encoding="utf-8") as f:
-            cfg_yaml = yaml.safe_load(f) or {}
-        yaml_value = (cfg_yaml.get("tuning") or {}).get("duration_s")
-        if yaml_value is not None:
-            return float(yaml_value), "problem.yaml"
+        value = case_duration(meta, case) if case is not None else None
+        if value is not None:
+            return float(value), "problem.yaml"
     except Exception as e:
         log(f"Failed to read tuning.duration_s from problem.yaml: {e}", "WARN")
     return float(_cfg.TUNER_TIMEOUT), "system default"
@@ -111,93 +119,25 @@ class TunerProgressTracker:
         )
 
 
-async def run_node(state: WorkingState) -> WorkingState:
+async def _execute_driver(
+    cmd: list,
+    cwd: Path,
+    budget_s: float,
+    watchdog_s: float,
+    tracker: "TunerProgressTracker",
+    branch_name: str = "default",
+) -> str:
+    """Run one compiled driver under the GPU lock and return its combined output.
+
+    Extracted from run_node so the case loop can call it once per case, and so the
+    loop's ordering and fail-fast behaviour can be tested without a GPU. KTT's
+    TuningDuration enforces the wall-clock budget inside the tuner; the watchdog here
+    only fires on a genuinely hung subprocess.
     """
-    Run the KTT tuner as a subprocess.
-
-    KTT's TuningDuration stop condition enforces the wall-clock budget inside
-    the tuner itself. This function only monitors for visibility and provides
-    a loose outer watchdog for truly hung subprocesses.
-    """
-    iteration = state.iter_num
-    strategy = state.strategy or {}
-    branch_name = strategy.name if strategy else "default"
-
-    print("\n" + "=" * 60)
-    print(f"  NODE: Run Tuner [{branch_name}] (iter {iteration})")
-    print("=" * 60)
-
-    branch_path_str = state.branch_path
-    if branch_path_str:
-        iter_dir = Path(branch_path_str) / f"iter{iteration}"
-    else:
-        from config import get_output_dir
-
-        iter_dir = get_output_dir() / f"iter{iteration}"
-
-    log(f"Executing tuner in: {iter_dir}")
-
-    # Read problem.yaml from source so edits propagate.
-    problem_dir = get_problem_dir()
-    problem_yaml_path = problem_dir / "problem.yaml"
-
-    gpu_index = 0
-    tolerance = 1e-4
-    ref_file = "ref_kernel.cu"
-    try:
-        with open(problem_yaml_path, encoding="utf-8") as f:
-            config_yaml = yaml.safe_load(f) or {}
-        gpu_index = config_yaml.get("gpu", {}).get("index", 0)
-        tolerance = (config_yaml.get("validation") or {}).get("tolerance", tolerance)
-        ref_file = (config_yaml.get("reference") or {}).get("file", ref_file)
-    except Exception as e:
-        log(f"Failed to parse problem.yaml, using defaults: {e}", "WARN")
-
-    # cpu_c references add ref_cpu.c + -D scalar macros to the driver build.
-    extra_sources, extra_flags = reference_build_extras(problem_dir)
-
-    budget_s, budget_source = _resolve_tuning_budget(problem_yaml_path)
-    watchdog_s = budget_s + max(_WATCHDOG_MARGIN_S, budget_s * _WATCHDOG_MARGIN_FRAC)
-    log(
-        f"Tuning budget: {budget_s:.0f}s ({budget_source}); watchdog at {watchdog_s:.0f}s"
-    )
-
-    # --- Compile the framework driver (host compile; kernels stay NVRTC) ---
-    log("Compiling framework driver (framework.cpp -> driver)...")
-    build_result = compile_framework(
-        iter_dir, extra_sources=extra_sources, extra_flags=extra_flags
-    )
-    if not build_result.ok:
-        output = (
-            "[COMPILE ERROR] Host compilation of framework.cpp failed.\n\n"
-            f"{build_result.stderr}"
-        )
-        log("Framework compile failed — routing error to propose", "ERROR")
-        save_output(iter_dir, output, "tuner_output.txt")
-        state.run_output = output
-        state.results_summary = get_results_summary(iter_dir / "results.json", None)
-        state.status = "proposing"
-        return state
-    log("Framework driver compiled", "SUCCESS")
-
-    cmd = driver_command(
-        build_result.binary,
-        platform=0,
-        device=gpu_index,
-        duration=budget_s,
-        tolerance=tolerance,
-        output_base="results",
-        kernel_file=iter_dir / "kernels.cu",
-        ref_file=problem_dir / ref_file,
-    )
-
     output_lines = []
     watchdog_tripped = False
-    tracker = TunerProgressTracker()
 
-    # Acquire GPU lock before running
     log("Acquiring GPU lock...")
-
     async with acquire_gpu_lock():
         log("GPU lock acquired. Running tuner...")
 
@@ -209,7 +149,7 @@ async def run_node(state: WorkingState) -> WorkingState:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=str(iter_dir),
+                cwd=str(cwd),
                 env=get_subprocess_env(),
             )
 
@@ -280,43 +220,174 @@ async def run_node(state: WorkingState) -> WorkingState:
             log(f"Tuner error: {e}", "ERROR")
 
     log("GPU lock released")
+    return "".join(output_lines)
 
-    output = "".join(output_lines)
 
-    # Persist central reference time (first-write-wins)
+async def run_node(state: WorkingState) -> WorkingState:
+    """
+    Run the KTT tuner as a subprocess.
+
+    KTT's TuningDuration stop condition enforces the wall-clock budget inside
+    the tuner itself. This function only monitors for visibility and provides
+    a loose outer watchdog for truly hung subprocesses.
+    """
+    iteration = state.iter_num
+    strategy = state.strategy or {}
+    branch_name = strategy.name if strategy else "default"
+
+    print("\n" + "=" * 60)
+    print(f"  NODE: Run Tuner [{branch_name}] (iter {iteration})")
+    print("=" * 60)
+
+    branch_path_str = state.branch_path
+    if branch_path_str:
+        iter_dir = Path(branch_path_str) / f"iter{iteration}"
+    else:
+        from config import get_output_dir
+
+        iter_dir = get_output_dir() / f"iter{iteration}"
+
+    log(f"Executing tuner in: {iter_dir}")
+
+    # Read problem.yaml from source so edits propagate.
+    problem_dir = get_problem_dir()
+    problem_yaml_path = problem_dir / "problem.yaml"
+
+    gpu_index = 0
+    tolerance = 1e-4
+    ref_file = "ref_kernel.cu"
+    try:
+        with open(problem_yaml_path, encoding="utf-8") as f:
+            config_yaml = yaml.safe_load(f) or {}
+        gpu_index = config_yaml.get("gpu", {}).get("index", 0)
+        tolerance = (config_yaml.get("validation") or {}).get("tolerance", tolerance)
+        ref_file = (config_yaml.get("reference") or {}).get("file", ref_file)
+    except Exception as e:
+        log(f"Failed to parse problem.yaml, using defaults: {e}", "WARN")
+
     from config import get_output_dir
+    from utils.cases import case_list, stage_case
+    from utils.inputs import load_inputs_spec
+    from utils.results import aggregate_case_summaries
 
-    ref_time = parse_reference_time_from_output(output)
-    if ref_time is not None:
-        save_reference_time(get_output_dir(), ref_time)
-        log(f"Reference time: {ref_time:.0f} µs")
+    cases = case_list(config_yaml)
+    primary = cases[0].name
+    spec = load_inputs_spec(problem_dir / "inputs.yaml")
+    regions = {
+        name: (
+            (iter_dir / f"region_{name}.cpp").read_text(encoding="utf-8")
+            if (iter_dir / f"region_{name}.cpp").exists()
+            else ""
+        )
+        for name in ("kernels", "params", "launcher")
+    }
+    if len(cases) > 1:
+        log(f"{len(cases)} input cases: {', '.join(c.name for c in cases)}")
 
-    # The full log is the artifact; keep it on disk.
-    save_output(iter_dir, output, "tuner_output.txt")
+    # --- pass 1: stage and compile EVERY case ---
+    # A build-level failure costs seconds here and a whole tuning budget if it is left
+    # to be discovered in pass 2 instead.
+    log("Compiling framework driver(s) (framework.cpp -> driver)...")
+    built = []
+    for case in cases:
+        cdir = stage_case(problem_dir, iter_dir, spec, config_yaml, cases, case, regions)
+        # cpu_c references add ref_cpu.c + this case's -D scalar macros to the build.
+        extra_sources, extra_flags = reference_build_extras(problem_dir, case)
+        build_result = compile_framework(
+            cdir, extra_sources=extra_sources, extra_flags=extra_flags
+        )
+        if not build_result.ok:
+            label = "" if len(cases) == 1 else f" [case {case.name}]"
+            output = (
+                f"[COMPILE ERROR]{label} Host compilation of framework.cpp failed.\n\n"
+                f"{build_result.stderr}"
+            )
+            log(f"Framework compile failed{label} — routing error to propose", "ERROR")
+            save_output(cdir, output, "tuner_output.txt")
+            state.run_output = output
+            state.results_summary = get_results_summary(cdir / "results.json", None)
+            state.status = "proposing"
+            return state
+        built.append((case, cdir, build_result.binary))
+    log(f"Framework driver compiled ({len(built)} case(s))", "SUCCESS")
 
-    # State carries the summary, not the log. KTT runs every configuration, so a kernel
-    # that does not compile fails all of them with the same diagnostics — one real run was
-    # 957 KB across 333 configurations carrying two distinct causes. Storing that whole log
-    # meant prompts had to excerpt it (showing one arbitrary configuration's block, cut
-    # mid-way, sometimes omitting the diagnosis entirely) and every /tree poll shipped it
-    # to the browser. Grouped, the same evidence is 4 KB and complete.
-    # KTT prepends one #define per tuning parameter before NVRTC sees the source, so device
-    # diagnostics are reported against line numbers that do not exist in kernels.cu. The
-    # offset is the parameter count, which results.json carries.
-    failures = summarize_failures(
-        output, kernel_offset=kernel_line_offset(iter_dir / "results.json")
-    )
-    if failures:
-        log(f"Summarized {len(output) // 1024} KB of failures -> {len(failures) // 1024} KB")
-    state.run_output = failures or output
+    # --- pass 2: tune in declared order, fail fast ---
+    per_case = {c.name: None for c in cases}
+    combined_output = []
+    for case, cdir, binary in built:
+        case_key = None if case.name == primary else case.name
+        budget_s, budget_source = _resolve_tuning_budget(config_yaml, case)
+        watchdog_s = budget_s + max(_WATCHDOG_MARGIN_S, budget_s * _WATCHDOG_MARGIN_FRAC)
+        label = "" if len(cases) == 1 else f" [case {case.name}]"
+        log(
+            f"Tuning budget{label}: {budget_s:.0f}s ({budget_source}); "
+            f"watchdog at {watchdog_s:.0f}s"
+        )
 
-    # Save speedup/best_time eagerly so they persist even if later nodes fail
-    ref_time_val = load_reference_time(get_output_dir())
-    summary = get_results_summary(iter_dir / "results.json", ref_time_val)
-    if summary["best_time_us"] is not None:
+        cmd = driver_command(
+            binary,
+            platform=0,
+            device=gpu_index,
+            duration=budget_s,
+            tolerance=tolerance,
+            output_base="results",
+            kernel_file=cdir / "kernels.cu",
+            ref_file=problem_dir / ref_file,
+        )
+        tracker = TunerProgressTracker()
+        output = await _execute_driver(
+            cmd, cdir, budget_s, watchdog_s, tracker, branch_name
+        )
+
+        # Persist the central reference time (first-write-wins, per case).
+        ref_time = parse_reference_time_from_output(output)
+        if ref_time is not None:
+            save_reference_time(get_output_dir(), ref_time, case_key)
+            log(f"Reference time{label}: {ref_time:.0f} µs")
+
+        # The full log is the artifact; keep it on disk.
+        save_output(cdir, output, "tuner_output.txt")
+
+        # State carries the summary, not the log. KTT runs every configuration, so a
+        # kernel that does not compile fails all of them with the same diagnostics — one
+        # real run was 957 KB across 333 configurations carrying two distinct causes.
+        # KTT prepends one #define per tuning parameter before NVRTC sees the source, so
+        # device diagnostics are reported against line numbers that do not exist in
+        # kernels.cu. The offset is the parameter count, which results.json carries.
+        failures = summarize_failures(
+            output, kernel_offset=kernel_line_offset(cdir / "results.json")
+        )
+        if failures:
+            log(
+                f"Summarized {len(output) // 1024} KB of failures -> "
+                f"{len(failures) // 1024} KB"
+            )
+        header = "" if len(cases) == 1 else f"### case {case.name}\n"
+        combined_output.append(header + (failures or output))
+
+        summary = get_results_summary(
+            cdir / "results.json", load_reference_time(get_output_dir(), case_key)
+        )
+        per_case[case.name] = summary
+
+        if not summary["has_success"]:
+            # Any case failing fails the iteration. Tuning the rest would spend minutes
+            # collecting errors the kernel author has to fix one at a time anyway.
+            log(
+                f"Case {case.name} produced no valid configuration — "
+                "skipping the remaining cases",
+                "ERROR",
+            )
+            break
+
+    state.run_output = "\n\n".join(combined_output)
+
+    # Save speedup/best_time eagerly so they persist even if later nodes fail.
+    summary = aggregate_case_summaries(per_case, primary)
+    if summary.get("best_time_us") is not None:
         if state.best_time_us is None or summary["best_time_us"] < state.best_time_us:
             state.best_time_us = summary["best_time_us"]
-    if summary["speedup"] is not None:
+    if summary.get("speedup") is not None:
         if state.speedup is None or summary["speedup"] > state.speedup:
             state.speedup = summary["speedup"]
     state.results_summary = summary

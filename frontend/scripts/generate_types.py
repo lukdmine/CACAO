@@ -224,6 +224,14 @@ def main():
     sections.append("  best_time_us: number | null;")
     sections.append("  reference_time_us: number | null;")
     sections.append("  speedup: number | null;")
+    # Multi-case only. Absent for a problem with no `cases:` block, whose summary is
+    # exactly the shape above. When present, best_time_us/reference_time_us describe the
+    # PRIMARY case while speedup carries the geometric mean over all of them — they are
+    # deliberately not consistent, so never derive one from the others.
+    sections.append("  cases?: Record<string, ResultsSummary | null>;")
+    sections.append("  geomean_speedup?: number | null;")
+    sections.append("  worst_case?: string | null;")
+    sections.append("  failed_case?: string | null;")
     sections.append("}")
     sections.append("")
     sections.append("export interface UserMessage {")
@@ -282,7 +290,8 @@ def main():
     output = "\n".join(sections) + "\n"
 
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT_FILE.write_text(output)
+    # Explicit codec: the banner carries an em dash.
+    OUTPUT_FILE.write_text(output, encoding="utf-8")
 
     print(f"  Generated {OUTPUT_FILE.name} ({len(output)} bytes)")
 

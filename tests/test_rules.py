@@ -7,7 +7,7 @@ enough, so intent has to be stated and — where it matters — enforced.
 
 import textwrap
 
-from utils.rules import ForbiddenPattern, Rules, load_rules, parse_rules
+from utils.rules import ForbiddenPattern, Rules, parse_rules
 
 
 def test_no_rules_is_falsy_and_contributes_nothing():
@@ -86,56 +86,3 @@ def test_prompt_block_states_both_kinds():
     # Telling the model the check exists gets conforming code the first time instead
     # of via a failed compile.
     assert "checked automatically" in block
-
-
-def test_load_from_yaml_text():
-    yaml_text = textwrap.dedent(
-        """\
-        grid: {x: 1}
-        rules:
-          text:
-            - "No tensor cores."
-          forbid:
-            - pattern: "mma\\\\.sync"
-              reason: "numerics"
-        """
-    )
-    rules = load_rules(problem_yaml=yaml_text)
-    assert rules.text == ["No tensor cores."]
-    assert rules.violations("asm(\"mma.sync...\");")
-
-
-def test_load_from_a_problem_directory(tmp_path):
-    (tmp_path / "problem.yaml").write_text("rules: ['be nice']\n", encoding="utf-8")
-    assert load_rules(problem_dir=tmp_path).text == ["be nice"]
-
-
-def test_load_survives_broken_yaml(tmp_path):
-    (tmp_path / "problem.yaml").write_text("rules: [unclosed\n", encoding="utf-8")
-    assert not load_rules(problem_dir=tmp_path)
-
-
-def test_load_with_nothing_to_read():
-    assert not load_rules()
-
-
-def test_realistic_precision_rules_catch_the_shortcut():
-    """The case this exists for: winning by quietly lowering precision."""
-    rules = parse_rules(
-        {
-            "rules": {
-                "text": ["Accumulate in fp32."],
-                "forbid": [
-                    {"pattern": r"wmma::|mma\.sync", "reason": "tensor cores change the numerics"},
-                    {"pattern": r"\b__half\b|nv_bfloat16", "reason": "fp16/bf16 not permitted"},
-                ],
-            }
-        }
-    )
-    tensor_core = "#include <mma.h>\nusing namespace nvcuda;\nwmma::fragment<...> a;\n"
-    half_precision = "__half acc = __float2half(0.f);\n"
-    honest = "float acc = 0.0f;\nacc = fmaf(a, b, acc);\n"
-
-    assert rules.violations(tensor_core)
-    assert rules.violations(half_precision)
-    assert rules.violations(honest) == []

@@ -1,0 +1,131 @@
+# I/O boundary for CSR SpMV: y = A * x, A in CSR, fp32 values, int32 indices.
+#
+# Every scalar here is overridden per case (problem.yaml `cases:`), and so is every
+# init=file buffer's file_name. One compiled kernel therefore has to serve matrices
+# whose row lengths differ by six orders of magnitude -- which is the whole point.
+#
+# NROWS and NNZ are RUNTIME arguments, not -D defines. That is deliberate: a define
+# would let a kernel specialise at compile time on "this is the 18.5M-row matrix",
+# which is not a kernel, it is a lookup table. The shape arrives at runtime.
+headers:
+- "<cstdint>"
+shared_setup: ''
+args:
+# --- shape ------------------------------------------------------------------
+- kind: scalar
+  name: NROWS
+  dtype: int
+  value: 178866
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: NNZ
+  dtype: int
+  value: 961790
+  placements:
+  - host
+  - runtime
+# Host-only: sizes x, never passed to a kernel (SpMV does not need the column count).
+- kind: scalar
+  name: NCOLS
+  dtype: int
+  value: 178866
+  placements:
+  - host
+# Host-only: the number of distinct values in x. Chosen per matrix by
+# tools/fetch_matrices.py so that fp32 SpMV on this input is EXACT -- see the comment
+# on `values` below. Do not change it by hand.
+- kind: scalar
+  name: XMOD
+  dtype: int
+  value: 4
+  placements:
+  - host
+
+# --- the matrix (raw CSR, exactly as SuiteSparse stores it) -----------------
+- kind: buffer
+  name: row_offsets
+  dtype: int
+  size: NROWS + 1
+  access: read
+  init: file
+  file_name: transient.rowptr.bin
+  validate: false
+- kind: buffer
+  name: col_indices
+  dtype: int
+  size: NNZ
+  access: read
+  init: file
+  file_name: transient.col.bin
+  validate: false
+# Values are NOT the ones in the .mtx file. tools/fetch_matrices.py regenerates them as
+#     values[j] = a_j * 2^-ceil(log2(nnz_of_its_row)),   a_j in {1..A}
+# and x below is generated as b_i in {1..XMOD}, with A * XMOD * max_nnz_per_row < 2^24.
+# Every product is then a small integer times a power of two (exact), every partial sum
+# of a row is an integer multiple of that same power of two below 2^24 (exact), and the
+# row sum lands in (0.5, A*XMOD].
+#
+# Three consequences, all of them the reason for doing it:
+#   * fp32 SpMV is ORDER-INDEPENDENT here. Serial, tree, segmented, atomic -- every
+#     correct kernel returns bitwise the same y. The expected validation difference is
+#     zero, so `validation.tolerance` is a bug detector rather than a fudge factor.
+#   * every row's output is O(1) whether it holds 1 nonzero or 7.4 million, so a single
+#     ABSOLUTE tolerance is equally strict on all of them.
+#   * fp16 anything fails immediately: 2^-23 is below the fp16 normal range.
+# Performance depends on the sparsity pattern, which is untouched.
+- kind: buffer
+  name: values
+  dtype: float
+  size: NNZ
+  access: read
+  init: file
+  file_name: transient.val.bin
+  validate: false
+
+# --- vectors ----------------------------------------------------------------
+- kind: buffer
+  name: x
+  dtype: float
+  size: NCOLS
+  access: read
+  init: custom
+  validate: false
+  body: |
+    // x[i] = 1 + (splitmix64(i) mod XMOD): a small integer, exactly representable,
+    // scattered so that a kernel gathering the wrong column gets the wrong answer.
+    std::vector<float> v(static_cast<size_t>(NCOLS));
+    for (size_t i = 0; i < v.size(); ++i) {
+        std::uint64_t h = static_cast<std::uint64_t>(i) + 0x9E3779B97F4A7C15ull;
+        h = (h ^ (h >> 30)) * 0xBF58476D1CE4E5B9ull;
+        h = (h ^ (h >> 27)) * 0x94D049BB133111EBull;
+        h ^= h >> 31;
+        v[i] = static_cast<float>(1u + static_cast<unsigned>(
+                   h % static_cast<std::uint64_t>(XMOD)));
+    }
+    return v;
+# y is POISONED, not zeroed. KTT re-uploads this host vector before every
+# configuration, so the kernel finds large negative garbage in every slot and has to
+# write all NROWS of them; a slot left untouched is off by ~1000 and fails instantly.
+#
+# The alternative -- zeros -- quietly makes a wrong kernel correct on this input.
+# 8 419 679 of mawi's 18 571 154 rows are EMPTY, so a kernel that simply never writes
+# them would validate against a zero-filled buffer while skipping 45% of the output
+# traffic, roughly 9% of the achievable time. That is not an SpMV: with beta = 0,
+# y = A*x is defined on every row and cuSPARSE writes every one of them, so the
+# comparison would be against a cheaper operation than the baseline performs.
+#
+# The cost is deliberate and consistent with the problem's other rule: a kernel that
+# ACCUMULATES into y (atomicAdd, the natural choice for any nonzero-balanced
+# decomposition) must now zero it in its own launcher, and KTT charges that launch
+# like any other. Nothing is free.
+- kind: buffer
+  name: y
+  dtype: float
+  size: NROWS
+  access: write
+  init: random
+  min: -10000
+  max: -1000
+  validate: true

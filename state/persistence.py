@@ -151,7 +151,7 @@ def save_branch_manifest(branch_path: Path, manifest: BranchManifest):
 
     This write is what destroys a legacy ``max_iter``: the field is no longer on
     the model, so it silently drops out of the file. Rescue it into its own file
-    first — some save sites (utils/resume.py, for one) run before anything has
+    first — some save sites (engine/resume.py, for one) run before anything has
     read the config, so migrating only on read is too late.
     """
     branch_path = Path(branch_path)

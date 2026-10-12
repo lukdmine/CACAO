@@ -8,7 +8,8 @@ It scans the output directory for branch results and selects the best one.
 from pathlib import Path
 from typing import List, Optional
 
-from config import get_output_dir
+from config import get_output_dir, get_problem_dir
+from utils.cases import primary_case_dir
 from utils.files import save_json
 from utils.log import log
 
@@ -43,17 +44,26 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
             branch_path = branch_file.parent
             manifest = load_branch_manifest(branch_path)
             strategy = manifest.strategy or {}
-            best_time_us = manifest.best_time_us
+            # Unconditional: the winning parameters exist only in an iteration's
+            # results.json, so scanning only when the manifest lacks a time lost them.
+            scanned_time = None
+            best_config = None
+            for iter_dir in sorted(branch_path.glob("iter*")):
+                if not iter_dir.is_dir():
+                    continue
+                # Multi-case problems put each case's results in its own subdirectory,
+                # so the iteration root holds no results.json at all. Anchor on the
+                # primary case, as the tree API does.
+                results_path = primary_case_dir(get_problem_dir(), iter_dir) / "results.json"
+                summary = get_results_summary(results_path, ref_time)
+                t_us = summary.get("best_time_us")
+                if t_us is not None and (scanned_time is None or t_us < scanned_time):
+                    scanned_time = t_us
+                    best_config = summary.get("best_config")
 
-            # If best_time not in manifest, scan iter dirs
-            if best_time_us is None:
-                for iter_dir in branch_path.glob("iter*"):
-                    if iter_dir.is_dir():
-                        results_path = iter_dir / "results.json"
-                        summary = get_results_summary(results_path, ref_time)
-                        t_us = summary.get("best_time_us")
-                        if t_us and (best_time_us is None or t_us < best_time_us):
-                            best_time_us = t_us
+            best_time_us = (
+                manifest.best_time_us if manifest.best_time_us is not None else scanned_time
+            )
 
             speedup = manifest.speedup
             if not speedup and best_time_us and ref_time:
@@ -65,6 +75,7 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
                     "branch_path": str(branch_path),
                     "status": manifest.status,
                     "best_time_us": best_time_us,
+                    "best_config": best_config,
                     "speedup": speedup,
                     "iterations": manifest.current_iter,
                 }
@@ -73,6 +84,29 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
             log(f"Failed to load branch {branch_file}: {e}", "WARN")
 
     return results
+
+
+def build_final_summary(branch_results: List[dict], best: dict) -> dict:
+    """The contents of ``output/final_results.json``. One builder; there were two,
+    with different shapes, and ``--best`` overwrote the richer with the poorer."""
+    return {
+        "best_branch": best.get("branch_name"),
+        "best_config": best.get("best_config"),
+        "best_time_us": best.get("best_time_us"),
+        "speedup": best.get("speedup"),
+        "total_branches": len(branch_results),
+        "all_branches": [
+            {
+                "name": r.get("branch_name"),
+                "path": r.get("branch_path"),
+                "status": r.get("status"),
+                "best_time_us": r.get("best_time_us"),
+                "speedup": r.get("speedup"),
+                "iterations": r.get("iterations"),
+            }
+            for r in branch_results
+        ],
+    }
 
 
 def get_best_branch_result(results: List[dict]) -> Optional[dict]:
@@ -123,7 +157,8 @@ def print_iteration_timeline(branches_dir: Path) -> None:
         iters = []
         for i in range(1, manifest.current_iter + 1):
             iter_dir = branch_path / f"iter{i}"
-            summary = get_results_summary(iter_dir / "results.json", ref_time)
+            results_path = primary_case_dir(get_problem_dir(), iter_dir) / "results.json"
+            summary = get_results_summary(results_path, ref_time)
             ms = summary["best_time_us"] / 1000 if summary["best_time_us"] else None
 
             action = "?"
@@ -212,23 +247,10 @@ def merge_node() -> dict:
         if best.get("speedup"):
             log(f"Speedup: {best.get('speedup'):.2f}x")
 
-        # Save final summary
-        final_summary = {
-            "best_branch": best.get("branch_name"),
-            "best_config": best.get("best_config"),
-            "best_time_us": best.get("best_time_us"),
-            "speedup": best.get("speedup"),
-            "all_branches": [
-                {
-                    "name": r.get("branch_name"),
-                    "status": r.get("status"),
-                    "best_time_us": r.get("best_time_us"),
-                    "speedup": r.get("speedup"),
-                }
-                for r in branch_results
-            ],
-        }
-        save_json(get_output_dir() / "final_results.json", final_summary)
+        save_json(
+            get_output_dir() / "final_results.json",
+            build_final_summary(branch_results, best),
+        )
 
         return {
             "status": "success"

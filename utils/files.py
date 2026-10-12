@@ -9,11 +9,10 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Optional, Any, Union, Dict
+from typing import Optional, Union
 
 
 from config import get_output_dir
-from state.types import WorkingState
 from utils.log import log
 
 
@@ -23,38 +22,21 @@ def ensure_output_dir() -> Path:
     return get_output_dir()
 
 
-def create_branch_dir(
-    parent: Path,
-    name: str,
-    strategy: dict,
-    depth: int,
-) -> Path:
-    """
-    Create a branch directory with strategy metadata.
+def create_branch_dir(parent: Path, name: str) -> Path:
+    """Create a branch directory, suffixing the name if it is taken.
 
-    Args:
-        parent: Parent directory (e.g., output/branches or output/branches/tiled/branches)
-        name: Branch name (e.g., "shared_mem_tiling")
-        strategy: Strategy dict from strategize_node
-        depth: Current branch depth
-
-    Returns:
-        Path to created branch directory
+    The caller must take the branch's name from the returned path, not from what it
+    asked for: everything that resolves a branch by name reads the manifest, so a
+    manifest saying "tiled" beside a directory called "tiled_2" is unresolvable.
     """
     original_name = name
     counter = 2
     branch_dir = parent / name
     while branch_dir.exists():
-        name = f"{original_name}_{counter}"
-        branch_dir = parent / name
+        branch_dir = parent / f"{original_name}_{counter}"
         counter += 1
 
     branch_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save strategy metadata (use **strategy first so we can override the name key)
-    strategy_info = {**strategy, "name": name, "depth": depth}
-    save_json(branch_dir / "strategy.json", strategy_info)
-
     return branch_dir
 
 
@@ -134,18 +116,11 @@ def load_json(path: Path) -> Optional[dict]:
     return None
 
 
-def get_iter_dir(state: Union[Dict[str, Any], WorkingState]) -> Path:
-    """
-    Get the current iteration directory path from a working state.
+def get_iter_dir(state) -> Path:
+    """``branch_path/iterN`` for a WorkingState or an equivalent dict.
 
-    Shared helper used by all node files to avoid duplication.
-    Accepts either a dict or a Pydantic ``WorkingState`` model.
-
-    Args:
-        state: Working state (needs ``iter_num`` and ``branch_path``)
-
-    Returns:
-        Path to the iteration directory (e.g. ``branch_path/iter3``)
+    Deliberately unannotated: importing state.types for a type the body duck-types
+    anyway put utils above state in the layering, for nothing.
     """
     if hasattr(state, "iter_num"):
         iteration = getattr(state, "iter_num", 1) or 1
@@ -301,3 +276,24 @@ def prune_archives(problem_dir: Path) -> tuple:
                     removed += sum(1 for f in path.rglob("*") if f.is_file())
                     shutil.rmtree(path, ignore_errors=True)
     return (removed, freed)
+
+
+# A clone copies the problem definition, never a run: output/ and archive/ are run
+# history, and copying them also leaves the clone looking already-run.
+_CLONE_EXCLUDE = ("run.pid", "run.log", "requeue", "output", "archive")
+
+
+def clone_problem_dir(source_dir: Path, target_dir: Path) -> Path:
+    """Copy a problem's definition files into a new directory.
+
+    symlinks=True so a stale link in the source cannot crash the copy.
+    """
+    source_dir = Path(source_dir)
+    target_dir = Path(target_dir)
+    shutil.copytree(
+        source_dir,
+        target_dir,
+        symlinks=True,
+        ignore=shutil.ignore_patterns(*_CLONE_EXCLUDE),
+    )
+    return target_dir

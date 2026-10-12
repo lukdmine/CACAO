@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, uploadProblemInput, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType, type RulesSpec, type ForbidRule, type ProblemDetailResponse } from '@/api/client';
+import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, uploadProblemInput, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType, type RulesSpec, type ForbidRule, type CaseSpec, type ProblemDetailResponse } from '@/api/client';
 import { refreshProblems } from '@/api/hooks';
 import { Plus, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2, AlertTriangle, Info, Upload } from 'lucide-react';
 
@@ -40,6 +40,7 @@ function defaultForm(): CreateProblemData {
         tolerance: 0.05,
         tuning: { duration_s: 100 },
         rules: { text: [], forbid: [] },
+        cases: [],
     };
 }
 
@@ -109,6 +110,54 @@ const REFERENCE_KINDS: Record<ReferenceType, {
     },
 };
 
+/** Parse problem.yaml's `cases:` list into form state.
+ *
+ * Loaded so an edit round-trips them: problem.yaml is rebuilt wholesale from this
+ * request, so a save that dropped them would delete a hand-written case list and the
+ * next run would tune only the primary shape while reporting a healthy result. */
+function normalizeCases(raw: unknown): CaseSpec[] {
+    if (!Array.isArray(raw)) return [];
+    return raw.map((c, i) => {
+        const o = (c ?? {}) as Record<string, unknown>;
+        const scalars: Record<string, number> = {};
+        for (const [k, v] of Object.entries((o.scalars as Record<string, unknown>) ?? {})) {
+            const n = Number(v);
+            if (Number.isFinite(n)) scalars[k] = n;
+        }
+        const files: Record<string, string> = {};
+        for (const [k, v] of Object.entries((o.files as Record<string, unknown>) ?? {})) {
+            files[k] = String(v);
+        }
+        const d = Number(o.duration_s);
+        return {
+            name: String(o.name ?? `case${i + 1}`),
+            scalars,
+            files,
+            duration_s: Number.isFinite(d) && d > 0 ? d : null,
+        };
+    });
+}
+
+/** Default name for a case's own copy of a buffer's binary: the declared file with the
+ *  case name before the extension (`A.bin` + `t127` -> `A_t127.bin`). Only a default —
+ *  the field stays editable, so two cases can still point at one shared binary. */
+function caseFileName(declared: string | null | undefined, buffer: string, caseName: string): string {
+    const base = (declared ?? '').trim();
+    if (!base) return `${buffer}_${caseName}.bin`;
+    // Only a dot in the last path segment is an extension: `data.v2/A` has none.
+    const slash = Math.max(base.lastIndexOf('/'), base.lastIndexOf('\\'));
+    const dot = base.lastIndexOf('.');
+    return dot > slash + 1
+        ? `${base.slice(0, dot)}_${caseName}${base.slice(dot)}`
+        : `${base}_${caseName}`;
+}
+
+/** Key for a picked per-case binary. Buffer names are C identifiers and case names are
+ *  [A-Za-z0-9_-] once saved, so '::' cannot occur in either half of a valid pair. */
+function caseFileKey(caseName: string, buffer: string): string {
+    return `${caseName}::${buffer}`;
+}
+
 const PLACEMENTS: Placement[] = ['host', 'define', 'runtime'];
 
 const PLACEMENT_HELP: Record<Placement, string> = {
@@ -139,8 +188,15 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
     const [previewHpp, setPreviewHpp] = useState('');
     // Picked binaries for init=file buffers, keyed by buffer name; uploaded after save.
     const [inputFiles, setInputFiles] = useState<Record<string, File>>({});
+    // The same for a buffer a case rebinds, keyed "<case>::<buffer>" — a case's binary
+    // is a different file from the declared one, so it needs its own slot.
+    const [caseInputFiles, setCaseInputFiles] = useState<Record<string, File>>({});
     // What the server already holds for each file buffer (edit mode only).
     const [serverInputFiles, setServerInputFiles] = useState<ProblemDetailResponse['input_files']>({});
+    // Every binary the server holds under inputs/, by name. Keyed by FILE, not by case:
+    // the badge has to answer for the name currently in the field, which may belong to
+    // a case that has not been saved yet.
+    const [serverFiles, setServerFiles] = useState<ProblemDetailResponse['inputs_dir_files']>({});
 
     useEffect(() => {
         if (open && gpuDevices.length === 0) {
@@ -178,7 +234,9 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setWarnings([]);
         setPreviewHpp('');
         setInputFiles({});
+        setCaseInputFiles({});
         setServerInputFiles({});
+        setServerFiles({});
     }
 
     async function loadProblemData() {
@@ -187,6 +245,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         try {
             const data = await fetchProblemDetail(editProblemName);
             setServerInputFiles(data.input_files ?? {});
+            setServerFiles(data.inputs_dir_files ?? {});
             const ref = (data.config.reference ?? {}) as { type?: ReferenceType; function?: string; block?: { x?: number; y?: number; z?: number } };
             const grid = (data.config.grid ?? {}) as { x?: string; y?: string; z?: string };
 
@@ -226,6 +285,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 // Loaded so an edit round-trips them. Without this, saving a problem
                 // whose rules were written by hand would drop them.
                 rules: normalizeRules(data.config.rules),
+                cases: normalizeCases(data.config.cases),
             });
         } catch (err) {
             setError('Failed to load problem data: ' + (err instanceof Error ? err.message : String(err)));
@@ -236,6 +296,66 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
 
     // ── Argument list helpers ────────────────────────────────────────────────
     const args = form.inputs.args;
+
+    // ── Input case helpers ───────────────────────────────────────────────────
+    const cases = form.cases ?? [];
+    const scalarArgs = args.filter((a): a is ScalarSpec => a.kind === 'scalar');
+    const fileBuffers = args.filter(
+        (a): a is BufferSpec => a.kind === 'buffer' && a.init === 'file',
+    );
+    // What a run of this problem now costs: each case tunes for its full budget.
+    const totalCaseBudget = cases.reduce(
+        (sum, c) => sum + (c.duration_s ?? form.tuning?.duration_s ?? 100),
+        0,
+    );
+
+    function updateCase(index: number, patch: Partial<CaseSpec>) {
+        update(
+            'cases',
+            cases.map((c, i) => (i === index ? { ...c, ...patch } : c)),
+        );
+    }
+
+    // Picked binaries are keyed by case NAME, so a rename has to migrate them the way
+    // renameArg does for buffers — otherwise the pick is orphaned and silently dropped.
+    function renameCase(index: number, newName: string) {
+        const oldName = cases[index]?.name;
+        updateCase(index, { name: newName });
+        if (!oldName || oldName === newName) return;
+        setCaseInputFiles((prev) => {
+            const next: Record<string, File> = {};
+            for (const [k, v] of Object.entries(prev)) {
+                const sep = k.indexOf('::');
+                next[k.slice(0, sep) === oldName ? caseFileKey(newName, k.slice(sep + 2)) : k] = v;
+            }
+            return next;
+        });
+    }
+
+    function removeCase(index: number) {
+        const gone = cases[index]?.name;
+        update('cases', cases.filter((_, j) => j !== index));
+        if (!gone) return;
+        setCaseInputFiles((prev) =>
+            Object.fromEntries(Object.entries(prev).filter(([k]) => k.slice(0, k.indexOf('::')) !== gone)),
+        );
+    }
+
+    function pickCaseInputFile(index: number, buffer: BufferSpec, e: React.ChangeEvent<HTMLInputElement>) {
+        const f = e.target.files?.[0];
+        e.target.value = ''; // re-picking the same file must fire onChange again
+        const c = cases[index];
+        if (!f || !c || !c.name) return;
+        setCaseInputFiles((prev) => ({ ...prev, [caseFileKey(c.name, buffer.name)]: f }));
+        // Fill the override if it is blank: the upload resolves its destination through
+        // this field, so leaving it empty would write the bytes over the declared
+        // binary — the one every other case reads.
+        if (!c.files[buffer.name]) {
+            updateCase(index, {
+                files: { ...c.files, [buffer.name]: caseFileName(buffer.file_name, buffer.name, c.name) },
+            });
+        }
+    }
 
     const refKind = REFERENCE_KINDS[form.reference_type];
 
@@ -336,11 +456,14 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 try {
                     await uploadProblemInput(res.name, a.name, f);
                     uploaded.push(a.name);
-                    // Keep the Edit-mode status truthful while the dialog stays open.
+                    // Keep the Edit-mode status truthful while the dialog stays open —
+                    // in both places, since a case with no override of its own reads
+                    // this very binary and shows its size.
                     setServerInputFiles((prev) => ({
                         ...prev,
                         [a.name]: { file_name: a.file_name ?? '', exists: true, bytes: f.size },
                     }));
+                    if (a.file_name) setServerFiles((prev) => ({ ...prev, [a.file_name!]: f.size }));
                 } catch (err) {
                     uploadWarnings.push(
                         `'${a.name}': ${err instanceof Error ? err.message : String(err)}`
@@ -351,6 +474,44 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 setInputFiles((prev) => {
                     const next = { ...prev };
                     for (const n of uploaded) delete next[n];
+                    return next;
+                });
+            }
+
+            // Then the per-case binaries. The endpoint resolves both the destination and
+            // the expected byte count through the case's `files` override in
+            // problem.yaml, so the save above had to land first — it did.
+            const caseUploaded: string[] = [];
+            for (const c of form.cases ?? []) {
+                for (const b of form.inputs.args) {
+                    if (b.kind !== 'buffer' || b.init !== 'file') continue;
+                    const key = caseFileKey(c.name, b.name);
+                    const f = caseInputFiles[key];
+                    if (!f) continue;
+                    const dest = c.files[b.name];
+                    if (!dest) {
+                        uploadWarnings.push(
+                            `case '${c.name}', buffer '${b.name}': not uploaded — the case has `
+                            + `no file name of its own, and sending it would overwrite `
+                            + `${b.file_name || 'the declared binary'} for every other case`
+                        );
+                        continue;
+                    }
+                    try {
+                        await uploadProblemInput(res.name, b.name, f, c.name);
+                        caseUploaded.push(key);
+                        setServerFiles((prev) => ({ ...prev, [dest]: f.size }));
+                    } catch (err) {
+                        uploadWarnings.push(
+                            `case '${c.name}', buffer '${b.name}': ${err instanceof Error ? err.message : String(err)}`
+                        );
+                    }
+                }
+            }
+            if (caseUploaded.length) {
+                setCaseInputFiles((prev) => {
+                    const next = { ...prev };
+                    for (const k of caseUploaded) delete next[k];
                     return next;
                 });
             }
@@ -904,6 +1065,179 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
 
                                 <Separator />
 
+                                {/* Input cases */}
+                                <div className="space-y-2">
+                                    <Label title="Named shapes this kernel is built, validated and tuned at. One kernels.cu serves all of them; each gets its own tuned configuration.">
+                                        Input Cases (optional)
+                                    </Label>
+                                    <p className="text-xs text-zinc-500">
+                                        Every case is compiled, validated and tuned each iteration, and a kernel
+                                        that fails <span className="text-zinc-300">any</span> case fails the
+                                        iteration. Leave empty to run the declared values only. The first case is
+                                        primary: it is the number shown in the tree, the shape NCU profiles, and
+                                        the one whose baseline is <code>reference_time_us</code>.
+                                    </p>
+
+                                    {cases.length > 0 && (
+                                        <p className="text-xs text-zinc-500">
+                                            Tuning cost per iteration:{' '}
+                                            <span className="text-zinc-300">{totalCaseBudget}s</span> across{' '}
+                                            {cases.length} case{cases.length === 1 ? '' : 's'}.
+                                        </p>
+                                    )}
+
+                                    {cases.map((c, i) => (
+                                        <div key={i} className="rounded-md border p-2 space-y-2">
+                                            <div className="flex gap-2 items-center">
+                                                <Input
+                                                    className="text-xs font-mono w-40"
+                                                    placeholder="case name"
+                                                    value={c.name}
+                                                    onChange={(e) => renameCase(i, e.target.value)}
+                                                />
+                                                {i === 0 && (
+                                                    <span className="text-[10px] uppercase tracking-wide text-zinc-500">
+                                                        primary
+                                                    </span>
+                                                )}
+                                                <Input
+                                                    type="number"
+                                                    min={1}
+                                                    className="text-xs w-28"
+                                                    placeholder={`${form.tuning?.duration_s ?? 100}s`}
+                                                    title="Tuning budget for this case. Blank uses the problem's tuner budget."
+                                                    value={c.duration_s ?? ''}
+                                                    onChange={(e) =>
+                                                        updateCase(i, {
+                                                            duration_s: e.target.value
+                                                                ? parseInt(e.target.value, 10)
+                                                                : null,
+                                                        })
+                                                    }
+                                                />
+                                                <div className="flex-1" />
+                                                <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    className="text-xs"
+                                                    onClick={() => removeCase(i)}
+                                                >
+                                                    <Trash2 className="h-3 w-3" />
+                                                </Button>
+                                            </div>
+
+                                            <div className="grid grid-cols-3 gap-2">
+                                                {scalarArgs.map((s) => (
+                                                    <div key={s.name} className="space-y-1">
+                                                        <Label className="text-[10px] font-mono text-zinc-500">
+                                                            {s.name}
+                                                        </Label>
+                                                        <Input
+                                                            type="number"
+                                                            className="text-xs font-mono"
+                                                            placeholder={String(s.value)}
+                                                            title="Blank uses the declared value."
+                                                            value={c.scalars[s.name] ?? ''}
+                                                            onChange={(e) => {
+                                                                const scalars = { ...c.scalars };
+                                                                if (e.target.value === '') delete scalars[s.name];
+                                                                else scalars[s.name] = Number(e.target.value);
+                                                                updateCase(i, { scalars });
+                                                            }}
+                                                        />
+                                                    </div>
+                                                ))}
+                                            </div>
+
+                                            {fileBuffers.length > 0 && (
+                                                <div className="grid grid-cols-2 gap-2">
+                                                    {fileBuffers.map((b) => {
+                                                        const picked = caseInputFiles[caseFileKey(c.name, b.name)];
+                                                        // Blank means the case reads the declared binary, shared with
+                                                        // every other case that does not override it.
+                                                        const dest = c.files[b.name] || (b.file_name ?? '');
+                                                        const shared = !c.files[b.name];
+                                                        const bytes = dest ? serverFiles[dest] : undefined;
+                                                        return (
+                                                        <div key={b.name} className="space-y-1">
+                                                            <Label className="text-[10px] font-mono text-zinc-500">
+                                                                {b.name} file
+                                                            </Label>
+                                                            <div className="flex gap-1">
+                                                                <label
+                                                                    className="h-8 flex-1 min-w-0 inline-flex items-center gap-1 rounded border px-2 text-xs cursor-pointer hover:bg-accent"
+                                                                    title="This case's own binary. Raw little-endian of the buffer dtype; the byte count must equal THIS case's size × sizeof(dtype). Uploaded when the problem is saved."
+                                                                >
+                                                                    <input
+                                                                        type="file"
+                                                                        className="hidden"
+                                                                        onChange={(e) => pickCaseInputFile(i, b, e)}
+                                                                    />
+                                                                    <Upload size={12} className="shrink-0" />
+                                                                    <span className="truncate">
+                                                                        {picked ? picked.name : 'choose file…'}
+                                                                    </span>
+                                                                </label>
+                                                                <Input
+                                                                    className="text-xs font-mono w-32 h-8"
+                                                                    placeholder={b.file_name ?? ''}
+                                                                    title="Stored under inputs/ as this name. Blank uses the declared file_name — which every other case reads, so a case with its own binary needs its own name."
+                                                                    value={c.files[b.name] ?? ''}
+                                                                    onChange={(e) => {
+                                                                        const files = { ...c.files };
+                                                                        if (e.target.value === '') delete files[b.name];
+                                                                        else files[b.name] = e.target.value;
+                                                                        updateCase(i, { files });
+                                                                    }}
+                                                                />
+                                                            </div>
+                                                            {mode === 'edit' && dest && (
+                                                                <span
+                                                                    className={`text-[10px] block truncate ${bytes !== undefined ? 'text-emerald-400' : 'text-amber-400'}`}
+                                                                    title={`inputs/${dest}`}
+                                                                >
+                                                                    {bytes !== undefined
+                                                                        ? `${shared ? 'shared ' : ''}${dest} on server (${fmtBytes(bytes)})${picked ? ' — will be replaced' : ''}`
+                                                                        : `${dest} not uploaded yet`}
+                                                                </span>
+                                                            )}
+                                                            {picked && shared && (
+                                                                <span className="text-[10px] text-amber-400">
+                                                                    give this case its own file name, or the upload overwrites the shared one
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        );
+                                                    })}
+                                                </div>
+                                            )}
+                                        </div>
+                                    ))}
+
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        className="text-xs"
+                                        onClick={() =>
+                                            update('cases', [
+                                                ...cases,
+                                                {
+                                                    name: `case${cases.length + 1}`,
+                                                    scalars: {},
+                                                    files: {},
+                                                    duration_s: null,
+                                                },
+                                            ])
+                                        }
+                                    >
+                                        <Plus className="h-3 w-3 mr-1" /> Case
+                                    </Button>
+                                </div>
+
+                                <Separator />
+
                                 {/* Kernel rules */}
                                 <div className="space-y-2">
                                     <Label title="Constraints on how the kernel may be written. Prose goes in every prompt; patterns are checked before the compiler and fail the iteration.">
@@ -1012,6 +1346,13 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                             )}
                                         </div>
                                         <div><span className="text-zinc-500">grid:</span> [{form.grid_x}, {form.grid_y}, {form.grid_z}] ({form.global_size_type})  tolerance={form.tolerance}  tuner={form.tuning?.duration_s ?? 100}s</div>
+                                        {cases.length > 0 && (
+                                            <div>
+                                                <span className="text-zinc-500">cases:</span>{' '}
+                                                {cases.map((c) => c.name).join(', ')}{' '}
+                                                <span className="text-zinc-500">({totalCaseBudget}s/iteration)</span>
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
 

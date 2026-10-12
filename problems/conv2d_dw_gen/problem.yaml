@@ -50,6 +50,24 @@ validation:
   tolerance: 5.0e-5
 tuning:
   duration_s: 100
+
+cases:
+  # KERNEL 3x3 at STRIDE 1 with PADDING 1 gives OUT == IN, so IN_* and OUT_* must move
+  # together: a case that changed only the input would silently change the operation
+  # rather than its shape. The primary keeps the declared shape because it is the only
+  # one with a measured baseline (1786.02 us, ggml's current CUDA kernel).
+  - name: s513
+    scalars: {}
+  - name: s512            # every dimension divides a 16- or 32-wide tile
+    scalars: {IN_W: 512, IN_H: 512, OUT_W: 512, OUT_H: 512}
+    duration_s: 40
+  - name: s227            # odd and small: a tail on both axes at once
+    scalars: {IN_W: 227, IN_H: 227, OUT_W: 227, OUT_H: 227}
+    duration_s: 40
+  - name: s1024x33        # extreme aspect ratio: breaks a fixed block height
+    scalars: {IN_W: 1024, IN_H: 33, OUT_W: 1024, OUT_H: 33}
+    duration_s: 40
+
 rules:
   text:
     - "IN_W, IN_H, CHANNELS, BATCHES, OUT_W and OUT_H arrive as runtime kernel arguments.

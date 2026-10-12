@@ -29,6 +29,10 @@ from typing import Dict, List, Optional, Tuple
 # the tail rather than truncating arbitrarily.
 _MAX_INDEX_ROWS = 8
 
+# After these the worker stops advancing current_iter, so it names the last decided
+# iteration rather than one in flight.
+_TERMINAL_STATUSES = ("success", "failed", "branching")
+
 
 def _load_json(path: Path) -> Optional[dict]:
     try:
@@ -100,7 +104,7 @@ def branch_index(output_dir, exclude_path=None) -> str:
         if exclude is not None and path.resolve() == exclude:
             continue
         best = manifest.get("best_time_us")
-        iters = max(int(manifest.get("current_iter") or 1) - 1, 0)
+        iters = _completed_count(manifest)
         rows.append(
             {
                 "name": name,
@@ -134,15 +138,22 @@ def branch_index(output_dir, exclude_path=None) -> str:
 # -------------------------------------------------------------------------
 
 
-def _completed_iters(branch_path: Path, manifest: dict) -> List[dict]:
-    """Decided iterations only, oldest first.
+def _completed_count(manifest: dict) -> int:
+    """How many iterations of this branch have been decided.
 
-    Stops below current_iter: that iteration is being written by its own worker right
-    now and its decision does not exist yet.
+    current_iter is an exclusive bound only while the branch runs; a finished branch
+    keeps it pointing at its last decided iteration.
     """
     current = int(manifest.get("current_iter") or 1)
+    if manifest.get("status") in _TERMINAL_STATUSES:
+        return max(current, 0)
+    return max(current - 1, 0)
+
+
+def _completed_iters(branch_path: Path, manifest: dict) -> List[dict]:
+    """Decided iterations only, oldest first."""
     snaps = []
-    for n in range(1, current):
+    for n in range(1, _completed_count(manifest) + 1):
         snap = _load_json(branch_path / f"iter{n}" / "state.json")
         if snap is not None:
             snaps.append(snap)

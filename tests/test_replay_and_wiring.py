@@ -10,6 +10,7 @@ from agentic import replay
 from agentic.loop import StepOutcome, run_agentic_step
 from agentic.tools import Toolbox
 from agentic.workspace import Workspace
+from conftest import pass_check
 
 
 # -- replay ----------------------------------------------------------------
@@ -19,13 +20,7 @@ from agentic.workspace import Workspace
 def recorded(tmp_path, monkeypatch):
     """A trace from a completed step, plus a fresh workspace to replay it into."""
 
-    def fake_check(self):
-        self.checks_run += 1
-        self.check_passed = True
-        self.last_check = "Compilation check: PASS"
-        return self.last_check
-
-    monkeypatch.setattr(Toolbox, "check_compilation", fake_check)
+    pass_check(monkeypatch)
 
     live_dir = tmp_path / "live"
     live_dir.mkdir()
@@ -56,11 +51,7 @@ async def test_a_live_step_can_be_replayed_into_the_same_workspace(recorded, mon
         trace_path=recorded["trace"],
     )
 
-    def fake_check(self):
-        self.check_passed = True
-        return "PASS"
-
-    monkeypatch.setattr(Toolbox, "check_compilation", fake_check)
+    pass_check(monkeypatch)
 
     replay_dir = recorded["tmp"] / "replay"
     replay_dir.mkdir()

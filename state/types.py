@@ -92,6 +92,9 @@ class BranchManifest(BaseModel):
     path_iters_consumed: int = (
         0  # Total iterations used by ancestors (path budget mode)
     )
+    # Path budget this root-to-leaf path runs on; 0 means use config.PATH_BUDGET.
+    # Grows by whatever an ancestor was granted beyond its allocated share.
+    path_budget_total: int = 0
     current_iter: int = 1
     status: str = (
         "initialized"  # initialized | running | success | failed | branching | stopped

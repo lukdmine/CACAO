@@ -1,0 +1,240 @@
+name: CSR SpMV under row-length skew
+description: >-
+  y = A*x, A in raw CSR (int32 indices, fp32 values), one launch, nothing precomputed.
+
+  Bráblík's 2024 MU thesis ("Dynamic autotuning of SpMV kernel in CUSP library") autotunes
+  CUSP's CSR SpMV over 16 128 configurations, beats CUSP by 17.8x on average, and still
+  loses to cuSPARSE by 1.5x to 4x on the irregular matrices that motivated the work. The
+  loss is structural: its load-balanced kernel (DYNAMIC=2, Flegar's CSR-I) splits the
+  nonzeros into equal chunks and then walks its chunk ROW BY ROW, spending a
+  THREADS_PER_ROW-wide shuffle reduction and an atomic per row, and reloading
+  row_offsets[row] and row_offsets[row+1] separately every time. On a matrix averaging
+  1.02 nonzeros per row that is a five-step warp reduction to retire one multiply-add,
+  with 31 of 32 lanes idle.
+
+  THE ROW BOUNDARIES ARE THE COST, NOT THE NONZEROS. Measured here with
+  tools/row_partition_control.py: hold mawi's 19 020 160 nonzeros, columns and values
+  fixed and change only the row partition, and cuSPARSE takes 14 155 us over the real
+  18 571 154 rows against 257 us over 594 380 uniform 32-nonzero rows. Identical bytes,
+  identical gather, 55x apart. Chopping the single 7 397 164-nonzero row into 32s changes
+  nothing, so it is not the giant row -- it is the eighteen million short ones. Any
+  decomposition whose inner loop is "for each row assigned to me" pays a fixed per-row
+  cost that mawi charges 18.6 million times to retire 19.0 million multiply-adds.
+
+  THE GATHER IS NOT THE PROBLEM; do not spend the run on it. tools/floors times each
+  ingredient alone: on mawi the full indexed gather adds 61 us on top of a 174 us stream
+  of col_indices and values, reading row_offsets costs 88 us, and writing 74 MiB of y
+  costs about as much again. So mawi carries roughly 400-500 us of unavoidable work
+  against 1056 us for the best published cuSPARSE and 2702 us for the thesis's own tuned
+  kernel. That is the prize, and it is the only one.
+
+  transient and rail4284 already sit within ~20% of their stream cost under cuSPARSE. They
+  are here because no single row-oriented decomposition survives all three shapes: rows far
+  shorter than a warp (mawi), rows far longer than a block (rail4284 -- 4 284 rows of 2 634
+  nonzeros, fewer rows than the GPU has warps, where the thesis needs a whole block per row
+  and that configuration is useless everywhere else), and both at once (transient). A win
+  is a large gain on mawi with NO regression on the other two, not a better average.
+
+# NOTE: comments in this file are NOT seen by the model. engine/worker.py re-dumps
+# problem.yaml through yaml.safe_load/yaml.dump once GPU enrichment is active, which
+# strips every one of them -- 43% of this file. Only `description` and `rules` reach a
+# prompt. Anything the kernel author must know goes in one of those two; the comment
+# blocks below are documentation for whoever reads the file.
+
+gpu:
+  index: 0
+  model: NVIDIA GeForce RTX 3090
+  compute_capability: "8.6"
+  sm_count: 82
+  memory_bandwidth_gb: 936
+
+global_size_type: opencl
+
+# The reference is warp-per-row, so the base grid is 32 threads per row rounded up to a
+# 256-thread block. This sizes the REFERENCE launch only -- the tuned kernel's launcher
+# picks its own geometry. Emitted verbatim into a DimensionVector, so it is C++, not
+# Python: `/` is integer division here.
+grid:
+  x: (NROWS * 32 + 255) / 256 * 256
+  y: '1'
+  z: '1'
+
+reference:
+  type: cuda
+  function: spmv_csr_reference
+  file: ref_kernel.cu
+  block:
+    x: 256
+    y: 1
+    z: 1
+
+# ---------------------------------------------------------------------------
+# BASELINES -- read this before believing a speedup.
+#
+# The incumbent is cuSPARSE, called the way the thesis calls it (cusparseSpMV,
+# CUSPARSE_SPMV_ALG_DEFAULT, workspace allocated outside the timed region, no
+# cusparseSpMV_preprocess). Measured on THIS 3090 with CUDA 12.0 by tools/bench_cusparse,
+# 30 reps, median, alongside the thesis's own RTX 3080 / CUDA 12.4 numbers (Table B.1b):
+#
+#                      here (3090, CUDA 12.0)   thesis 3080: CUSP   tuned   cuSPARSE
+#     transient                    18.43 us            1015.81 us   25.31      20.03
+#     rail4284                    121.86 us             380.83 us  155.65     156.67
+#     mawi                     14 155.00 us          963 154.75 us 2702.10    1056.46
+#
+# transient and rail4284 line up with the published 3080 numbers, as they should. mawi
+# does not, by 13x, and the reason is the CUDA version: 12.4's SpMV is load balanced on
+# this shape and 12.0's is not. All three of ALG_DEFAULT, CSR_ALG1 and CSR_ALG2 give the
+# same 14.1 ms here, so it is not an algorithm-selection mistake in the harness.
+#
+# So mawi's seeded baseline is 1100 us -- the thesis's cuSPARSE 12.4 measurement, NOT
+# measured on this card. It is used deliberately in place of the local 14 155 us, which
+# would turn a mediocre kernel into a reported 30x. Borrowing a 3080 number for a 3090
+# makes the bar roughly 20% easier than a local measurement would; that is the direction
+# to err in, and it is stated rather than hidden. If this machine is ever upgraded past
+# CUDA 12.4, re-run tools/bench_cusparse and replace it.
+#
+# WHAT THE CEILING ACTUALLY IS. tools/floors measures each ingredient separately
+# (medians, us on this card):
+#
+#                  stream col+val   read rowptr   flat gather, no rows   warp-per-row
+#     transient           14.6           9.2               15.4               138.2
+#     rail4284           104.4           8.2              139.3               224.1
+#     mawi               174.1          88.1              234.8            16 199.7
+#
+# The two small cases are launch-overhead dominated (~4 us per kernel) and cuSPARSE is
+# already within ~20% of what the raw streams cost, so they are DEFEND-DO-NOT-REGRESS
+# cases, not prizes. mawi is the prize: touching every nonzero costs 235 us, row_offsets
+# 88 us, writing y about as much again. A correct kernel has no business being slower
+# than roughly 400-500 us -- against 1100 us for the best published cuSPARSE and 2702 us
+# for the thesis's tuned kernel. That is where the 2x is.
+# ---------------------------------------------------------------------------
+
+validation:
+  # The inputs are built so that fp32 SpMV on them is EXACT and order-independent (see
+  # the comment on `values` in inputs.yaml): every product is a small integer times a
+  # power of two, and every partial sum of a row is an integer multiple of that same
+  # power of two below 2^24. The expected difference against the reference is therefore
+  # BITWISE ZERO, for a serial kernel, a tree reduction, a segmented scan or an atomic
+  # pile-up alike. Verified: tools/bench_cusparse recomputes y on the CPU and every one
+  # of the 18.7 million rows across the three matrices matches exactly.
+  #
+  # 1e-6 is not slack for numerics -- there is none to absorb. It is roughly 16 ulps at
+  # the O(1) magnitude every row's output lands in, kept only so that an unforeseen but
+  # legitimate rounding path does not fail the run. A dropped or double-counted nonzero
+  # moves a short row's output by ~0.1 and is caught immediately.
+  tolerance: 1.0e-6
+
+tuning:
+  duration_s: 90
+
+cases:
+  # transient (Freescale, circuit simulation). PRIMARY -- the fast signal.
+  # 178 866 rows, 961 790 nonzeros, 5.38 per row on average, one row with 60 423.
+  # Short rows everywhere plus a handful of enormous ones. CUSP picks THREADS_PER_ROW
+  # from the AVERAGE and lands on 8, so it spends 1015 us here against ~26 us on other
+  # matrices of the same size -- a 40x self-inflicted wound the thesis rightly fixes.
+  # Only 9.4 MiB, so it tunes quickly. cuSPARSE is near the stream cost already: this
+  # case is here to stop a mawi-shaped kernel from regressing the ordinary case.
+  - name: transient
+    scalars: {NROWS: 178866, NCOLS: 178866, NNZ: 961790, XMOD: 4}
+    files:
+      row_offsets: transient.rowptr.bin
+      col_indices: transient.col.bin
+      values: transient.val.bin
+    duration_s: 60
+
+  # rail4284 (Mittelmann, LP constraint matrix). The opposite extreme.
+  # 4 284 rows by 1 096 894 columns, 11 284 032 nonzeros: 2 634 per row on average, up to
+  # 56 182. There are fewer rows than the GPU has warps, so any "one worker per row"
+  # scheme leaves most of the machine idle no matter how wide the worker is. The thesis's
+  # best configuration here is THREADS_PER_ROW=0 -- a whole 512-thread block per row --
+  # and its own portability heatmap (Figure 5.10) shows that configuration is useless on
+  # every other matrix in its set. That is the trap this benchmark is built around: one
+  # source, one parameter space, three regimes that each want a different answer.
+  - name: rail4284
+    scalars: {NROWS: 4284, NCOLS: 1096894, NNZ: 11284032, XMOD: 4}
+    files:
+      row_offsets: rail4284.rowptr.bin
+      col_indices: rail4284.col.bin
+      values: rail4284.val.bin
+    duration_s: 90
+
+  # mawi_201512012345 (MAWI network traffic graph). The extreme, and the entire prize.
+  # 18 571 154 rows, 19 020 160 nonzeros -- 1.02 per row on average, 8 419 679 rows
+  # completely EMPTY, and a single row holding 7 397 164 of the nonzeros, 39% of the
+  # matrix. Every published implementation is far from the floor here: the thesis's
+  # balanced kernel 2702 us, cuSPARSE 12.4 1056 us, cuSPARSE 12.0 on this card 14 155 us,
+  # against ~400-500 us of unavoidable traffic.
+  # 358 MiB of buffers are re-uploaded before every configuration, so give it a budget.
+  - name: mawi
+    scalars: {NROWS: 18571154, NCOLS: 18571154, NNZ: 19020160, XMOD: 2}
+    files:
+      row_offsets: mawi.rowptr.bin
+      col_indices: mawi.col.bin
+      values: mawi.val.bin
+    duration_s: 180
+
+  # Optional extra regimes; fetch with `--matrix <name>` and uncomment. Thesis RTX 3080
+  # numbers in the comment, tuned / cuSPARSE.
+  #
+  # GL7d19: 1 911 130 x 1 955 309, 37 322 725 nnz, 19.53/row, max 121 (1256 / 1007 us).
+  # Row lengths are nearly uniform, so load balance is not the issue and the thesis is
+  # still 1.25x behind -- a useful check that a merge-style kernel has not traded gather
+  # locality for balance.
+  # - name: GL7d19
+  #   scalars: {NROWS: 1911130, NCOLS: 1955309, NNZ: 37322725, XMOD: 4}
+  #   files: {row_offsets: GL7d19.rowptr.bin, col_indices: GL7d19.col.bin, values: GL7d19.val.bin}
+  #   duration_s: 180
+  #
+  # kron_g500-logn21: 2 097 152 x 2 097 152, 91 042 010 nnz, 43.41/row, max 196 833
+  # (6658 / 5821 us). The canonical power-law graph. 719 MiB re-uploaded per config.
+  # - name: kron_g500
+  #   scalars: {NROWS: 2097152, NCOLS: 2097152, NNZ: 91042010, XMOD: 4}
+  #   files: {row_offsets: kron_g500.rowptr.bin, col_indices: kron_g500.col.bin, values: kron_g500.val.bin}
+  #   duration_s: 240
+
+rules:
+  text:
+    - "NOTHING IS PRECOMPUTED AND NOTHING IS FREE. The kernel is handed raw CSR:
+       row_offsets, col_indices, values, x. If your algorithm needs a partition table, a
+       row-block map, a segment-start array or any other auxiliary structure, it has to be
+       produced by a kernel inside your own launcher, and KTT sums every launch in a
+       composite kernel into the reported time. This is the constraint the incumbent
+       dodges: its balanced kernel needs a `row_starts` array sized by the worker count,
+       and the thesis charges that pass to tuning overhead rather than to kernel time. You
+       do not get that. The way out is a decomposition whose split points can be found
+       IN-KERNEL in O(log n) per worker rather than tabulated in O(rows) beforehand."
+
+    - "`y` ARRIVES POISONED AND EVERY ELEMENT MUST BE WRITTEN. KTT re-uploads it before
+       every configuration from a host vector of large negative values, so it is NOT
+       zero at launch: a row you never write keeps garbage and fails validation by ~1000.
+       That includes empty rows -- 8 419 679 of mawi's 18 571 154 hold no nonzeros, and
+       their output is 0, which you still have to store. If your decomposition
+       accumulates into y with atomicAdd, you must zero y yourself in your own launcher
+       first, and KTT charges that launch like any other. Writing y costs ~88 us on mawi
+       (74 MiB) against ~440 us achievable, so write it once: one pass that stores every
+       row beats a zeroing pass plus a scatter unless the scatter buys more than it costs.
+       Watch the contention too -- one mawi row holds 39% of the matrix, so every worker
+       touching it serialises on a single address."
+
+    - "THE SHAPE ARRIVES AT RUNTIME. NROWS and NNZ are kernel arguments, not -D macros,
+       and NCOLS is not passed at all. Each case compiles the same source; a kernel that
+       branches on a specific matrix's dimensions, or embeds one of them as a literal, is
+       fitting the benchmark rather than solving it and is rejected before it compiles.
+       Adapt at runtime from the values you are given, or through a tuning parameter."
+
+    - "A MISMATCH IS A BUG, NEVER A ROUNDING DIFFERENCE. The input values are constructed
+       so every product and every partial sum is exact in fp32 (a small integer times a
+       power of two, row sums bounded below 2^24 ulps), so a correct kernel matches the
+       reference BITWISE whatever its summation order -- serial, tree, segmented or
+       atomic. If validation fails, read your index arithmetic; do not reach for the
+       tolerance. The same construction puts the smallest values at 2^-23, below the fp16
+       normal range, so reduced precision cannot validate here at all."
+
+  forbid:
+    - pattern: "cusparse|cusp::|cublas|cutlass|cudnn|cub::"
+      reason: "the point is to write the kernel; cuSPARSE is the thing being measured against"
+    - pattern: "\\b__half\\b|nv_bfloat16|__nv_bfloat"
+      reason: "values reach 2^-23, below the fp16 normal range; reduced precision cannot validate here"
+    - pattern: "\\b(178866|961790|1096894|11284032|18571154|19020160|7397164|1911130|1955309|37322725|91042010)\\b"
+      reason: "a case's dimensions written as a literal is per-matrix fitting; NROWS and NNZ are runtime arguments"

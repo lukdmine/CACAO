@@ -11,6 +11,9 @@ conda activate ktt
 ./setup.sh
 ```
 
+Flags: `--skip-ktt` (dependencies and verification only), `--skip-requirements`,
+`--reconfigure` (re-detect the toolchain and rewrite `cuda_env.yaml`).
+
 The setup script handles: dependency installation, CUDA detection, KTT build,
 symlink creation, and environment verification. See below for manual steps
 if you prefer.
@@ -19,7 +22,9 @@ if you prefer.
 
 ### Prerequisites
 
-- **CUDA Toolkit 12.0+** installed at `/usr/local/cuda`
+- **CUDA Toolkit** — `setup.sh` accepts `$CUDA_PATH`/`$CUDA_HOME`/`$CUDA_ROOT`,
+  `nvcc` on `PATH`, `/usr/local/cuda*`, `/opt/cuda*`, or a system install with no
+  dedicated root. No version floor is enforced
 - **NVIDIA GPU** with CUDA support
 - **Miniconda/Anaconda** for Python environment management
 - **LLM API Key** — one of: Anthropic (Claude), OpenAI, Google (Gemini), or CERIT
@@ -29,7 +34,8 @@ if you prefer.
 ### Step 1: Create Python Environment
 
 ```bash
-# Python 3.10 is what the setup script provisions and what the repo is tested on;
+# 3.10 is what this is built and tested on. Nothing enforces it — the old reason
+# (pybind11's ABI) no longer applies, since KTT's Python bindings are not built.
 conda create -n ktt python=3.10 -y
 conda activate ktt
 pip install -r requirements.txt
@@ -50,6 +56,10 @@ cd KTT && git checkout v2.3.1
 # For a dedicated install, use its root, e.g. /usr/local/cuda.
 export CUDA_PATH=/usr
 
+# A fresh KTT clone has no premake5 binary — the repo tracks only premake5.lua.
+# Fetch the pinned one (this is what setup.sh does) or install premake5 yourself:
+curl -sL https://github.com/premake/premake-core/releases/download/v5.0.0-beta2/premake-5.0.0-beta2-linux.tar.gz \
+  | tar xz
 # --no-opencl: the framework driver uses KTT's CUDA backend only, and CUDA 12
 # no longer ships the CL/cl.h headers the OpenCL backend needs.
 ./premake5 gmake --no-opencl
@@ -85,7 +95,7 @@ cp .env.example .env
 
 Then set one of (auto-detected from whichever key is present, unless you pick a
 provider explicitly — `--provider` on the CLI, the picker in the UI's Run dialog, or
-`LLM_PROVIDER` in `.env` / `config.py`):
+`LLM_PROVIDER` in `.env` / `llm/providers.py`):
 
 ```bash
 # Claude
@@ -121,27 +131,24 @@ python -c "from config import OptimizerConfig; print('Config OK')"
 
 ```bash
 conda activate ktt
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$(pwd):$LD_LIBRARY_PATH
-
 python cli.py --dir problems/mmul
 ```
 
-Options:
+`LD_LIBRARY_PATH` does not need setting: the engine builds it for every subprocess it
+launches, and the driver is linked with an rpath to the project root.
 
-```bash
-python cli.py --dir problems/mmul --resume         # resume interrupted run
-python cli.py --dir problems/mmul --max-iter 3 --max-depth 1
-python cli.py --dir problems/mmul --best           # show results without running
-python cli.py --dir problems/mmul --provider anthropic --model claude-opus-4-6
-```
+See the flag table in [README.md](README.md#cli-options), or `python cli.py --help`.
+`--model` is not validated against the roster in `llm/providers.py`, so a typo fails at the
+provider rather than at startup.
 
 ## Running the Server + Frontend
 
 ```bash
 # Terminal 1: Backend API server
 conda activate ktt
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$(pwd):$LD_LIBRARY_PATH
-python server.py                    # http://localhost:8003
+python server.py                    # http://localhost:8003, binds 0.0.0.0 by default
+                                    # --host / $HOST to change; see the security note
+                                    # in README.md before exposing it
 
 # Terminal 2: Frontend dev server
 cd frontend

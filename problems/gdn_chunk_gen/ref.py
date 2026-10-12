@@ -126,28 +126,37 @@ def prepare_input(scalars, buffers):
     v = t("v", (1, T, Hv, D))
     g = t("g", (1, T, Hv))
     beta = t("beta", (1, T, Hv))
+    # The state this chunk starts from. Layout is (kHv, kD, kD) flat
+    # h*kD*kD + dk*kD + dv, which batches to (B, H, K, V) -- the shape the oracle's
+    # `initial_state` expects.
+    s0 = t("s0", (1, Hv, D, D))
 
     # GQA: 16 QK heads -> 48 V heads. repeat_interleave, so V head j reads QK head j//3.
     rep = Hv // Hk
     q = q.repeat_interleave(rep, dim=2)
     k = k.repeat_interleave(rep, dim=2)
-    return {"q": q, "k": k, "v": v, "g": g, "beta": beta}
+    return {"q": q, "k": k, "v": v, "g": g, "beta": beta, "s0": s0}
 
 
-def gdn_chunk_reference(prepared):
+def gdn_chunk_reference(prepared, target="o"):
     """The timed region: one chunked GDN forward over device-resident inputs.
 
-    Returns `o` only. The runner validates one target buffer per invocation and hands the
-    callable no way to tell which one was asked for, so `state` is declared
-    `validate: false` in inputs.yaml. That is sufficient rather than lax: o[chunk i]
-    consumes the recurrent state left by chunk i-1, so any error in the state recurrence
-    corrupts every subsequent chunk of o. The only thing left uncovered is the final
-    state write after the last chunk, which is why problem.yaml carries a text rule
-    requiring it.
+    Serves BOTH validated buffers. utils.python_ref_runner inspects the signature and
+    passes the target name when the callable declares it, so `o` and the final `state`
+    are checked against the same forward pass.
+
+    `state` is validated because it is the next ubatch's initial state: a kernel can
+    produce a perfect `o` for this chunk and still corrupt every later one by writing
+    the state wrongly -- wrong values, or the right values in the wrong layout. That
+    was previously enforced only by a text rule in problem.yaml.
     """
     with torch.no_grad():
-        o, _ = _torch_chunk_gated_delta_rule(
+        o, S = _torch_chunk_gated_delta_rule(
             prepared["q"], prepared["k"], prepared["v"], prepared["g"], prepared["beta"],
-            chunk_size=64, output_final_state=True, use_qk_l2norm_in_kernel=True,
+            chunk_size=64, initial_state=prepared["s0"], output_final_state=True,
+            use_qk_l2norm_in_kernel=True,
         )
+    if target == "state":
+        # (1, kHv, kD, kD) -> flat h*kD*kD + dk*kD + dv
+        return S[0].reshape(-1)
     return o.reshape(-1)

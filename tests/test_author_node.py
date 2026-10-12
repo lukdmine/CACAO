@@ -75,20 +75,7 @@ def script(llm_turns):
     return ScriptedLLM(llm_turns)
 
 
-def call(tool, **args):
-    return {"tool": tool, "args": args}
-
-
-def _passing_check(monkeypatch):
-    from agentic.tools import Toolbox
-
-    def fake(self):
-        self.checks_run += 1
-        self.check_passed = True
-        self.last_check = "Compilation check: PASS"
-        return self.last_check
-
-    monkeypatch.setattr(Toolbox, "check_compilation", fake)
+from conftest import call, pass_check as _passing_check  # noqa: F401
 
 
 HAPPY_TURNS = [
@@ -434,3 +421,134 @@ async def test_second_iteration_binds_the_history_tools(env, monkeypatch):
     await author_mod.author_node(make_state(env, iter_num=2, current_iter=2))
 
     assert "grep_tuner_output" in set(captured["schemas"])
+
+
+async def test_seeding_recovers_an_aborted_step_from_its_staging(env, monkeypatch):
+    """_fail_iteration returns before ws.commit(), so a failed step's work is only in
+    .staging/ and reading the iteration directory alone left the retry empty."""
+    iter1 = env["branch"] / "iter1"
+    staging = author_mod.Workspace(iter1).staging
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "kernels.cu").write_text(
+        'extern "C" __global__ void k(){/*half written*/}\n', encoding="utf-8"
+    )
+    (staging / "region_params.cpp").write_text("// params so far\n", encoding="utf-8")
+
+    # Nothing was committed to the iteration directory itself.
+    assert not (iter1 / "kernels.cu").exists()
+
+    ws = author_mod.Workspace(env["branch"] / "iter2")
+    seeded = author_mod._seed_from_previous(ws, env["branch"], 2)
+
+    assert "kernels.cu" in seeded and "region_params.cpp" in seeded
+    assert "half written" in ws.read("kernels.cu")
+
+
+async def test_committed_files_win_over_stale_staging(env):
+    """Staging is only the fallback."""
+    iter1 = env["branch"] / "iter1"
+    iter1.mkdir(parents=True, exist_ok=True)
+    (iter1 / "kernels.cu").write_text("// committed\n", encoding="utf-8")
+    staging = author_mod.Workspace(iter1).staging
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "kernels.cu").write_text("// abandoned\n", encoding="utf-8")
+
+    ws = author_mod.Workspace(env["branch"] / "iter2")
+    author_mod._seed_from_previous(ws, env["branch"], 2)
+
+    assert "committed" in ws.read("kernels.cu")
+
+
+def test_retry_prompt_does_not_promise_files_it_has_none_of(env):
+    """Both wordings promised files unconditionally."""
+    empty = author_mod._task_text(make_state(env, iter_num=2, current_iter=2, mode="retry"), [])
+    assert "current files are shown below" not in empty
+    assert "workspace is empty" in empty.lower()
+
+    seeded = author_mod._task_text(
+        make_state(env, iter_num=2, current_iter=2, mode="retry"), ["kernels.cu"]
+    )
+    assert "current files are shown below" in seeded
+
+
+def test_followup_prompt_does_not_promise_files_it_has_none_of(env):
+    empty = author_mod._task_text(
+        make_state(env, iter_num=2, current_iter=2, mode="followup"), []
+    )
+    assert "edit them rather than rewriting" not in empty
+    assert "workspace is empty" in empty.lower()
+
+
+# -- salvaging a step that ended badly with the work already done -----------
+
+
+async def test_a_stalled_step_with_passing_files_is_committed(env, monkeypatch):
+    """Wrote everything, got a PASS, then answered in prose instead of calling
+    end_step. NO_TOOL_CALLS used to discard the whole verified workspace."""
+    _passing_check(monkeypatch)
+    turns = [
+        [call("write_file", name="kernels.cu", content='extern "C" __global__ void k(){}\n')],
+        [call("write_file", name="region_kernels.cpp", content="ktt::KernelId kernel = 0;\n")],
+        [
+            call(
+                "write_file",
+                name="region_params.cpp",
+                content='tuner.AddParameter(kernel, "TILE", std::vector<uint64_t>{16});\n',
+            )
+        ],
+        [call("write_file", name="region_launcher.cpp", content="// default\n")],
+        [call("check_compilation")],
+        "The kernel is complete and compiles cleanly.",
+        "As I said, it is done.",
+    ]
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(turns))
+
+    state = await author_mod.author_node(make_state(env))
+
+    assert "[AUTHORING FAILED]" not in state.run_output
+    assert state.status == "running"
+    assert "__global__ void k()" in state.kernel_code
+    assert (env["branch"] / "iter1" / "kernels.cu").exists()
+
+
+async def test_a_stalled_step_without_a_passing_check_still_fails(env, monkeypatch):
+    """Files that never compiled are not a result."""
+    def failing_check(self):
+        self.checks_run += 1
+        self.check_passed = False
+        self.last_check = "Compilation check: FAIL"
+        return self.last_check
+
+    monkeypatch.setattr(author_mod.Toolbox, "check_compilation", failing_check)
+    turns = [
+        [call("write_file", name="kernels.cu", content='extern "C" __global__ void k(){}\n')],
+        [call("write_file", name="region_kernels.cpp", content="ktt::KernelId kernel = 0;\n")],
+        [call("write_file", name="region_params.cpp", content="// p\n")],
+        [call("write_file", name="region_launcher.cpp", content="// l\n")],
+        [call("check_compilation")],
+        "I think that is right.",
+        "Still right.",
+    ]
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(turns))
+
+    state = await author_mod.author_node(make_state(env))
+
+    assert "[AUTHORING FAILED]" in state.run_output
+    assert state.status == "deciding"
+
+
+async def test_a_stalled_step_with_missing_files_still_fails(env, monkeypatch):
+    """Salvage requires both conditions, not just the check."""
+    _passing_check(monkeypatch)
+    turns = [
+        [call("write_file", name="kernels.cu", content='extern "C" __global__ void k(){}\n')],
+        [call("check_compilation")],
+        "Done.",
+        "Done.",
+    ]
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(turns))
+
+    state = await author_mod.author_node(make_state(env))
+
+    assert "[AUTHORING FAILED]" in state.run_output
+    assert state.status == "deciding"

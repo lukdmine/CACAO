@@ -151,3 +151,36 @@ class InputsSpec(BaseModel):
             for a in self.args
             if a.kind == "buffer" or "runtime" in a.placements
         ]
+
+    def for_case(self, case) -> "InputsSpec":
+        """This boundary with a case's overrides applied. Pure — no I/O, no mutation.
+
+        An override that names nothing declared raises rather than being ignored. A
+        typo'd `kt: 127` would otherwise tune every case at the same shape while every
+        signal downstream — validation, timings, the geomean — looked perfectly healthy.
+        """
+        known_scalars = {s.name for s in self.scalars}
+        unknown = sorted(set(case.scalars) - known_scalars)
+        if unknown:
+            raise ValueError(
+                f"Case '{case.name}' overrides unknown scalar(s) {unknown}; "
+                f"inputs.yaml declares {sorted(known_scalars)}"
+            )
+
+        file_buffers = {b.name for b in self.buffers if b.init == "file"}
+        not_files = sorted(set(case.files) - file_buffers)
+        if not_files:
+            raise ValueError(
+                f"Case '{case.name}' overrides file_name for {not_files}, which "
+                f"is not an init=file buffer; init=file buffers are {sorted(file_buffers)}"
+            )
+
+        resolved = self.model_copy(deep=True)
+        for arg in resolved.args:
+            if arg.kind == "scalar" and arg.name in case.scalars:
+                value = case.scalars[arg.name]
+                arg.value = int(value) if arg.dtype == "int" else float(value)
+            elif arg.kind == "buffer" and arg.name in case.files:
+                arg.file_name = case.files[arg.name]
+        return resolved
+

@@ -86,8 +86,13 @@ def load_json(path: Path) -> Optional[dict]:
 
 
 def problem_scalars(base_problem_dir: Path) -> dict:
-    config = load_yaml(base_problem_dir / "problem.yaml")
-    return {s["name"]: s["value"] for s in config.get("scalars", [])}
+    """The problem's scalar values, by name — inputs.yaml ``args`` with kind: scalar."""
+    spec = load_yaml(base_problem_dir / "inputs.yaml")
+    return {
+        arg["name"]: arg["value"]
+        for arg in spec.get("args", [])
+        if arg.get("kind") == "scalar" and "value" in arg
+    }
 
 
 # ---------------------------------------------------------------------------

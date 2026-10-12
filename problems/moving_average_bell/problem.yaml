@@ -1,0 +1,19 @@
+name: Moving Average with bell-shaped weightig
+description: '1D Moving Average with boundary clamping: out[i] = mean of 2R neighbours
+  of in[i] (N elements, half-window R). A bell-shaped function is used to weight input
+  data within the averaging range.'
+gpu:
+  index: 0
+global_size_type: opencl
+grid:
+  x: N
+  y: '1'
+  z: '1'
+reference:
+  type: cpu_c
+  function: moving_average_reference
+  file: ref_cpu.c
+validation:
+  tolerance: 0.001
+tuning:
+  duration_s: 100

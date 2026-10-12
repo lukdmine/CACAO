@@ -28,8 +28,14 @@ from config import (
     OptimizerConfig,
     init_from_config,
 )
-from utils.files import load_file, archive_output_dir, prune_archives
+from utils.files import (
+    load_file,
+    archive_output_dir,
+    clone_problem_dir,
+    prune_archives,
+)
 from utils.log import log, TeeWriter
+from utils.problem import reference_spec
 
 
 def log_section(title: str):
@@ -140,7 +146,7 @@ def check_prerequisites(problem_dir: Path):
         log(f"Failed to parse problem.yaml: {e}", "ERROR")
         return False
 
-    ref_file = problem_config.get("reference", {}).get("file", "ref_kernel.cu")
+    ref_file = reference_spec(problem_config).file
     ref_path = problem_dir / ref_file
     if not ref_path.exists():
         log(f"Reference source not found at {ref_path}", "ERROR")
@@ -221,11 +227,7 @@ async def main():
         if target_dir.exists():
             log(f"Problem '{new_name}' already exists", "ERROR")
             return 1
-        shutil.copytree(
-            problem_dir,
-            target_dir,
-            ignore=shutil.ignore_patterns("run.pid", "run.log", "requeue"),
-        )
+        clone_problem_dir(problem_dir, target_dir)
         log(f"Cloned '{problem_dir.name}' → '{new_name}'", "SUCCESS")
         return 0
 
@@ -240,11 +242,13 @@ async def main():
         model=args.model,
         provider=args.provider,
     )
-    init_from_config(cfg)
-    model = args.model or get_default_model()
-
-    # Check API key and detect provider
+    # init_from_config and get_default_model both reach _detect_provider, which is what
+    # raises "No LLM provider detected". They have to be inside the try, or the message
+    # below is unreachable and a fresh checkout with no API key gets a raw traceback
+    # instead of the four lines telling it which variable to set.
     try:
+        init_from_config(cfg)
+        model = args.model or get_default_model()
         check_api_key()
         provider = get_provider()
         log(f"Using LLM provider: {provider}", "SUCCESS")
@@ -312,7 +316,7 @@ async def main():
     if args.resume:
         log_section("RESUMING PREVIOUS RUN")
 
-        from utils.resume import get_resume_states
+        from engine.resume import get_resume_states
 
         # Build resume states for incomplete branches
         log("\nScanning branch status...")
@@ -360,7 +364,11 @@ async def main():
     # After all branches complete, aggregate results from disk
     log_section("AGGREGATING RESULTS")
 
-    from nodes.merge import find_branch_results, get_best_branch_result
+    from nodes.merge import (
+        build_final_summary,
+        find_branch_results,
+        get_best_branch_result,
+    )
     from utils.files import save_json
 
     output_dir = config.get_output_dir()
@@ -412,26 +420,10 @@ async def main():
         if best.get("speedup"):
             log(f"Speedup: {best.get('speedup'):.2f}x")
 
-        # Save final summary
-        final_summary = {
-            "best_branch": best.get("branch_name"),
-            "best_config": best.get("best_config"),
-            "best_time_us": best.get("best_time_us"),
-            "speedup": best.get("speedup"),
-            "total_branches": len(branch_results),
-            "all_branches": [
-                {
-                    "name": r.get("branch_name"),
-                    "path": r.get("branch_path"),
-                    "status": r.get("status"),
-                    "best_time_us": r.get("best_time_us"),
-                    "speedup": r.get("speedup"),
-                    "iterations": r.get("iterations"),
-                }
-                for r in branch_results
-            ],
-        }
-        save_json(output_dir / "final_results.json", final_summary)
+        save_json(
+            output_dir / "final_results.json",
+            build_final_summary(branch_results, best),
+        )
 
         return 0
     else:

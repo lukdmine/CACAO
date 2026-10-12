@@ -50,6 +50,12 @@ export async function fetchProblems(): Promise<ProblemsResponse> {
     return apiFetch<ProblemsResponse>('/api/problems');
 }
 
+export interface InputFileStatus {
+    file_name: string;
+    exists: boolean;
+    bytes: number | null;
+}
+
 export interface ProblemDetailResponse {
     name: string;
     config: Record<string, unknown>;
@@ -60,7 +66,11 @@ export interface ProblemDetailResponse {
     // it never reconstructs form state from C++. Null for a problem with no inputs.yaml.
     inputs: InputsSpec | null;
     // Upload status per init=file buffer (by buffer name); empty for problems without.
-    input_files: Record<string, { file_name: string; exists: boolean; bytes: number | null }>;
+    input_files: Record<string, InputFileStatus>;
+    // Every binary under inputs/, by path relative to it -> bytes. The case editor
+    // checks a typed file name against this, so it can answer for a name that is not
+    // saved yet and for a case problem.yaml has never seen.
+    inputs_dir_files: Record<string, number>;
     has_output: boolean;
 }
 
@@ -72,10 +82,21 @@ export async function fetchProblemDetail(name: string): Promise<ProblemDetailRes
  * Upload a buffer's binary for init=file. Raw body (no multipart): the file IS the
  * body. The server derives file_name from the saved spec and checks the byte count
  * against size * sizeof(dtype) — call it AFTER saving the problem.
+ *
+ * `caseName` targets one of problem.yaml's cases: the destination becomes that case's
+ * `files` override and the byte count is checked against that case's scalars. Both
+ * come from the case — so the case's override must be SAVED before the upload, or the
+ * bytes land on the declared file_name and overwrite the shared binary.
  */
-export async function uploadProblemInput(name: string, buffer: string, file: File) {
+export async function uploadProblemInput(
+    name: string,
+    buffer: string,
+    file: File,
+    caseName?: string,
+) {
+    const q = caseName ? `?case=${encodeURIComponent(caseName)}` : '';
     const res = await fetch(
-        `${API_BASE}/api/problems/${name}/inputs/${encodeURIComponent(buffer)}`,
+        `${API_BASE}/api/problems/${name}/inputs/${encodeURIComponent(buffer)}${q}`,
         { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file },
     );
     if (!res.ok) {
@@ -97,7 +118,6 @@ export interface TreeResponse {
     llm_model?: string;
     llm_provider?: string;
     token_usage?: TokenUsage | null;
-    tuning_duration_s?: number | null;
 }
 
 /**
@@ -136,6 +156,17 @@ export function fetchTreeConditional(problemName: string, etag: string | null) {
 /**
  * Full work products for one iteration — the fields the tree omits.
  */
+/**
+ * The phase-1 analysis of the problem and its reference kernel. `analysis: null`
+ * means the run has not produced it yet — a state, not an error.
+ */
+export function fetchAnalysis(problemName: string, etag: string | null) {
+    return apiFetchConditional<{ analysis: string | null }>(
+        `/api/problems/${problemName}/analysis`,
+        etag,
+    );
+}
+
 export function fetchIteration(
     problemName: string,
     branchId: string,
@@ -202,6 +233,23 @@ export interface RulesSpec {
     forbid: ForbidRule[];
 }
 
+/** One named instantiation of the declared inputs — problem.yaml's `cases:` block.
+ *
+ * Every case is compiled, validated and tuned each iteration against the same
+ * kernels.cu, and each gets its own tuned configuration. `scalars` keys must name a
+ * scalar declared in inputs.yaml and `files` keys an init=file buffer; the backend
+ * rejects anything else rather than ignoring it. cases[0] is the primary: the display
+ * anchor, the shape NCU profiles, and the one whose baseline is the flat
+ * reference_time_us. */
+export interface CaseSpec {
+    name: string;
+    scalars: Record<string, number>;
+    files: Record<string, string>;
+    /** Falls back to tuning.duration_s. A tail case exists to catch a correctness bug
+     *  rather than to find an optimum, so a shorter budget is normal here. */
+    duration_s?: number | null;
+}
+
 export interface CreateProblemData {
     slug: string;
     name: string;
@@ -215,6 +263,11 @@ export interface CreateProblemData {
     // Constraints on what a kernel may do. `forbid` patterns are checked before the
     // compiler and fail the iteration; see utils/rules.py.
     rules?: RulesSpec;
+    // Input cases. Omitting the field entirely PRESERVES whatever problem.yaml already
+    // declares; an empty array clears them. This dialog always sends the full list it
+    // loaded, so an edit round-trips; the preserve behaviour is the safety net for any
+    // client that does not know about cases.
+    cases?: CaseSpec[];
     // All three run. They differ in what the reference receives:
     //   cuda   — a kernel over the boundary (buffers + runtime scalars), bound by position
     //   cpu_c  — a C function taking every buffer as a pointer, scalars as -D macros

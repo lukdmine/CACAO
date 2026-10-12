@@ -1,16 +1,14 @@
 import { useState } from 'react';
 import { useAppStore } from '@/store/appStore';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { formatTime } from '@/utils/statusColors';
 import { runProblem, resumeProblem, stopProblem } from '@/api/client';
 import { refreshTree } from '@/api/hooks';
 import { toast } from 'sonner';
-import { Play, RotateCcw, PanelLeft, Cpu, Wifi, WifiOff, Square, Loader2, Coins, Timer, Archive } from 'lucide-react';
+import { Play, RotateCcw, PanelLeft, Cpu, Wifi, WifiOff, Square, Loader2, Coins, Archive } from 'lucide-react';
 
 export function Toolbar() {
     const activeProblem = useAppStore((s) => s.activeProblem);
@@ -28,20 +26,10 @@ export function Toolbar() {
     const selectedModel = useAppStore((s) => s.selectedModel);
     const setSelectedProvider = useAppStore((s) => s.setSelectedProvider);
     const setSelectedModel = useAppStore((s) => s.setSelectedModel);
-    const problemTuningDurationS = useAppStore((s) => s.problemTuningDurationS);
 
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [isStopping, setIsStopping] = useState(false);
     const [confirmRerun, setConfirmRerun] = useState(false);
-
-    // Timeout override is tagged by the problem it was entered for, so switching
-    // problems automatically reverts the input to that problem's yaml default —
-    // no effect needed.
-    const [timeoutOverride, setTimeoutOverride] = useState<{ problem: string | null; value: string }>({ problem: null, value: '' });
-    const overrideActive = timeoutOverride.problem === activeProblem;
-    const timeoutDisplay = overrideActive
-        ? timeoutOverride.value
-        : (problemTuningDurationS != null ? String(problemTuningDurationS) : '');
 
     const branchCount = treeNodes.filter((n) => n.id !== 'root').length;
     const hasExistingRun = branchCount > 0;
@@ -50,18 +38,9 @@ export function Toolbar() {
         null,
     );
 
-    const parsedTimeout = (() => {
-        const t = timeoutDisplay.trim();
-        if (!t) return null;
-        const n = Number(t);
-        return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
-    })();
-    const sendTimeout = overrideActive && parsedTimeout != null && parsedTimeout !== problemTuningDurationS;
-
     const runConfig = {
         ...(selectedProvider && { provider: selectedProvider }),
         ...(selectedModel && { model: selectedModel }),
-        ...(sendTimeout && { timeout: parsedTimeout }),
     };
 
     // A rerun starts from nothing. The backend archives the previous run rather than
@@ -147,27 +126,6 @@ export function Toolbar() {
                             ))}
                         </SelectContent>
                     </Select>
-                    <div
-                        className="flex items-center gap-1.5"
-                        title={
-                            problemTuningDurationS != null
-                                ? `Tuner budget (seconds). Prefilled from problem.yaml tuning.duration_s = ${problemTuningDurationS}.`
-                                : 'Tuner budget (seconds). Not set in problem.yaml — leave blank to use the system default.'
-                        }
-                    >
-                        <Timer size={13} className="text-muted-foreground shrink-0" />
-                        <Input
-                            type="number"
-                            min={1}
-                            value={timeoutDisplay}
-                            onChange={(e) =>
-                                setTimeoutOverride({ problem: activeProblem, value: e.target.value })
-                            }
-                            placeholder={problemTuningDurationS != null ? String(problemTuningDurationS) : 'default'}
-                            className="h-7 text-xs w-[110px]"
-                        />
-                        <span className="text-[10px] text-muted-foreground shrink-0">s</span>
-                    </div>
                 </div>
             )}
 
@@ -200,14 +158,14 @@ export function Toolbar() {
             {runStatus === 'running' && (
                 <div className="flex items-center gap-1.5">
                     {(llmProvider || llmModel) && (
-                        <Badge variant="secondary" className="text-xs font-normal">
+                        <span className="text-xs text-muted-foreground">
                             {[llmProvider, llmModel].filter(Boolean).join(' · ')}
-                        </Badge>
+                        </span>
                     )}
-                    <Badge variant="outline" className="text-xs text-amber-400 border-amber-500/30">
-                        <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse mr-1.5 inline-block" />
-                        Running...
-                    </Badge>
+                    <span className="flex items-center gap-1.5 text-xs text-amber-400">
+                        <span className="inline-block size-1.5 animate-pulse rounded-full bg-amber-400" />
+                        Running
+                    </span>
                     <Button
                         size="sm"
                         variant="destructive"
@@ -238,9 +196,10 @@ export function Toolbar() {
 
             {/* Status badge */}
             {runStatus === 'completed' && (
-                <Badge variant="outline" className="text-xs text-emerald-400 border-emerald-500/30">
+                <span className="flex items-center gap-1.5 text-xs text-emerald-400">
+                    <span className="inline-block size-1.5 rounded-full bg-emerald-400" />
                     completed
-                </Badge>
+                </span>
             )}
 
             {/* Spacer */}

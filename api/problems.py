@@ -3,6 +3,7 @@
 import os
 import re
 import shutil
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 import numpy as np
@@ -26,9 +27,15 @@ from utils.inputs import (
     load_inputs_spec,
     write_inputs,
 )
+from utils.files import clone_problem_dir
 from utils.python_ref_runner import DTYPE_MAP, eval_size
 
 router = APIRouter()
+
+# Cap on the inputs/ listing in the detail payload. A problem has a handful of
+# binaries; the cap only stops a directory someone used as a scratch space from
+# turning every Edit into a megabyte of JSON.
+_MAX_LISTED_INPUTS = 500
 
 
 _REF_SIGNATURE = re.compile(
@@ -172,6 +179,8 @@ def _build_problem_data(req: CreateProblemRequest, gpu_index: int):
     # forbid: []}` stanza on every problem that has none.
     if req.rules is not None and not req.rules.is_empty():
         data["rules"] = req.rules.model_dump(exclude_none=True)
+    if req.cases:
+        data["cases"] = [c.model_dump(exclude_none=True) for c in req.cases]
     return data
 
 
@@ -182,6 +191,20 @@ def _write_problem_files(problem_dir, problem_data, req: CreateProblemRequest) -
     uploads the file right after saving (and re-uploads on demand in Edit).
     ensure_inputs_hpp still hard-fails at run start.
     """
+    # A client that does not send `cases` keeps whatever the file already declares.
+    # problem.yaml is rebuilt wholesale from the request, so without this an Edit+Save
+    # from a UI with no cases support deletes a hand-written case list — and the next run
+    # would tune only the primary shape while reporting a perfectly healthy result.
+    if req.cases is None:
+        existing = problem_dir / "problem.yaml"
+        if existing.exists():
+            try:
+                prior = yaml.safe_load(existing.read_text(encoding="utf-8")) or {}
+            except Exception:
+                prior = {}
+            if prior.get("cases"):
+                problem_data["cases"] = prior["cases"]
+
     with (problem_dir / "problem.yaml").open("w", encoding="utf-8") as f:
         yaml.dump(problem_data, f, default_flow_style=False, sort_keys=False)
     (problem_dir / _REFERENCE_FILE[req.reference_type]).write_text(_reference_source(req), encoding="utf-8")
@@ -284,15 +307,7 @@ def clone_problem(name: str, req: CloneProblemRequest):
             status_code=409, detail=f"Problem '{req.new_name}' already exists"
         )
 
-    # Copy entire problem directory, excluding runtime artifacts.
-    # symlinks=True copies links as links so stale/broken symlinks in old
-    # output dirs don't crash the copy.
-    shutil.copytree(
-        source_dir,
-        target_dir,
-        symlinks=True,
-        ignore=shutil.ignore_patterns("run.pid", "run.log", "requeue"),
-    )
+    clone_problem_dir(source_dir, target_dir)
 
     return {"status": "cloned", "name": req.new_name, "source": name}
 
@@ -322,7 +337,9 @@ def update_problem(name: str, req: CreateProblemRequest):
 
 
 @router.post("/api/problems/{name}/inputs/{buffer_name}")
-async def upload_input_file(name: str, buffer_name: str, request: Request):
+async def upload_input_file(
+    name: str, buffer_name: str, request: Request, case: Optional[str] = None
+):
     """Upload the binary for an init=file buffer.
 
     Raw request body (application/octet-stream), streamed to disk in chunks — inputs
@@ -330,6 +347,11 @@ async def upload_input_file(name: str, buffer_name: str, request: Request):
     ``file_name`` comes from the saved spec, never from the client, so the path cannot
     be steered outside the problem's inputs/ directory. The byte count must equal
     size * sizeof(dtype) — the same contract the generated driver enforces at start.
+
+    ``case`` selects one of problem.yaml's input cases: the destination becomes that
+    case's ``files`` override and the expected byte count is computed from that case's
+    scalars. Both must come from the case, not one of each — a per-case binary checked
+    against the declared size is rejected every time.
     """
     problem_dir = get_problem_dir(name)
     if is_problem_running(name):
@@ -351,14 +373,40 @@ async def upload_input_file(name: str, buffer_name: str, request: Request):
 
     # Belt and braces: the model already rejects absolute paths and '..', but the
     # resolved path staying under inputs/ is what makes this endpoint safe.
+    # Resolve the destination and the expected size through the case, if one was named.
+    resolved_spec, file_name = spec, buf.file_name
+    if case is not None:
+        import yaml as _yaml
+
+        from utils.cases import case_list
+
+        try:
+            meta = _yaml.safe_load(
+                (problem_dir / "problem.yaml").read_text(encoding="utf-8")
+            ) or {}
+            cases = case_list(meta)
+        except Exception as e:
+            raise HTTPException(
+                status_code=400, detail=f"Cannot read this problem's cases: {e}"
+            )
+        target = next((c for c in cases if c.name == case), None)
+        if target is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Case '{case}' not found; this problem's cases are "
+                + ", ".join(c.name for c in cases),
+            )
+        resolved_spec = spec.for_case(target)
+        file_name = target.files.get(buffer_name, buf.file_name)
+
     inputs_dir = (problem_dir / INPUTS_SUBDIR).resolve()
-    path = (inputs_dir / buf.file_name).resolve()
+    path = (inputs_dir / file_name).resolve()
     if not path.is_relative_to(inputs_dir):
         raise HTTPException(
             status_code=400, detail="file_name escapes the inputs/ directory"
         )
 
-    scalars = {s.name: s.value for s in spec.scalars}
+    scalars = {s.name: s.value for s in resolved_spec.scalars}
     try:
         elems = eval_size(buf.size, scalars)
     except Exception as e:
@@ -400,7 +448,9 @@ async def upload_input_file(name: str, buffer_name: str, request: Request):
     return {
         "status": "uploaded",
         "buffer": buffer_name,
-        "file_name": buf.file_name,
+        # The name actually written, which is the case's override when one was named —
+        # not buf.file_name, the declared one the other cases read.
+        "file_name": file_name,
         "bytes": want,
     }
 
@@ -476,6 +526,22 @@ def get_problem(name: str):
                     "bytes": p.stat().st_size if p.is_file() else None,
                 }
 
+    # What inputs/ actually holds, keyed by path relative to it (file_name may name a
+    # subdirectory). A flat listing rather than a per-case resolution because the
+    # question the editor asks is "is the name in THIS field on the server" — for a
+    # name typed a second ago, against a case that may not be in problem.yaml yet.
+    # Resolving cases here would answer only for the ones already saved.
+    inputs_dir_files: dict = {}
+    inputs_dir = problem_dir / INPUTS_SUBDIR
+    if inputs_dir.is_dir():
+        for f in sorted(inputs_dir.rglob("*")):
+            if len(inputs_dir_files) >= _MAX_LISTED_INPUTS:
+                break
+            # .part is the temp file an interrupted upload leaves; listing it would
+            # show a rejected binary as present.
+            if f.is_file() and not f.name.endswith(".part"):
+                inputs_dir_files[f.relative_to(inputs_dir).as_posix()] = f.stat().st_size
+
     return {
         "name": name,
         "config": config,
@@ -485,5 +551,8 @@ def get_problem(name: str):
         "inputs": inputs,
         # Upload status per init=file buffer; the Edit dialog shows/replaces from this.
         "input_files": input_files,
+        # Every binary under inputs/, by relative path -> bytes. What the case editor
+        # checks a typed file name against.
+        "inputs_dir_files": inputs_dir_files,
         "has_output": (problem_dir / "output").is_dir(),
     }

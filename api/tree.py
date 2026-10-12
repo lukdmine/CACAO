@@ -64,6 +64,14 @@ def _load_run_meta(output_dir: Path) -> dict:
 router = APIRouter()
 
 
+
+def _primary_case_dir(problem_dir, iter_dir):
+    """The iteration directory holding the anchor results.json."""
+    from utils.cases import primary_case_dir
+
+    return primary_case_dir(problem_dir, iter_dir)
+
+
 def _project_iter(snap: dict) -> dict:
     """Reduce a full IterState to what the tree needs, plus presence flags.
 
@@ -119,6 +127,9 @@ def _scan_branches(branches_dir: Path, name: str, seen: set[str]) -> list[dict]:
     from utils.results import get_results_summary, load_reference_time
 
     output_dir = branches_dir.parent
+    problem_dir = output_dir.parent
+    # The primary case's baseline: the flat reference_time_us key, which is what a
+    # single-case problem has always stored.
     ref_time = load_reference_time(output_dir)
     cache = _iter_cache.setdefault(name, {})
 
@@ -158,7 +169,9 @@ def _scan_branches(branches_dir: Path, name: str, seen: set[str]) -> list[dict]:
             else:
                 snap = load_json(state_file)
                 if not snap.get("results_summary") and snap.get("iter_num") is not None:
-                    results_path = iter_dir / "results.json"
+                    # A multi-case problem keeps no results.json at the iteration root;
+                    # the anchor the UI shows is the primary case's.
+                    results_path = _primary_case_dir(problem_dir, iter_dir) / "results.json"
                     if results_path.exists():
                         snap["results_summary"] = get_results_summary(
                             results_path, ref_time
@@ -358,16 +371,60 @@ def get_tree(
     # Read model/provider from run_meta.json (written by optimizer subprocess)
     run_meta = _load_run_meta(output_dir)
 
-    tuning_duration_s = (config.get("tuning") or {}).get("duration_s")
-
     return {
         "nodes": nodes,
         "running": is_problem_running(name),
         "llm_model": run_meta.get("model"),
         "llm_provider": run_meta.get("provider"),
         "token_usage": _load_token_usage(output_dir),
-        "tuning_duration_s": tuning_duration_s,
     }
+
+
+@router.get("/api/problems/{name}/analysis")
+def get_analysis(
+    name: str, response: Response, if_none_match: str | None = Header(None)
+):
+    """The phase-1 analysis of the problem and its reference kernel.
+
+    Its own endpoint rather than a field on the tree payload: it is written once,
+    before the first branch exists, and never changes — while the tree is polled for
+    the life of the run and re-sends everything whenever any branch touches its
+    manifest. ``analysis: null`` means phase 1 has not produced it yet, which is a
+    state the root panel shows rather than an error.
+    """
+    problem_dir = get_problem_dir(name)
+    output_dir = problem_dir / "output"
+    context_path = output_dir / "context.json"
+    md_path = output_dir / "analysis.md"
+
+    h = hashlib.blake2b(digest_size=16)
+    h.update(b"1|")
+    for p in (context_path, md_path):
+        st = p.stat() if p.exists() else None
+        h.update(f"{p.name}:{st.st_mtime_ns if st else 0}:{st.st_size if st else 0}|".encode())
+    etag = f'W/"{h.hexdigest()}"'
+    if if_none_match == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+
+    analysis = None
+    if context_path.exists():
+        try:
+            analysis = (load_json(context_path) or {}).get("analysis") or None
+        except Exception:
+            # Whatever is wrong with the file, the panel is where you go to look at
+            # the run — it has to load and say "not available" rather than 500.
+            analysis = None
+    # nodes/analyze writes analysis.md before the engine writes context.json, so a
+    # run killed in between leaves only the dump. Reading it back is the difference
+    # between the panel having the analysis and reporting that there is none.
+    if analysis is None and md_path.exists():
+        try:
+            analysis = md_path.read_text(encoding="utf-8", errors="replace") or None
+        except Exception:
+            analysis = None
+
+    return {"analysis": analysis}
 
 
 @router.get("/api/problems/{name}/results")

@@ -9,6 +9,7 @@ import pytest
 
 from agentic.tools import Toolbox, schemas_for
 from agentic.workspace import ToolError
+from conftest import make_toolbox
 from utils.rules import ForbiddenPattern, Rules
 
 
@@ -273,3 +274,43 @@ def test_passing_check_does_not_nag_about_editing(filled_workspace, tmp_path, mo
     monkeypatch.setattr("utils.nvrtc.check_kernel", lambda *a, **k: [])
     out = box.check_compilation()
     assert "edit_file to fix them" not in out
+
+
+# -- rules and architecture -------------------------------------------------
+
+
+def test_a_rules_violation_records_its_own_verdict(filled_workspace, tmp_path):
+    """author_node reports last_check as the failure reason, so this branch must set
+    it rather than leave the previous — possibly PASSing — verdict."""
+    box = make_toolbox(
+        filled_workspace,
+        tmp_path,
+        rules=Rules(forbid=[ForbiddenPattern(pattern="TILE", reason="no tiling")]),
+    )
+    box.last_check = "Compilation check: PASS\n\nstale"
+
+    verdict = box.check_compilation()
+
+    assert box.check_passed is False
+    assert "VIOLATED" in verdict
+    assert box.last_check == verdict
+    assert "PASS" not in box.last_check.splitlines()[0]
+
+
+@pytest.mark.parametrize(
+    "meta, gpu_info, expected",
+    [
+        # gpu_info is empty whenever NCU is missing or permission-restricted; without
+        # the problem.yaml fallback the check targets NVRTC's lowest arch and rejects
+        # cp.async / wmma / bf16 kernels the real device compiles fine.
+        ({"gpu": {"compute_capability": "8.6"}}, None, "8.6"),
+        ({"gpu": {"compute_capability": "7.0"}}, {"compute_capability": "8.6"}, "8.6"),
+        # NVRTC's own default is right when the architecture is unknown.
+        ({}, None, None),
+    ],
+)
+def test_compute_capability_resolution(
+    filled_workspace, tmp_path, meta, gpu_info, expected
+):
+    box = make_toolbox(filled_workspace, tmp_path, meta=meta, gpu_info=gpu_info)
+    assert box._compute_capability() == expected

@@ -10,8 +10,8 @@ per branch.
 """
 
 import asyncio
-import re
 from pathlib import Path
+from typing import List, Optional
 
 import config as _cfg
 from config import get_output_dir, global_tracker
@@ -21,6 +21,7 @@ from nodes.strategize import strategize_node
 
 from utils.files import create_branch_dir
 from utils.log import log
+from utils.ref_timing import preflight_python_reference, time_python_reference
 from state import (
     MainState,
     BranchConfig,
@@ -28,169 +29,27 @@ from state import (
     Context,
     save_context,
     save_branch_config,
+    load_branch_config,
     save_branch_manifest,
     load_branch_manifest,
     read_requeue,
 )
 
 
-async def _time_python_reference_once(problem_dir: Path, output_dir: Path) -> None:
-    """Time a python reference's GPU op once, up-front, on the real inputs.
-
-    For ``reference.type: python`` only: compiles+runs a standalone dump tool
-    (which includes inputs.hpp, so the ``cacao_ref::h_*`` statics build the real,
-    deterministic input data) to materialize ``cacao_in_<name>.bin``, then runs
-    ``utils.torch_ref_timer`` — it loads ref.py, calls ``prepare_input`` (H2D,
-    not timed), and times the reference function via ``torch.cuda.Event`` (min
-    over a few single-call runs). The result (µs) is persisted to
-    reference_time.json (first-write-wins), so every iteration's speedup uses
-    this precise GPU-only value instead of KTT's coarse wall-clock time.
-
-    Silent no-op for non-python references and on any failure (no torch/CUDA, no
-    ``prepare_input``, compile error): KTT's coarse post-tune time remains the
-    fallback, written by run_node's existing parse path. Skipped on resume when
-    reference_time.json already exists.
-    """
-    import sys
-    import yaml as _yaml
-
-    from utils.inputs import generate_dump_inputs_cpp, load_inputs_spec
-    from utils.build import compile_dump_inputs
-    from utils.results import load_reference_time, save_reference_time
-    from utils.cuda_env import get_subprocess_env
-    from utils.gpu_lock import acquire_gpu_lock
-
-    if load_reference_time(output_dir) is not None:
-        return  # resume: already timed (first-write-wins persists it)
-
-    problem_dir = Path(problem_dir).resolve()
-    output_dir = Path(output_dir).resolve()
-
-    try:
-        cfg = _yaml.safe_load((problem_dir / "problem.yaml").read_text(encoding="utf-8")) or {}
-    except Exception:
-        return
-    ref = cfg.get("reference") or {}
-    if str(ref.get("type", "cuda")).lower() != "python":
-        return
-    ref_file = ref.get("file", "ref.py")
-    ref_function = ref.get("function", "")
-
-    timing_dir = output_dir / "_ref_timing"
-    timing_dir.mkdir(parents=True, exist_ok=True)
-    dump_cpp = timing_dir / "dump_inputs.cpp"
-    dump_bin = timing_dir / "dump_inputs"
-
-    try:
-        spec = load_inputs_spec(problem_dir / "inputs.yaml")
-        dump_cpp.write_text(generate_dump_inputs_cpp(spec), encoding="utf-8")
-    except Exception as e:
-        log(f"reference timing: could not generate dump_inputs.cpp: {e}", "WARN")
-        return
-
-    build = compile_dump_inputs(dump_cpp, dump_bin, problem_dir)
-    if not build.ok:
-        log(
-            f"reference timing: dump_inputs compile failed — "
-            f"falling back to KTT coarse time: {build.stderr}",
-            "WARN",
-        )
-        return
-
-    async with acquire_gpu_lock():
-        # Dump the real inputs (cwd = timing_dir so the .bin land there).
-        try:
-            dump_proc = await asyncio.create_subprocess_exec(
-                str(dump_bin),
-                cwd=str(timing_dir),
-                env=get_subprocess_env(),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                _, stderr_b = await asyncio.wait_for(
-                    dump_proc.communicate(), timeout=300
-                )
-            except asyncio.TimeoutError:
-                log("reference timing: dump_inputs timed out", "WARN")
-                dump_proc.kill()
-                await dump_proc.wait()
-                return
-            if dump_proc.returncode != 0:
-                log(
-                    f"reference timing: dump_inputs run failed — "
-                    f"falling back to KTT coarse time: {stderr_b.decode(errors='replace')}",
-                    "WARN",
-                )
-                return
-        except Exception as e:
-            log(f"reference timing: dump_inputs run error: {e}", "WARN")
-            return
-
-        timer_cmd = [
-            sys.executable,
-            "-m",
-            "utils.torch_ref_timer",
-            "--inputs",
-            str(problem_dir / "inputs.yaml"),
-            "--ref",
-            str(problem_dir / ref_file),
-            "--function",
-            ref_function,
-            "--inputs-dir",
-            str(timing_dir),
-        ]
-        try:
-            timer_proc = await asyncio.create_subprocess_exec(
-                *timer_cmd,
-                cwd=str(problem_dir),
-                env=get_subprocess_env(),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    timer_proc.communicate(), timeout=300
-                )
-            except asyncio.TimeoutError:
-                log("reference timing: torch_ref_timer timed out", "WARN")
-                timer_proc.kill()
-                await timer_proc.wait()
-                return
-        except Exception as e:
-            log(f"reference timing: torch_ref_timer error: {e}", "WARN")
-            return
-
-        if timer_proc.returncode != 0:
-            log(
-                f"reference timing skipped (torch_ref_timer exit "
-                f"{timer_proc.returncode}) — falling back to KTT coarse time: "
-                f"{stderr_b.decode(errors='replace').strip()}",
-                "WARN",
-            )
-            return
-
-    # Parse outside the GPU lock: matching + persistence don't touch the GPU.
-    out = stdout_b.decode(errors="replace")
-    m = re.search(r"^CACAO_REF_TIME_US=([0-9.]+)$", out, re.MULTILINE)
-    if not m:
-        log(f"reference timing: unparseable timer output {out[:200]!r}", "WARN")
-        return
-    us = float(m.group(1))
-
-    save_reference_time(output_dir, us)
-    log(f"Reference time (precise, GPU-only): {us:.2f} µs", "SUCCESS")
-
-
 def _init_branch(
     strategy: dict,
-    parent_branch: str = None,
+    parent_branch: Optional[str] = None,
     current_depth: int = _cfg.MAX_BRANCH_DEPTH,
     path_iters_consumed: int = 0,
+    inherited_max_iter: Optional[int] = None,
+    path_budget_total: Optional[int] = None,
 ) -> Path:
     """
     Creates the directory for a new branch and initializes its branch.json.
     Returns the path to the newly created branch directory.
+
+    ``inherited_max_iter`` and ``path_budget_total`` carry the parent's effective
+    budget down; both are None for a root branch, the only place config still applies.
     """
     if parent_branch:
         parent_path = Path(parent_branch)
@@ -202,19 +61,24 @@ def _init_branch(
         strategy.get("name", "default") if isinstance(strategy, dict) else strategy.name
     )
 
-    # Create the physical directory
-    branch_path = create_branch_dir(
-        parent=branches_dir,
-        name=branch_name,
-        strategy=strategy,
-        depth=current_depth,
-    )
+    # The directory name wins: create_branch_dir suffixes a name that is already taken,
+    # and a manifest naming the branch something the directory is not called cannot be
+    # resolved by anything that looks a branch up by name.
+    branch_path = create_branch_dir(branches_dir, branch_name)
+    strategy = {
+        **(strategy if isinstance(strategy, dict) else strategy.model_dump()),
+        "name": branch_path.name,
+    }
 
     # Compute max_iter based on mode; depth always tracked so both constraints can apply
     if _cfg.PATH_BUDGET > 0:
-        max_iter = _cfg.PATH_BUDGET - path_iters_consumed
+        budget_total = path_budget_total or _cfg.PATH_BUDGET
+        # At least one: a spawned branch that cannot run at all is worse than one that
+        # runs once and stops.
+        max_iter = max(budget_total - path_iters_consumed, 1)
     else:
-        max_iter = _cfg.MAX_ITERATIONS
+        budget_total = 0
+        max_iter = inherited_max_iter or _cfg.MAX_ITERATIONS
     depth = current_depth
 
     # Build the initial BranchManifest using Pydantic model
@@ -222,6 +86,7 @@ def _init_branch(
         strategy=strategy,
         branch_depth=depth,
         path_iters_consumed=path_iters_consumed,
+        path_budget_total=budget_total,
         current_iter=1,
         status="initialized",
     )
@@ -235,91 +100,95 @@ def _init_branch(
     return branch_path
 
 
-# Module-level loader executed by ``python3 -c`` in _preflight_python_reference.
-# Mirrors utils.python_ref_runner.load_ref_module so module-level import errors
-# (e.g. missing torch) surface exactly as they will during tuning.
-_REF_LOADER_SNIPPET = (
-    "import importlib.util,sys;"
-    "spec=importlib.util.spec_from_file_location('ref',sys.argv[1]);"
-    "mod=importlib.util.module_from_spec(spec);"
-    "spec.loader.exec_module(mod)"
-)
+def _write_final_results() -> None:
+    """Write ``output/final_results.json`` at the end of a run.
 
-
-async def _preflight_python_reference(problem_yaml: str) -> bool:
-    """Fail fast when a ``reference.type: python`` ref.py cannot be imported.
-
-    The C++ driver computes the reference by invoking
-    ``python3 -m utils.python_ref_runner`` once per evaluated config, so a
-    missing ref.py dependency (typically the optional ``torch``) would
-    otherwise surface only as every tuning config failing validation — after
-    the LLM iterations were already spent. This loads ref.py module-level in a
-    ``python3`` subprocess (the same interpreter the driver lambda will use)
-    before any LLM work. Returns False (abort) on failure, True otherwise.
-    Silent no-op for non-python references.
+    Here rather than cli.py because the API's run target calls only this engine, so
+    UI-started runs never produced the file. Failure is logged: the run has already
+    succeeded and its per-branch results are on disk.
     """
-    import yaml as _yaml
-
-    from utils.cuda_env import get_subprocess_env
-
-    try:
-        cfg = _yaml.safe_load(problem_yaml) or {}
-    except Exception:
-        return True
-    ref = cfg.get("reference") or {}
-    if str(ref.get("type", "cuda")).lower() != "python":
-        return True
-
-    problem_dir = _cfg.get_problem_dir()
-    ref_path = problem_dir / ref.get("file", "ref.py")
-    if not ref_path.exists():
-        log(f"Python reference not found at {ref_path}", "ERROR")
-        return False
+    from nodes.merge import build_final_summary, find_branch_results, get_best_branch_result
+    from utils.files import save_json
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "python3",
-            "-c",
-            _REF_LOADER_SNIPPET,
-            str(ref_path),
-            cwd=str(problem_dir),
-            env=get_subprocess_env(),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
+        output_dir = get_output_dir()
+        branch_results = find_branch_results(output_dir / "branches")
+        best = get_best_branch_result(branch_results)
+        if not best:
+            log("No branch results to summarise; skipping final_results.json", "WARN")
+            return
+        save_json(
+            output_dir / "final_results.json",
+            build_final_summary(branch_results, best),
         )
-        try:
-            _, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=120)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            log(f"Python reference import check timed out on {ref_path}", "ERROR")
-            return False
-    except FileNotFoundError:
-        log(
-            "python3 not found on PATH — a python reference cannot run "
-            "(the driver invokes python3 -m utils.python_ref_runner)",
-            "ERROR",
-        )
-        return False
+        log(f"Wrote {output_dir / 'final_results.json'}", "SUCCESS")
+    except Exception as e:
+        log(f"Could not write final_results.json: {e}", "WARN")
 
-    if proc.returncode != 0:
+
+def _spawn_sub_branches(branch_path: Path, sub_strategies: list) -> List[Path]:
+    """Create the child branches a branch asked for, and return their paths.
+
+    The budget comes from the parent's effective max_iter (branch_config.json, which
+    the UI can raise), not from config — otherwise a grant dies on the branch it was
+    made on. Empty list, with a reason logged, when depth or budget is exhausted.
+    """
+    manifest = load_branch_manifest(branch_path)
+    new_depth = manifest.branch_depth - 1
+    consumed = manifest.path_iters_consumed + manifest.current_iter
+    effective_max_iter = load_branch_config(branch_path).max_iter
+
+    if new_depth <= 0:
         log(
-            f"Python reference {ref_path} failed to import:\n"
-            f"{stderr_b.decode(errors='replace').strip()}",
-            "ERROR",
+            "Branch requested sub-strategies but MAX_DEPTH reached. Discarding.",
+            "WARN",
         )
-        return False
-    log(f"Python reference {ref_path.name} imports cleanly", "SUCCESS")
-    return True
+        return []
+
+    if _cfg.PATH_BUDGET > 0:
+        budget_total = manifest.path_budget_total or _cfg.PATH_BUDGET
+        # A grant extends the path budget rather than coming out of the children's.
+        allocated = max(budget_total - manifest.path_iters_consumed, 1)
+        granted = max(effective_max_iter - allocated, 0)
+        child_budget_total = budget_total + granted
+        remaining = child_budget_total - consumed
+        if remaining <= 0:
+            log(
+                "Branch requested sub-strategies but path budget exhausted. Discarding.",
+                "WARN",
+            )
+            return []
+        budget_note = f", path budget: {remaining} iters remaining"
+    else:
+        child_budget_total = None
+        budget_note = f", max_iter: {effective_max_iter}"
+
+    log(
+        f"Master received {len(sub_strategies)} sub-strategies "
+        f"(depth left: {new_depth}{budget_note}).",
+        "INFO",
+    )
+
+    return [
+        _init_branch(
+            strategy=sub_strat,
+            parent_branch=str(branch_path),
+            current_depth=new_depth,
+            path_iters_consumed=consumed,
+            inherited_max_iter=effective_max_iter,
+            path_budget_total=child_budget_total,
+        )
+        for sub_strat in sub_strategies
+    ]
 
 
 async def run_optimization_engine(
-    problem_yaml: str, ref_kernel: str, resume_states: list = None
+    problem_yaml: str, ref_kernel: str, resume_states: Optional[list] = None
 ):
     """
     Main entry point for optimization execution.
     """
-    if not await _preflight_python_reference(problem_yaml):
+    if not await preflight_python_reference(problem_yaml):
         log("Aborting run: fix the reference issue above and retry.", "ERROR")
         return
 
@@ -360,20 +229,20 @@ async def run_optimization_engine(
     strategy_queue: asyncio.Queue = asyncio.Queue()
 
     if resume_states:
-        global_tracker.load()
+        global_tracker.load(get_output_dir())
         log(f"Resuming {len(resume_states)} branches directly into the queue!", "INFO")
         for branch_path in resume_states:
             strategy_queue.put_nowait(Path(branch_path))
     else:
         main_state = await analyze_node(main_state)
-        global_tracker.save()
+        global_tracker.save(get_output_dir())
 
         if not main_state.analysis:
             log("Analysis failed. Aborting.", "ERROR")
             return
 
         main_state = await strategize_node(main_state)
-        global_tracker.save()
+        global_tracker.save(get_output_dir())
         strategies = main_state.strategies
 
         if not strategies:
@@ -401,7 +270,7 @@ async def run_optimization_engine(
     # post-tune time. No-op on resume (reference_time.json already exists).
     from config import get_problem_dir
 
-    await _time_python_reference_once(get_problem_dir(), get_output_dir())
+    await time_python_reference(get_problem_dir(), get_output_dir())
 
     # No lock guards `busy` or the exit check: every read/write below sits
     # between awaits, which is atomic under asyncio's cooperative scheduler.
@@ -430,46 +299,10 @@ async def run_optimization_engine(
                 new_sub_strategies = await run_branch_loop(branch_path)
             finally:
                 if new_sub_strategies:
-                    manifest = load_branch_manifest(branch_path)
-                    new_depth = manifest.branch_depth - 1
-                    consumed = manifest.path_iters_consumed + manifest.current_iter
-
-                    depth_ok = new_depth > 0
-                    if _cfg.PATH_BUDGET > 0:
-                        remaining = _cfg.PATH_BUDGET - consumed
-                        budget_ok = remaining > 0
-                    else:
-                        remaining = None
-                        budget_ok = True
-
-                    if depth_ok and budget_ok:
-                        budget_note = (
-                            f", path budget: {remaining} iters remaining"
-                            if remaining is not None
-                            else ""
-                        )
-                        log(
-                            f"Master received {len(new_sub_strategies)} sub-strategies (depth left: {new_depth}{budget_note}).",
-                            "INFO",
-                        )
-                        for sub_strat in new_sub_strategies:
-                            child_path = _init_branch(
-                                strategy=sub_strat,
-                                parent_branch=str(branch_path),
-                                current_depth=new_depth,
-                                path_iters_consumed=consumed,
-                            )
-                            strategy_queue.put_nowait(child_path)
-                    elif not depth_ok:
-                        log(
-                            "Branch requested sub-strategies but MAX_DEPTH reached. Discarding.",
-                            "WARN",
-                        )
-                    else:
-                        log(
-                            "Branch requested sub-strategies but path budget exhausted. Discarding.",
-                            "WARN",
-                        )
+                    for child_path in _spawn_sub_branches(
+                        branch_path, new_sub_strategies
+                    ):
+                        strategy_queue.put_nowait(child_path)
 
                 busy -= 1
 
@@ -494,7 +327,9 @@ async def run_optimization_engine(
 
     log("All branches and sub-branches have completed!", "SUCCESS")
 
-    global_tracker.save()
+    _write_final_results()
+
+    global_tracker.save(get_output_dir())
 
     from config import get_tracker_stats
 

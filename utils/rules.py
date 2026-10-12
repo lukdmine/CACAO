@@ -142,25 +142,3 @@ def parse_rules(meta: Optional[dict]) -> Rules:
             log(f"rules.forbid: skipping malformed entry {entry!r}", "WARN")
 
     return Rules(text=text, forbid=forbid)
-
-
-def load_rules(problem_yaml: Optional[str] = None, problem_dir=None) -> Rules:
-    """Rules for the current problem, from YAML text or the problem directory.
-
-    Never raises: a malformed rules block must not take a run down, and a warning in
-    the log is more useful than a crashed branch.
-    """
-    try:
-        if problem_yaml:
-            meta = yaml.safe_load(problem_yaml) or {}
-        elif problem_dir:
-            path = Path(problem_dir) / "problem.yaml"
-            if not path.exists():
-                return Rules()
-            meta = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        else:
-            return Rules()
-    except (yaml.YAMLError, OSError, UnicodeDecodeError) as e:
-        log(f"Could not read rules from problem.yaml: {e}", "WARN")
-        return Rules()
-    return parse_rules(meta)

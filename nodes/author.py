@@ -26,6 +26,7 @@ from utils.files import create_iter_dir, save_output
 from utils.framework import assemble_framework_cpp
 from utils.inputs import load_inputs_spec, scalar_contract_text
 from utils.log import log
+from utils.problem import reference_spec
 from utils.rules import parse_rules
 from state.types import WorkingState
 from agentic.loop import StepResult, run_agentic_step
@@ -53,9 +54,9 @@ def _stage_engine_files(state: WorkingState, iter_dir: Path, meta: dict) -> str:
         )
     shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
 
-    ref = meta.get("reference", {})
-    if str(ref.get("type", "cuda")).lower() == "python":
-        ref_py = problem_dir / ref.get("file", "ref.py")
+    ref = reference_spec(meta)
+    if ref.type == "python":
+        ref_py = problem_dir / ref.file
         if not ref_py.exists():
             raise FileNotFoundError(
                 f"{ref_py} not found — python reference file required by problem.yaml"
@@ -64,6 +65,16 @@ def _stage_engine_files(state: WorkingState, iter_dir: Path, meta: dict) -> str:
         shutil.copyfile(problem_dir / "inputs.yaml", iter_dir / "inputs.yaml")
 
     return inputs_src.read_text(encoding="utf-8")
+
+
+def _read_owned_files(directory: Path) -> dict:
+    """Whichever of the four LLM-owned files are present in one directory."""
+    contents = {}
+    for name in ALL_FILES:
+        candidate = directory / name
+        if candidate.exists():
+            contents[name] = candidate.read_text(encoding="utf-8")
+    return contents
 
 
 def _seed_from_previous(ws: Workspace, branch_path: Optional[Path], iteration: int) -> list:
@@ -78,17 +89,11 @@ def _seed_from_previous(ws: Workspace, branch_path: Optional[Path], iteration: i
     if not prev.is_dir():
         return []
 
-    contents = {}
-    kernel = prev / "kernels.cu"
-    if kernel.exists():
-        contents["kernels.cu"] = kernel.read_text(encoding="utf-8")
+    contents = _read_owned_files(prev)
 
-    for name in ALL_FILES:
-        if name == "kernels.cu":
-            continue
-        staged = prev / name
-        if staged.exists():
-            contents[name] = staged.read_text(encoding="utf-8")
+    if not contents:
+        # An aborted step never reached ws.commit(), so its work is only in staging.
+        contents = _read_owned_files(Workspace(prev).staging)
 
     if len(contents) <= 1:
         framework = prev / "framework.cpp"
@@ -147,16 +152,30 @@ def _task_text(state: WorkingState, seeded: list) -> str:
         "plan or the strategy, follow the feedback."
     )
 
+    # Both wordings promised files unconditionally, including when none were seeded.
     if state.mode == "retry":
         lines.append(
-            "The previous attempt failed. The failure and its analysis are above; the "
-            "current files are shown below. Make the smallest correct fix.\n\n"
+            (
+                "The previous attempt failed. The failure and its analysis are above; "
+                "the current files are shown below. Make the smallest correct fix."
+                if seeded
+                else "The previous attempt failed before it wrote any files. The "
+                "failure and its analysis are above. The workspace is empty — write "
+                "all four files from scratch, and keep the first version simple."
+            )
+            + "\n\n"
             + authoritative
         )
     elif state.mode == "followup":
         lines.append(
-            "Apply the change requested in the most recent decision above. The current "
-            "files are shown below — edit them rather than rewriting.\n\n"
+            (
+                "Apply the change requested in the most recent decision above. The "
+                "current files are shown below — edit them rather than rewriting."
+                if seeded
+                else "Apply the change requested in the most recent decision above. "
+                "The workspace is empty — write all four files from scratch."
+            )
+            + "\n\n"
             + authoritative
         )
     elif seeded:
@@ -331,7 +350,18 @@ async def author_node(state: WorkingState) -> WorkingState:
         f"{len(schemas)} tools bound (history={has_history}, siblings={has_siblings})"
     )
 
-    if result.outcome.aborted:
+    # `aborted` cannot tell "never called a tool" from "stalled after finishing", so
+    # a complete, compile-checked workspace is committed either way.
+    salvageable = ws.complete() and toolbox.check_passed
+
+    if result.outcome.aborted and salvageable:
+        log(
+            f"Step ended {result.outcome.value} but all four files are present and "
+            "the compile check passed — committing rather than discarding the work.",
+            "WARN",
+        )
+
+    if result.outcome.aborted and not salvageable:
         detail = result.outcome.diagnosis
         if toolbox.internal_errors:
             # A tool of ours raised and left the model with nothing to converge on.
