@@ -243,4 +243,8 @@ __marimo__/
 # python-reference variants bake in the generating machine's interpreter and repo path.
 problems/*/inputs.hpp
 
+# Generated problem input binaries (init: file) — deterministically regenerable
+# from the problem's generator script (e.g. problems/spmm_cusparse/gen_csr.py).
+problems/*/inputs/*.bin
+
 docs/local/
