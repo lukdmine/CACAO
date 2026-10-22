@@ -8,6 +8,7 @@ TuningDuration; a watchdog covers subprocess hangs.
 """
 
 import asyncio
+import os
 import re
 import sys
 import time
@@ -21,6 +22,9 @@ from utils.files import save_output
 from utils.gpu_lock import acquire_gpu_lock
 from utils.log import log
 from utils.results import (
+    check_results,
+    ensure_results_loadable,
+    parse_precise_best_time_from_output,
     parse_reference_time_from_output,
     save_reference_time,
     get_results_summary,
@@ -37,6 +41,73 @@ _MONITOR_INTERVAL = 2.0
 # KTT's TuningDuration stop is the primary mechanism; this only fires on hangs.
 _WATCHDOG_MARGIN_S = 30.0
 _WATCHDOG_MARGIN_FRAC = 0.2
+
+
+def _precise_remeasure_runs() -> int:
+    """Replays of the best config in post-tune re-measure mode (min wins).
+
+    The tuned-search phase stays single-shot by design (precise timing per
+    config would multiply the cost); this produces the headline number for a
+    fair apples-to-apples comparison against precisely measured baselines.
+    """
+    try:
+        return max(int(os.environ.get("CACAO_PRECISE_RUNS", "25")), 1)
+    except ValueError:
+        return 25
+
+
+async def _remeasure_best(cmd: list, iter_dir: Path) -> tuple:
+    """Re-run the finished driver in re-measure mode (profileResults + N reps).
+
+    The driver itself does LoadResults -> replay best config N times -> print
+    CACAO_PRECISE_BEST_US=<min of per-Run CUDA-event durations>. Never fatal:
+    on any failure the iteration keeps its single-shot numbers.
+
+    Returns (precise_us | None, log_text).
+    """
+    results_json = iter_dir / "results.json"
+    has_success, _, _ = check_results(results_json)
+    if not has_success:
+        return None, ""
+    # Same as profile mode (nodes/profile.py): a pre-2.3-KTT results file has
+    # no Timestamp field and would abort the driver on LoadResults.
+    ensure_results_loadable(results_json)
+    runs = _precise_remeasure_runs()
+    # LoadResults appends ".json" itself — hand it the BASE name (profile mode
+    # passes "results" the same way), not the full filename.
+    remeasure_cmd = [*cmd, str(results_json.with_suffix("")), str(runs)]
+    header = f"\n[RE-MEASURE] best config x{runs} ({results_json.name})\n"
+    try:
+        from utils.cuda_env import get_subprocess_env
+
+        process = await asyncio.create_subprocess_exec(
+            *remeasure_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            cwd=str(iter_dir),
+            env=get_subprocess_env(),
+        )
+        try:
+            out, _ = await asyncio.wait_for(process.communicate(), timeout=300)
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            log("Re-measure timed out — keeping single-shot best time", "WARN")
+            return None, header + "[re-measure timed out; killed]\n"
+        text = out.decode("utf-8", errors="replace") if out else ""
+        precise = parse_precise_best_time_from_output(text)
+        if precise is None or process.returncode != 0:
+            log(
+                f"Re-measure produced no marker (exit {process.returncode}) — "
+                "keeping single-shot best time",
+                "WARN",
+            )
+            return None, header + text
+        log(f"Precise best (min of {runs} runs): {precise:.2f} µs")
+        return precise, header + text
+    except Exception as e:
+        log(f"Re-measure failed: {e} — keeping single-shot best time", "WARN")
+        return None, header + f"[re-measure failed: {e}]\n"
 
 
 def _resolve_tuning_budget(problem_yaml_path: Path) -> tuple[float, str]:
@@ -194,6 +265,7 @@ async def run_node(state: WorkingState) -> WorkingState:
     output_lines = []
     watchdog_tripped = False
     tracker = TunerProgressTracker()
+    precise_us = None
 
     # Acquire GPU lock before running
     log("Acquiring GPU lock...")
@@ -263,6 +335,10 @@ async def run_node(state: WorkingState) -> WorkingState:
             if not watchdog_tripped:
                 if process.returncode == 0:
                     log(f"Tuner completed in {elapsed:.0f}s", "SUCCESS")
+                    # Post-tune re-measure: same driver, best config replayed
+                    # min-of-N; still inside the GPU lock (GPU-sensitive).
+                    precise_us, remeasure_log = await _remeasure_best(cmd, iter_dir)
+                    output_lines.append(remeasure_log)
                 elif process.returncode is not None:
                     log(f"Tuner exited with code {process.returncode}", "ERROR")
                     output_lines.append(f"\n[EXIT CODE: {process.returncode}]")
@@ -312,7 +388,9 @@ async def run_node(state: WorkingState) -> WorkingState:
 
     # Save speedup/best_time eagerly so they persist even if later nodes fail
     ref_time_val = load_reference_time(get_output_dir())
-    summary = get_results_summary(iter_dir / "results.json", ref_time_val)
+    summary = get_results_summary(
+        iter_dir / "results.json", ref_time_val, precise_best_time_us=precise_us
+    )
     if summary["best_time_us"] is not None:
         if state.best_time_us is None or summary["best_time_us"] < state.best_time_us:
             state.best_time_us = summary["best_time_us"]

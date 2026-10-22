@@ -186,6 +186,40 @@ def check_prerequisites(problem_dir: Path):
     return True
 
 
+def _find_precise_result(output_dir: Path, best: dict):
+    """The winning iteration's re-measured time, if one exists.
+
+    Post-tune re-measurement stores precise_best_time_us in each iteration's
+    results_summary (state.json). The manifest-level branch result only knows
+    its best single-shot time, so find the iteration that produced it and read
+    that snapshot — no state schema change, no estimate: None when the winning
+    iteration predates re-measure or measurement failed there.
+
+    Returns (precise_best_time_us | None, speedup_precise | None).
+    """
+    import json
+
+    best_time = best.get("best_time_us")
+    branch_path = best.get("branch_path")
+    if best_time is None or not branch_path:
+        return None, None
+    for state_file in sorted(Path(branch_path).glob("iter*/state.json")):
+        try:
+            snap = json.loads(state_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        rs = snap.get("results_summary") or {}
+        if rs.get("best_time_us") is None:
+            continue
+        # The branch manifest tracks the MINIMUM best_time_us; match it (with
+        # float roundtrip slack) to find the winning iteration's snapshot.
+        if abs(rs["best_time_us"] - best_time) > 1e-6:
+            continue
+        if rs.get("precise_best_time_us") is not None:
+            return rs["precise_best_time_us"], rs.get("speedup_precise")
+    return None, None
+
+
 async def main():
     """Main entry point."""
     args = parse_args()
@@ -406,18 +440,25 @@ async def main():
         log(f"Results saved to: {output_dir}")
 
         best_time = best.get("best_time_us")
+        precise_us, speedup_precise = _find_precise_result(output_dir, best)
         log(f"\nBest branch: {best.get('branch_name')}")
         if best_time is not None:
             log(f"Best time: {best_time:.2f} µs")
+        if precise_us is not None:
+            log(f"Best time (precise, min-of-N): {precise_us:.2f} µs")
         if best.get("speedup"):
             log(f"Speedup: {best.get('speedup'):.2f}x")
+        if speedup_precise is not None:
+            log(f"Speedup (precise): {speedup_precise:.2f}x")
 
         # Save final summary
         final_summary = {
             "best_branch": best.get("branch_name"),
             "best_config": best.get("best_config"),
             "best_time_us": best.get("best_time_us"),
+            "precise_best_time_us": precise_us,
             "speedup": best.get("speedup"),
+            "speedup_precise": speedup_precise,
             "total_branches": len(branch_results),
             "all_branches": [
                 {

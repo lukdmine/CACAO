@@ -291,6 +291,19 @@ problems/<name>/output/
         └── branches/              # sub-branches (recursive)
 ```
 
+### Baselines and precise headline numbers
+
+The search phase stays single-shot per config (precise-per-config timing
+would multiply tuning cost and ranking does not need it). After each
+successful tune the run node replays the **best** config N times through the
+driver's re-measure mode (`argv[9]`, next to profile mode) and records
+min-of-N CUDA-event time as `precise_best_time_us` (+`speedup_precise`) in
+the iteration's `results_summary` and `final_results.json` — the
+apples-to-apples number against a precise baseline. `best_time_us`/`speedup`
+keep their single-shot semantics; the two never mix. `CACAO_PRECISE_RUNS`
+overrides N (default 25); a failed re-measure is a warning, never a failed
+iteration.
+
 ### Server + Frontend
 
 `server.py` is a thin entry point that creates the FastAPI app via `api.create_app()`. The server is split into an `api/` package:

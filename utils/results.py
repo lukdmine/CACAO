@@ -37,6 +37,24 @@ def parse_reference_time_from_output(tuner_output: str) -> Optional[float]:
     return None
 
 
+def parse_precise_best_time_from_output(tuner_output: str) -> Optional[float]:
+    """
+    Parse the re-measure mode marker from a second driver run's stdout.
+
+    The framework driver's re-measure mode (argv[9] > 0, next to profile mode)
+    replays the best configuration N times and prints the MINIMUM of KTT's
+    per-Run CUDA-event kernel durations as ``CACAO_PRECISE_BEST_US=<us>``.
+    The search stays single-shot; this is the headline number when present.
+
+    Returns:
+        Precise best time in microseconds, or None.
+    """
+    match = re.search(r"CACAO_PRECISE_BEST_US=([\d.]+)", tuner_output)
+    if match:
+        return float(match.group(1))
+    return None
+
+
 # Heading prefix of the text summarize_failures() produces. Public because state.history
 # keys the head-vs-tail excerpt off it — if these two drift apart, the summary is silently
 # tailed and loses its header and most widespread diagnostic. Only the prefix is fixed; the
@@ -366,7 +384,9 @@ def calculate_speedup(best_time: float, ref_time: float) -> float:
 
 
 def get_results_summary(
-    results_path: Path, reference_time_us: Optional[float] = None
+    results_path: Path,
+    reference_time_us: Optional[float] = None,
+    precise_best_time_us: Optional[float] = None,
 ) -> dict:
     """
     Generate a summary of tuning results.
@@ -374,6 +394,12 @@ def get_results_summary(
     Args:
         results_path: Path to results.json
         reference_time_us: Central reference time (from load_reference_time)
+        precise_best_time_us: Post-tune re-measure of the best config
+            (min-of-N CUDA-event runs; from parse_precise_best_time_from_output).
+            Kept in its own field — best_time_us/speedup continue to carry the
+            single-shot search-phase values, so the two precisions never mix.
+            `speedup_precise` is the apples-to-apples number against a
+            precisely measured baseline.
 
     Returns:
         Summary dict with metrics
@@ -388,6 +414,8 @@ def get_results_summary(
         "best_time_us": None,
         "reference_time_us": reference_time_us,
         "speedup": None,
+        "precise_best_time_us": precise_best_time_us,
+        "speedup_precise": None,
     }
 
     if has_success:
@@ -401,6 +429,12 @@ def get_results_summary(
     if reference_time_us and summary["best_time_us"]:
         summary["speedup"] = calculate_speedup(
             summary["best_time_us"],
+            reference_time_us,
+        )
+
+    if reference_time_us and precise_best_time_us:
+        summary["speedup_precise"] = calculate_speedup(
+            precise_best_time_us,
             reference_time_us,
         )
 
