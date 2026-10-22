@@ -417,6 +417,23 @@ to look for it at the root and fail on every multi-case problem.) One case — w
 is every problem with no `cases:` block — keeps the layout above exactly.
 `utils.cases.primary_case_dir` is what run-level readers anchor on.
 
+### Baselines and precise headline numbers
+
+`output/reference_time.json` is the baseline every speedup divides by —
+**first-write-wins**, archived across runs, and seedable *before* a run (the
+ggml `conv2d_dw` and torch/python references are precedents). If it is
+missing, KTT's coarse wall-clock reference time fills in after the first run.
+
+`tools/library_bench/` seeds that file from a **vendor library** (cuSPARSE,
+cuDNN, ...): `python -m tools.library_bench.bench problems/<name> --op <op>`
+dumps the problem's real inputs, compiles the fixed `harness.cu` +
+`ops/<op>.cu` (the only library-specific code), **verifies the op against the
+problem's `ref_kernel.cu`** (refuses to seed on mismatch), times it
+(CUDA events, warmup 20 + min of 100 reps), and writes the baseline plus a
+provenance sidecar (`--check` flags a stale one). See
+`tools/library_bench/README.md`. Comparison problems using it:
+`problems/spmm_cusparse/`, `problems/conv2d_cudnn/`.
+
 ### Server + Frontend
 
 `server.py` is a thin entry point that creates the FastAPI app via `api.create_app()`. The server is split into an `api/` package:

@@ -1,0 +1,16 @@
+# cuDNN op build flags (user-managed prerequisites, see README.md).
+# $VARS are expanded from the environment by bench.py; set both before benching:
+#   CUDNN_FRONTEND_INCLUDE — cudnn_frontend/include
+#     (https://github.com/NVIDIA/cudnn-frontend, v1.x matching your cuDNN 9.x)
+#   CUDNN_INCLUDE — directory containing cudnn.h
+#   CUDNN_LIB — directory containing libcudnn.so.9
+#     (both come from one cuDNN 9.x install; with pip nvidia-cudnn-cu12 that is
+#     nvidia/cudnn/include and nvidia/cudnn/lib)
+# The rpath keeps the built bench binary self-sufficient at run time —
+# libcudnn.so.9 must come from the same install as the header used at compile time.
+-isystem $CUDNN_FRONTEND_INCLUDE -isystem $CUDNN_INCLUDE
+# -l:libcudnn.so.9 (GNU ld exact-name form): pip wheels ship only the versioned
+# SONAME, no libcudnn.so dev symlink.
+# -lnvrtc: cudnn_frontend v1.x headers instantiate NVRTC calls (experimental
+# runtime-compiled-engine paths) — comes from the CUDA toolkit, not cuDNN.
+-L$CUDNN_LIB -l:libcudnn.so.9 -lnvrtc -Xlinker -rpath -Xlinker $CUDNN_LIB
