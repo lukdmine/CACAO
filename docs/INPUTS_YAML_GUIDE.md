@@ -68,7 +68,7 @@ A `cases:` block in `problem.yaml` overrides scalar `value`s and `init: file`
 | Field | Required | Default | Notes |
 |---|---|---|---|
 | `name` | yes | — | Valid C++ identifier |
-| `dtype` | no | `int` | `int` or `float` only |
+| `dtype` | no | `int` | `int` or `float` only — scalars cannot be `half` |
 | `value` | yes | — | The constant |
 | `placements` | no | `[host, define]` | One or more of `host`, `define`, `runtime` |
 
@@ -113,7 +113,7 @@ Consequences:
 | Field | Required | Default | Notes |
 |---|---|---|---|
 | `name` | yes | — | Valid C++ identifier |
-| `dtype` | no | `float` | `int` or `float` only |
+| `dtype` | no | `float` | `int`, `float` or `half` (see [below](#half-precision-buffers)) |
 | `size` | yes | — | **String.** A C++ expression over `host` scalars |
 | `access` | no | `read` | `read`, `write` or `readwrite` |
 | `init` | no | `random` | `random`, `zeros`, `custom` or `file` |
@@ -156,6 +156,68 @@ than being silently reinterpreted.
 `read`, `write` and `readwrite` map to KTT's argument access. A `readwrite` buffer that
 is also a validation target is memcpy'd from the kept host copy into KTT's buffer
 before the reference runs, so the reference sees the original input.
+
+### Half-precision buffers
+
+`dtype: half` is IEEE binary16. **The host and the kernel spell it differently, and both
+spellings are the same two bytes:**
+
+| Side | Type | Where it comes from |
+|---|---|---|
+| host (`inputs.hpp`, g++) | `half_float::half` | vendored by KTT; `Ktt.h` includes it |
+| device (`kernels.cu`, NVRTC) | `__half` | `#include <cuda_fp16.h>` |
+
+cacao only ever emits the host spelling — the kernel signature is written by whoever
+writes the kernel, so a half buffer arrives as `const __half*` / `__half*` and the kernel
+must include `<cuda_fp16.h>` itself. The engine already passes the CUDA include directory
+to NVRTC (`utils/framework.resolve_cuda_include`), so no extra configuration is needed.
+
+Consequences worth knowing before choosing it:
+
+- **Scalars cannot be `half`.** A half `-D` macro has no sensible meaning. Pass a half
+  *value* through a one-element buffer if you need one.
+- **All three reference kinds work**, but `cpu_c` has one requirement. `utils/build.py`
+  compiles `ref_cpu.c` with **g++, as C++**, and passes `-I KTT/Source`, so the generated
+  declaration is `extern "C" void ref(const half_float::half* a, ...)` and your reference
+  source must `#include <Utility/External/half.hpp>`. (`extern "C"` only suppresses name
+  mangling; a C++ class parameter type is fine either side of it.) A `cuda` reference
+  spells the same buffer `__half`, and a `python` reference sees numpy `float16`.
+- **`init: random` draws in `float` and narrows on assignment**, because
+  `std::uniform_real_distribution` requires a floating-point type and `half_float::half`
+  is a class. `min`/`max` therefore mean exactly what they mean for `float`.
+- **`init: file` expects raw little-endian binary16**, two bytes per element — numpy
+  `float16` writes exactly this. The byte-count check is `size * 2`.
+- **A validated half buffer is compared BIT-EXACTLY, and `validation.tolerance` is
+  silently ignored for it.** This is the single most important thing on this page.
+  `ResultValidator.inl` dispatches on `std::is_floating_point<T>`, which is **false** for
+  `half_float::half` because it is a class, so half takes the integral overload —
+  `if (result[i] != reference[i]) return false;` — instead of `ValidateSideBySide`.
+  Verified: a candidate differing from the reference by **one ulp** is rejected with the
+  tolerance set to `10.0`, about 5000x the gap.
+
+  Consequences:
+  - A `cuda` reference performing the *identical* arithmetic works fine, and is the
+    intended pairing: both sides round the same way, so they match bit for bit.
+  - A `python` reference is a trap. It computes in fp32 and rounds once at the end
+    (`utils/python_ref_runner.py`), while the kernel rounds at every step. Those agree
+    only by luck. Prefer fp16 in / **fp32 out** — leave the validated output `float` —
+    unless your kernel provably reproduces the reference's rounding.
+  - Values above 65504 become `inf` on the way in, with no warning.
+
+  Widening the tolerance cannot rescue a half output; nothing about it is consulted.
+  KTT does expose `Tuner::SetValueComparator(id, cmp)` for a per-argument approximate
+  comparison, but the engine skeleton emits no comparator today.
+
+- **Give the problem a `gpu.compute_capability`.** `__half`'s operators are gated on
+  `__CUDA_ARCH__ >= 530`. When the capability is unknown, the NVRTC pre-check passes no
+  architecture flag and NVRTC targets the lowest one its toolkit supports, which differs
+  per toolkit. On CUDA 12.0 that is below 5.3, and the pre-check rejects an ordinary half
+  kernel with *"more than one conversion function from `const __half` to a built-in type
+  applies"*, a kernel that compiles fine for the real device. The engine normally
+  auto-detects the capability, so this bites only when detection fails.
+
+There is **no `bfloat16`**. KTT's `ArgumentDataType` has `Half` and no bf16 equivalent, so
+a bf16 contract cannot be expressed today without a change to KTT itself.
 
 ## The boundary
 

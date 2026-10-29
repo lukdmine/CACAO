@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-DTYPE_MAP = {"float": np.float32, "int": np.int32}
+DTYPE_MAP = {"float": np.float32, "int": np.int32, "half": np.float16}
 
 
 def load_ref_module(ref_path: Path):

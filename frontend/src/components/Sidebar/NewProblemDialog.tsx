@@ -12,7 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, uploadProblemInput, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type ScalarSpec, type Placement, type ReferenceType, type RulesSpec, type ForbidRule, type CaseSpec, type ProblemDetailResponse } from '@/api/client';
+import { createProblem, updateProblem, fetchProblemDetail, fetchGpuDevices, previewInputs, uploadProblemInput, type CreateProblemData, type GpuDevice, type ArgSpec, type BufferSpec, type BufferDtype, type ScalarSpec, type Placement, type ReferenceType, type RulesSpec, type ForbidRule, type CaseSpec, type ProblemDetailResponse } from '@/api/client';
 import { refreshProblems } from '@/api/hooks';
 import { Plus, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Loader2, AlertTriangle, Info, Upload } from 'lucide-react';
 
@@ -371,7 +371,10 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setForm((prev) => ({ ...prev, inputs: { ...prev.inputs, args: next } }));
     }
 
-    function patchArg(i: number, patch: Partial<ScalarSpec> & Partial<BufferSpec>) {
+    // A union, not an intersection: an arg is a scalar OR a buffer, and the two disagree
+    // about dtype (only buffers may be 'half'). Intersecting them silently narrowed every
+    // patch to the fields both kinds share.
+    function patchArg(i: number, patch: Partial<ScalarSpec> | Partial<BufferSpec>) {
         setArgs(args.map((a, j) => (j === i ? ({ ...a, ...patch } as ArgSpec) : a)));
     }
 
@@ -899,9 +902,14 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
 
                                             <select className="h-8 rounded border bg-background px-2 text-xs"
                                                 value={a.dtype}
-                                                onChange={(e) => patchArg(i, { dtype: e.target.value as 'int' | 'float' })}>
+                                                title={a.kind === 'buffer'
+                                                    ? 'half is IEEE binary16: half_float::half on the host, __half in the kernel (needs #include <cuda_fp16.h>). Not available with a cpu_c reference.'
+                                                    : 'Scalars are int or float: a half -D macro has no sensible meaning.'}
+                                                onChange={(e) => patchArg(i, { dtype: e.target.value as BufferDtype })}>
                                                 <option value="float">float</option>
                                                 <option value="int">int</option>
+                                                {/* buffers only — see the model in models/inputs.py */}
+                                                {a.kind === 'buffer' && <option value="half">half</option>}
                                             </select>
 
                                             {a.kind === 'scalar' ? (
