@@ -1,7 +1,8 @@
 """Provider resolution and token accounting — both silent-failure surfaces."""
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
+from pydantic import BaseModel
 
 import config
 from llm import providers
@@ -154,3 +155,77 @@ def test_env_claude_selects_anthropic_over_key_detection(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
 
     assert providers._detect_provider() == "anthropic"
+
+
+# -- Claude request shape ---------------------------------------------------
+
+
+class _Verdict(BaseModel):
+    action: str
+    reason: str
+
+
+def _claude(model):
+    return providers._create_llm("anthropic", model, 0.3)._llm
+
+
+def _payload(llm, **kwargs):
+    return llm._get_request_payload([HumanMessage(content="x")], **kwargs)
+
+
+@pytest.mark.parametrize(
+    "model", ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5-20251001"]
+)
+def test_older_claude_models_keep_their_temperature(model):
+    assert _payload(_claude(model))["temperature"] == 0.3
+
+
+def test_every_newer_claude_model_is_sent_without_temperature():
+    """Each of them answers a non-default temperature with a 400."""
+    newer = [
+        m
+        for m in providers.MODELS["anthropic"]["available"]
+        if not m.startswith(providers._CLAUDE_WITH_SAMPLING)
+    ]
+    assert newer
+
+    for model in newer:
+        assert _payload(_claude(model)).get("temperature") is None, model
+
+
+@pytest.mark.parametrize("model", providers.MODELS["anthropic"]["available"])
+def test_every_claude_model_is_sent_its_full_output_limit(model):
+    """langchain sends 4096 for any model it has no profile for, which included the
+    default, claude-opus-4-6."""
+    expected = 64000 if model.startswith("claude-haiku-4-5") else 128000
+
+    assert _payload(_claude(model))["max_tokens"] == expected
+
+
+def test_an_older_claude_model_keeps_its_profiled_limit():
+    """claude-sonnet-4-5 allows 64K; sending it 128K would be a 400."""
+    assert _payload(_claude("claude-sonnet-4-5"))["max_tokens"] == 64000
+
+
+def test_newer_claude_structured_output_uses_output_config_not_a_forced_tool():
+    """The newest models reject tool_choice "tool", which is how langchain gets
+    structured output by default; decide and strategize would 400 on every call."""
+    chain = _claude("claude-opus-5-5").with_structured_output(_Verdict)
+    binding = chain.first
+    payload = _payload(binding.bound, **binding.kwargs)
+
+    assert payload["output_config"]["format"]["type"] == "json_schema"
+    assert not payload.get("tool_choice")
+    assert not payload.get("tools")
+
+
+def test_newer_claude_structured_output_parses_past_a_thinking_block():
+    chain = _claude("claude-opus-5-5").with_structured_output(_Verdict)
+    reply = AIMessage(
+        content=[
+            {"type": "thinking", "thinking": "", "signature": "sig"},
+            {"type": "text", "text": '{"action": "continue", "reason": "faster"}'},
+        ]
+    )
+
+    assert chain.last.invoke(reply) == _Verdict(action="continue", reason="faster")

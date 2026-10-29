@@ -27,7 +27,20 @@ MODELS = {
     },
     "anthropic": {
         "default": "claude-opus-4-6",
-        "available": ["claude-opus-4-6", "claude-haiku-4-5-20251001"],
+        "available": [
+            "claude-fable-5-1",
+            "claude-fable-5",
+            "claude-opus-5-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-5-5",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-haiku-5-5",
+            "claude-haiku-4-5-20251001",
+        ],
     },
     "gemini": {
         "default": "gemini-3-pro",
@@ -85,6 +98,25 @@ MODEL_CONFIGS = {
         "precise_temperature": 0.7,
     },
 }
+
+
+# Claude models that still take a temperature. Every later one answers a non-default
+# temperature with a 400, so _create_llm builds their client without one. Prefixes, so
+# a dated snapshot ID matches too.
+_CLAUDE_WITH_SAMPLING = ("claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5")
+
+# The API requires max_tokens on every request, so the model's own output limit is as
+# uncapped as a request gets. langchain sends that limit for models it has a profile
+# for and 4096 for the rest, which is every Claude model from Opus 4.6 on; all of
+# those allow 128K.
+CLAUDE_MAX_OUTPUT = 128000
+
+
+def _uncapped(llm):
+    """Raise a ChatAnthropic's max_tokens to the model's output limit."""
+    if not llm.profile.get("max_output_tokens"):
+        llm.max_tokens = CLAUDE_MAX_OUTPUT
+    return llm
 
 
 def _get_model_config(model: str) -> dict:
@@ -211,10 +243,15 @@ def _create_llm(provider: str, model: str, temperature: float):
             kwargs["temperature"] = temperature
         base_llm = ChatOpenAI(**kwargs)
     elif provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic
+        if model.startswith(_CLAUDE_WITH_SAMPLING):
+            from langchain_anthropic import ChatAnthropic
 
-        kwargs = {"model": model, "temperature": temperature}
-        base_llm = ChatAnthropic(**kwargs)
+            kwargs = {"model": model, "temperature": temperature}
+            base_llm = _uncapped(ChatAnthropic(**kwargs))
+        else:
+            from llm.claude import ChatClaude
+
+            base_llm = _uncapped(ChatClaude(model=model))
     elif provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
