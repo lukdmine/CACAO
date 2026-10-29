@@ -199,10 +199,15 @@ export interface ScalarSpec {
     placements: Placement[];
 }
 
+// Buffers may additionally be 'half' (IEEE binary16). Scalars may not: a half -D macro
+// has no sensible meaning. Host-side a half buffer is half_float::half (KTT vendors it);
+// the kernel spells the same two bytes __half and includes <cuda_fp16.h>.
+export type BufferDtype = 'int' | 'float' | 'half';
+
 export interface BufferSpec {
     kind: 'buffer';
     name: string;
-    dtype: 'int' | 'float';
+    dtype: BufferDtype;
     size: string;                      // C++ expression over host-const scalars
     access: 'read' | 'write' | 'readwrite';
     init: 'random' | 'zeros' | 'custom' | 'file';

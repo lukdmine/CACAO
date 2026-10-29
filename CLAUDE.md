@@ -85,7 +85,17 @@ in `frontend/src/api/client.ts`.
 
 Create a directory under `problems/` with:
 - `problem.yaml` — GPU index, grid, reference (type/function/file), validation tolerance
-- `inputs.yaml` — the I/O boundary spec (scalars, buffers, which buffers validate); `inputs.hpp` is generated from it by `utils/inputs.py`. A buffer with `init: file` + `file_name` reads a raw little-endian binary of its dtype from `inputs/<file_name>` (byte count must equal `size * sizeof(dtype)`); the UI upload puts files there via `POST /api/problems/{name}/inputs/{buffer}`
+- `inputs.yaml` — the I/O boundary spec (scalars, buffers, which buffers validate); `inputs.hpp` is generated from it by `utils/inputs.py`. A buffer with `init: file` + `file_name` reads a raw little-endian binary of its dtype from `inputs/<file_name>` (byte count must equal `size * sizeof(dtype)`); the UI upload puts files there via `POST /api/problems/{name}/inputs/{buffer}`. Buffer
+  `dtype` is `int`, `float` or `half`; scalars are `int` or `float` only. A `half` buffer is
+  `half_float::half` host-side (KTT vendors it) and `__half` in the kernel, which must
+  `#include <cuda_fp16.h>` — cacao emits only the host spelling. A `cpu_c` reference works
+  too (g++ builds `ref_cpu.c` as C++ with `-I KTT/Source`) but must include
+  `<Utility/External/half.hpp>`. **A validated half buffer is compared BIT-EXACTLY and
+  `validation.tolerance` is ignored for it** — `ResultValidator` dispatches on
+  `std::is_floating_point`, false for the class `half_float::half`, so half takes the
+  integral `!=` overload. Pair a half output with a `cuda` reference doing identical
+  arithmetic, or keep the validated output `float`. There is no bf16: KTT's
+  `ArgumentDataType` has no equivalent
 - the reference implementation: `ref_kernel.cu` (`reference.type: cuda`), `ref_cpu.c` (`reference.type: cpu_c`, a C function linked into the driver — pointer args only, scalars as `-D` macros), **or** `ref.py` (`reference.type: python`, `f(scalars, buffers)`; extra imports like `torch` are optional per-problem deps — `pip install torch` — checked at engine start)
 
 See `docs/PROBLEM_YAML_GUIDE.md`, `docs/INPUTS_YAML_GUIDE.md` and

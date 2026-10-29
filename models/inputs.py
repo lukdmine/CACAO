@@ -54,7 +54,12 @@ class ScalarSpec(BaseModel):
 class BufferSpec(BaseModel):
     kind: Literal["buffer"] = "buffer"
     name: str
-    dtype: Literal["int", "float"] = "float"
+    # "half" is IEEE binary16. Host-side it is `half_float::half` (KTT vendors the
+    # header and Ktt.h includes it); device-side the kernel spells the same two bytes
+    # `__half` and must `#include <cuda_fp16.h>`. cacao never emits the device type --
+    # the kernel author writes it -- so only the host spelling appears in inputs.hpp.
+    # Scalars deliberately stay int|float: a half -D macro has no sensible meaning.
+    dtype: Literal["int", "float", "half"] = "float"
     size: str  # C++ expression over host-const scalars, e.g. "kSizeM * kSizeK"
     access: Literal["read", "write", "readwrite"] = "read"
     init: Literal["random", "zeros", "custom", "file"] = "random"

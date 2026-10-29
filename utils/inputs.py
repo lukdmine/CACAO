@@ -45,8 +45,20 @@ def _seed(name: str) -> int:
     return zlib.crc32(name.encode()) & 0xFFFFFFFF
 
 
+# dtype -> the C++ type used HOST-side, in inputs.hpp. The device spelling of `half`
+# is `__half`, but cacao never emits it: the kernel author writes their own signature.
+_CTYPE = {"int": "int", "float": "float", "half": "half_float::half"}
+
+
+def _ctype(dtype: str) -> str:
+    return _CTYPE[dtype]
+
+
 def _literal(value, dtype: str) -> str:
     """C++ literal for a spec value. Floats need the f suffix to stay single-precision."""
+    if dtype == "half":
+        # half_float::half has no literal syntax; construct from a float one.
+        return f"half_float::half({float(value)}f)"
     if dtype == "float":
         return f"{float(value)}f"
     return str(int(value))
@@ -102,7 +114,7 @@ def _file_path(problem_dir, buf: BufferSpec) -> str:
 
 
 def _generator(spec: InputsSpec, buf: BufferSpec, problem_dir=None) -> str:
-    ctype = buf.dtype
+    ctype = _ctype(buf.dtype)
     size = _size_expr(spec, buf.size)
 
     if buf.init == "custom":
@@ -110,7 +122,11 @@ def _generator(spec: InputsSpec, buf: BufferSpec, problem_dir=None) -> str:
         return f"inline std::vector<{ctype}> gen_{buf.name}() {{\n{body}\n}}"
 
     if buf.init == "zeros":
-        zero = _literal(0, ctype)
+        # _literal takes the SPEC dtype, not the C++ type. Passing ctype here emitted a
+        # bare `0`, and half.hpp declares `explicit half(float)`, so
+        # `std::vector<half_float::half>(n, 0)` is a hard error -- verified:
+        # "no matching function for call to vector<half_float::half>::vector(int, int)".
+        zero = _literal(0, buf.dtype)
         return (
             f"inline std::vector<{ctype}> gen_{buf.name}() {{\n"
             f"    return std::vector<{ctype}>({size}, {zero});\n"
@@ -133,7 +149,7 @@ def _generator(spec: InputsSpec, buf: BufferSpec, problem_dir=None) -> str:
             f"    if (nbytes != want)\n"
             f'        throw std::runtime_error("init=file: {fpath} holds " +'
             f' std::to_string(nbytes) + " bytes, expected " + std::to_string(want) +'
-            f' " ({_cpp_escape(buf.size)} {ctype} elements)");\n'
+            f' " ({_cpp_escape(buf.size)} {buf.dtype} elements)");\n'
             f"    std::vector<{ctype}> v(static_cast<size_t>(nbytes) / sizeof({ctype}));\n"
             f"    f.seekg(0);\n"
             f"    f.read(reinterpret_cast<char*>(v.data()), nbytes);\n"
@@ -143,19 +159,22 @@ def _generator(spec: InputsSpec, buf: BufferSpec, problem_dir=None) -> str:
             f"}}"
         )
 
-    lo = _literal(
-        buf.min if buf.min is not None else (-1 if ctype == "float" else 0), ctype
-    )
-    hi = _literal(buf.max if buf.max is not None else 1, ctype)
-    dist = (
-        "uniform_real_distribution" if ctype == "float" else "uniform_int_distribution"
-    )
+    # half is drawn in float and narrowed on assignment: std::uniform_real_distribution
+    # requires a floating-point type and half_float::half is a class, so instantiating it
+    # on half is undefined. Drawing in float also keeps min/max meaning the same thing for
+    # half as for float.
+    real = buf.dtype in ("float", "half")
+    draw = "float" if buf.dtype == "half" else buf.dtype
+    lo = _literal(buf.min if buf.min is not None else (-1 if real else 0), draw)
+    hi = _literal(buf.max if buf.max is not None else 1, draw)
+    dist = "uniform_real_distribution" if real else "uniform_int_distribution"
+    assign = f"static_cast<{ctype}>(d(rng))" if buf.dtype == "half" else "d(rng)"
     return (
         f"inline std::vector<{ctype}> gen_{buf.name}() {{\n"
         f"    std::vector<{ctype}> v({size});\n"
         f"    std::mt19937 rng({_seed(buf.name)}u);\n"
-        f"    std::{dist}<{ctype}> d({lo}, {hi});\n"
-        f"    for (auto& x : v) x = d(rng);\n"
+        f"    std::{dist}<{_ctype(draw)}> d({lo}, {hi});\n"
+        f"    for (auto& x : v) x = {assign};\n"
         f"    return v;\n"
         f"}}"
     )
@@ -177,8 +196,16 @@ def _is_python_reference(reference) -> bool:
 
 
 def _ref_param(buf: BufferSpec) -> str:
+    """One parameter of the cpu_c reference's extern "C" declaration.
+
+    The HOST type, not the device one: utils/build.object_command compiles ref_cpu.c with
+    g++ (as C++, per its own contract) and passes -I KTT/Source, so a half buffer arrives
+    as `half_float::half*` and the reference source must
+    `#include <Utility/External/half.hpp>`. extern "C" only suppresses mangling; a C++
+    class parameter type is fine either side of it.
+    """
     const = "const " if buf.access == "read" else ""
-    return f"{const}{buf.dtype}* {buf.name}"
+    return f"{const}{_ctype(buf.dtype)}* {buf.name}"
 
 
 def _cpu_reference_call(spec: InputsSpec, target: BufferSpec, func: str) -> list:
@@ -191,19 +218,19 @@ def _cpu_reference_call(spec: InputsSpec, target: BufferSpec, func: str) -> list
             if b.access == "readwrite":
                 lines.append(
                     f"        std::memcpy(buffer, cacao_ref::h_{b.name}.data(), "
-                    f"cacao_ref::h_{b.name}.size() * sizeof({b.dtype}));"
+                    f"cacao_ref::h_{b.name}.size() * sizeof({_ctype(b.dtype)}));"
                 )
-            args.append(f"static_cast<{b.dtype}*>(buffer)")
+            args.append(f"static_cast<{_ctype(b.dtype)}*>(buffer)")
         elif b.access == "read":
             args.append(f"cacao_ref::h_{b.name}.data()")
         elif b.access == "readwrite":
             lines.append(
-                f"        std::vector<{b.dtype}> c_{b.name} = cacao_ref::h_{b.name};"
+                f"        std::vector<{_ctype(b.dtype)}> c_{b.name} = cacao_ref::h_{b.name};"
             )
             args.append(f"c_{b.name}.data()")
         else:  # write-only, not validated by this lambda: scratch
             lines.append(
-                f"        std::vector<{b.dtype}> s_{b.name}({_size_expr(spec, b.size)});"
+                f"        std::vector<{_ctype(b.dtype)}> s_{b.name}({_size_expr(spec, b.size)});"
             )
             args.append(f"s_{b.name}.data()")
     lines.append(f"        {func}({', '.join(args)});")
@@ -225,7 +252,7 @@ def _dump_buffer_lines(spec: InputsSpec, indent: str) -> list:
             lines.append(
                 f'{indent}{{ std::ofstream f("cacao_in_{b.name}.bin", std::ios::binary);'
                 f" f.write(reinterpret_cast<const char*>(cacao_ref::h_{b.name}.data()),"
-                f" static_cast<std::streamsize>(cacao_ref::h_{b.name}.size() * sizeof({b.dtype}))); }}"
+                f" static_cast<std::streamsize>(cacao_ref::h_{b.name}.size() * sizeof({_ctype(b.dtype)}))); }}"
             )
     return lines
 
@@ -260,7 +287,7 @@ def _python_reference_call(spec: InputsSpec, target: BufferSpec, function_name: 
     # and then every configuration "differs" from it — so a correct kernel is reported
     # broken and the LLM is sent to debug a bug that does not exist.
     target_size = _size_expr(spec, target.size)
-    nbytes = f"static_cast<std::streamsize>({target_size} * sizeof({target.dtype}))"
+    nbytes = f"static_cast<std::streamsize>({target_size} * sizeof({_ctype(target.dtype)}))"
     lines += [
         f'        const int rc = std::system("{cmd}");',
         "        if (rc != 0)",
@@ -462,7 +489,7 @@ def generate_inputs_hpp(
         for b in spec.buffers:
             if b.access in ("read", "readwrite"):
                 out.append(
-                    f"inline const std::vector<{b.dtype}> h_{b.name} = gen_{b.name}();"
+                    f"inline const std::vector<{_ctype(b.dtype)}> h_{b.name} = gen_{b.name}();"
                 )
         out.append("}")
 
