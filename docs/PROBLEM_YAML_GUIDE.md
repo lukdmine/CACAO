@@ -63,7 +63,9 @@ gpu:
   compute_capability: '8.6'
 ```
 
-`index` selects the device. The other keys (`model`, `compute_capability`, ...) are
+`index` selects the device, numbered in PCI bus order as `nvidia-smi` lists it: every
+subprocess runs with `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so the driver and `ncu` agree with
+the GPU picker even on a machine with mixed GPU models. The other keys (`model`, `compute_capability`, ...) are
 detected through `ncu` at run start (`utils/gpu_info.py`), cached in
 `output/context.json`, and override what the file declares. They feed the prompts.
 
@@ -190,7 +192,7 @@ and why the layout below is unchanged for them.
 
 **Layout.** One case (declared or implicit) writes its artifacts at the iteration root,
 exactly as before this feature. More than one, and each case gets
-`iter_N/case_<name>/`, holding its own `inputs.hpp`, `framework.cpp`, `driver` and
+`iterN/case_<name>/`, holding its own `inputs.hpp`, `framework.cpp`, `driver` and
 `results.json`. The first case in the list is the primary, and is what run-level
 summaries anchor on.
 
@@ -223,7 +225,9 @@ Shorthands: a bare string is one `text` rule; a bare list is a list of `text` ru
 a bare string inside `forbid` is a pattern with no reason.
 
 **How they are enforced.** `forbid` patterns are checked inside the agentic authoring
-step, before compiling — a match fails the check with the reason attached. `text` goes
+step, before compiling — a match fails the check with the reason attached. A pattern
+that is not a valid regular expression fails every check too (it is reported once, at
+problem load), so a typo blocks every kernel instead of quietly disarming the rule. `text` goes
 into the authoring prompt. Neither reaches the `propose` or `decide` prompts, and
 with `AGENTIC_STEPS=False` neither is applied at all.
 

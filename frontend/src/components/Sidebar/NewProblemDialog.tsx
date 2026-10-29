@@ -903,7 +903,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                             <select className="h-8 rounded border bg-background px-2 text-xs"
                                                 value={a.dtype}
                                                 title={a.kind === 'buffer'
-                                                    ? 'half is IEEE binary16: half_float::half on the host, __half in the kernel (needs #include <cuda_fp16.h>). Not available with a cpu_c reference.'
+                                                    ? 'half is IEEE binary16: half_float::half on the host, __half in the kernel (needs #include <cuda_fp16.h>). A cpu_c reference must #include <Utility/External/half.hpp>. A validated half buffer is compared bit-exactly; the tolerance does not apply.'
                                                     : 'Scalars are int or float: a half -D macro has no sensible meaning.'}
                                                 onChange={(e) => patchArg(i, { dtype: e.target.value as BufferDtype })}>
                                                 <option value="float">float</option>

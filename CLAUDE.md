@@ -162,7 +162,7 @@ set.
 Each iteration progresses through these statuses in order:
 `planning → authoring → running → profiling → proposing → deciding → decided`
 
-After `deciding`, `IterState.next_status` — written to `iter_N/state.json`, not to the
+After `deciding`, `IterState.next_status` — written to `iterN/state.json`, not to the
 manifest — drives the branch-level outcome. The worker copies it into `manifest.status`:
 - `continue` → increment `current_iter`, new iteration starts at `implementing` (planning runs once per branch); `configuring` if `skip_implement`
 - `retry` → increment `current_iter`, new iteration starts at `implementing` with the previous decision/feedback/run_output carried over (fix_errors prompt); `configuring` if `skip_implement`
@@ -378,7 +378,7 @@ problems/<name>/output/
 ```
 
 A problem declaring several `cases:` puts each case's `inputs.hpp`, `framework.cpp`,
-`driver`, `results.json` and `tuner_output.txt` in `iter_N/case_<name>/` instead of at
+`driver`, `results.json` and `tuner_output.txt` in `iterN/case_<name>/` instead of at
 the iteration root; `kernels.cu` and the region files stay at the root, shared.
 (`tuner_output.txt` was missing from this list, which is how `grep_tuner_output` came
 to look for it at the root and fail on every multi-case problem.) One case — which

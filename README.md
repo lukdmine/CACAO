@@ -36,7 +36,8 @@ branch's budget in the UI extends that path rather than spending its children's 
 The web UI reads the same three defaults from `config.py`, so a UI run and a CLI run on
 the same problem use the same budget.
 
-`--best` reports what is already in `output/` and needs no API key.
+`--best` reports what is already in `output/` and needs no API key. It exits 1 unless
+that run succeeded, so a script can test it.
 
 Run `python cli.py --help` for the full list.
 
