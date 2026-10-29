@@ -70,9 +70,7 @@ def kernel_line_offset(results_path: Path) -> Optional[int]:
     that much from the file the LLM is editing.
 
     If those two ever prepend anything more, this goes silently wrong rather than loudly —
-    the mapped line would simply point at innocent code. Cross-checked against four real
-    kernels at parameter counts 8 and 7: every mapping landed on the offending line, and
-    the 7-parameter ones would have been off by one under a hardcoded offset.
+    the mapped line would simply point at innocent code.
     """
     data = load_results(results_path)
     if not data:
@@ -94,14 +92,9 @@ def summarize_failures(
     correspondence, and the numbers it reasons about are not the numbers in its file.
 
     KTT runs every configuration, so a kernel that does not compile fails all of them with
-    the same diagnostics. One real run: 957 KB / 21,609 lines / 9,060 lines matching
-    `error:` — carrying 46 distinct diagnostics. Excerpting that log hands the LLM one
-    arbitrary configuration's block, cut mid-way: in that run the tail showed the wmma
-    errors while the float2 errors, on 1,332 lines, never reached the retry at all.
-
-    Deduplicating by diagnostic rather than by block is what makes the result complete: a
-    per-block grouping reports the same error once per block it appears in, so a cause
-    present in only one block is easy to miss among the repeats.
+    the same diagnostics and the log is mostly repeats. Deduplicating by diagnostic rather
+    than by block is what makes the result complete: a per-block grouping reports the same
+    error once per block, so a cause present in only one block is easy to miss.
 
     Returns None when the output carries no diagnostics (a clean run, a crash), so callers
     fall back to an excerpt.
@@ -193,21 +186,10 @@ def _read_reference_times(output_dir: Path) -> dict:
 
 
 def load_reference_time(output_dir: Path, case: Optional[str] = None) -> Optional[float]:
-    """
-    Load a reference time for a problem.
+    """Reference time in µs for this case, or None.
 
-    Args:
-        output_dir: The problem's output directory (e.g. problems/X/output/).
-        case:       Case name, or None for the primary case.
-
-    Returns:
-        Reference time in µs, or None if not measured for that case.
-
-    The primary case keeps the flat ``reference_time_us`` key the committed seeds already
-    use, so a pre-multi-case file needs no migration. Additional cases live in a ``cases``
-    map beside it, and a flat-only file therefore reports *no* baseline for a named case
-    rather than lending it the primary's number — a baseline measured at a different shape
-    is not a baseline.
+    The primary case uses the flat ``reference_time_us`` key, named cases live under
+    ``cases``; a flat-only file never lends its number to a named case.
     """
     data = _read_reference_times(output_dir)
     if case is None:
@@ -218,21 +200,10 @@ def load_reference_time(output_dir: Path, case: Optional[str] = None) -> Optiona
 def reference_time_recorded(output_dir: Path, case: Optional[str] = None) -> bool:
     """Whether a baseline decision has been recorded for this case.
 
-    True for a measured value AND for an explicit ``null``, which means "we know there
-    is no baseline for this shape — do not go and measure one".
-
-    Timing the reference is the normal path and stays the default: an absent case is
-    measured exactly as before, and for a python reference with ``prepare_input`` that
-    is a torch.cuda.Event timing with H2D and startup excluded (utils/torch_ref_timer),
-    which is a fine denominator. ``null`` is the opt-out for the one case it does not
-    serve — a problem where SOME cases carry a hand-seeded incumbent. Speedups against
-    the reference and speedups against a production kernel are both accurate and are not
-    comparable with each other, so letting the unseeded cases fall back to the reference
-    puts two denominators in one geometric mean and inflates the score. Seeding the rest
-    by hand fixes it too; ``null`` is for when there is nothing to seed them with.
-
-    Callers deciding whether to MEASURE use this; callers wanting the value use
-    load_reference_time, which returns None for both null and absent.
+    True for a measured value AND for an explicit ``null`` — "this shape has no baseline,
+    do not measure one" (see docs/PROBLEM_YAML_GUIDE.md). Callers deciding whether to
+    MEASURE use this; callers wanting the value use load_reference_time, which returns
+    None for both.
     """
     data = _read_reference_times(output_dir)
     if case is None:
@@ -243,20 +214,11 @@ def reference_time_recorded(output_dir: Path, case: Optional[str] = None) -> boo
 def save_reference_time(
     output_dir: Path, time_us: float, case: Optional[str] = None
 ) -> None:
-    """
-    Persist a reference time.  First-write-wins per case: an existing value is never
-    overwritten, so a seeded baseline survives every run.
+    """Persist a reference time, first-write-wins per case so a seeded baseline survives
+    every run.
 
-    Args:
-        output_dir: The problem's output directory.
-        time_us:    Reference computation time in µs.
-        case:       Case name, or None for the primary case.
-
-    The primary path keeps its O_CREAT|O_EXCL create-if-not-exists, which is atomic
-    across concurrent workers, for the common case of a file that does not exist yet.
-    Anything else needs read-modify-write; the callers are coroutines in one event loop
-    and this function does not await, so no other worker in the process can interleave
-    with it.
+    O_EXCL on the create path is atomic across workers; the read-modify-write path is safe
+    because the callers are coroutines on one event loop and this never awaits.
     """
     import os
 
@@ -297,15 +259,7 @@ def save_reference_time(
 
 
 def load_results(results_path: Path) -> Optional[dict]:
-    """
-    Load results.json file.
-
-    Args:
-        results_path: Path to results.json
-
-    Returns:
-        Parsed JSON dict or None if not found/invalid
-    """
+    """Load results.json, or None if missing or unparseable."""
     if not results_path.exists():
         return None
 
@@ -324,19 +278,10 @@ def load_results(results_path: Path) -> Optional[dict]:
 def ensure_results_loadable(results_path: Path) -> bool:
     """Make a results.json written by an older KTT readable by the current one.
 
-    KTT 2.3 added a ``Timestamp`` field to every serialised KernelResult and reads it
-    back with ``j.at("Timestamp")``, which throws — it does not default — so a file
-    written by 2.2 aborts ``Tuner::LoadResults`` with
-    ``[json.exception.out_of_range.403] key 'Timestamp' not found``.
-
-    Only the profile node loads a results.json back into KTT, and only ever the one
-    from its own iteration. That file is written by the same driver moments earlier on
-    a fresh run, so this is a no-op there; it matters when resuming a run tuned before
-    the KTT upgrade, where the file on disk predates the field.
-
-    An empty string is the right filler: the field is metadata KTT never interprets,
-    and inventing a timestamp would date the result to the migration rather than the
-    run. Returns True when the file was rewritten.
+    KTT 2.3 reads ``Timestamp`` with ``j.at``, which throws on a file written by 2.2 (see
+    CLAUDE.md). Only profile mode reloads a results.json, so this matters on resume. An
+    empty string is metadata KTT never interprets, so it is the right filler. Returns True
+    when the file was rewritten.
     """
     data = load_results(results_path)
     if data is None:
@@ -353,9 +298,14 @@ def ensure_results_loadable(results_path: Path) -> bool:
     for result in patched:
         result["Timestamp"] = ""
 
+    import os
+
+    tmp = results_path.with_suffix(".json.tmp")
     try:
-        results_path.write_text(json.dumps(data), encoding="utf-8")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        os.replace(tmp, results_path)
     except OSError as e:
+        tmp.unlink(missing_ok=True)
         from utils.log import log
 
         log(f"Could not migrate {results_path.name} for the current KTT: {e}", "WARN")
@@ -402,15 +352,7 @@ def get_computation_duration(result: dict) -> float:
 
 
 def get_best_result(results_path: Path) -> Optional[dict]:
-    """
-    Get the best (fastest) successful configuration.
-
-    Args:
-        results_path: Path to results.json
-
-    Returns:
-        Best result dict or None if no successful results
-    """
+    """The fastest successful configuration, or None if none succeeded."""
     data = load_results(results_path)
     if data is None:
         return None
@@ -434,16 +376,7 @@ def calculate_speedup(best_time: float, ref_time: float) -> float:
 def get_results_summary(
     results_path: Path, reference_time_us: Optional[float] = None
 ) -> dict:
-    """
-    Generate a summary of tuning results.
-
-    Args:
-        results_path: Path to results.json
-        reference_time_us: Central reference time (from load_reference_time)
-
-    Returns:
-        Summary dict with metrics
-    """
+    """Summarise one results.json: counts, best config and time, speedup."""
     has_success, num_ok, num_total = check_results(results_path)
 
     summary = {
@@ -473,16 +406,25 @@ def get_results_summary(
     return summary
 
 
+def iteration_results_summary(
+    problem_dir, iter_dir, reference_time_us: Optional[float] = None
+) -> dict:
+    """This iteration's summary, read from wherever its results.json actually is.
+
+    A multi-case problem writes none at the iteration root — utils.cases puts each case's
+    under ``iter_N/case_<name>/`` — so every run-level reader anchors on the primary case.
+    A caller holding a populated ``state.results_summary`` should prefer it: that is the
+    aggregate over all cases, this is the primary case alone.
+    """
+    from utils.cases import primary_case_dir
+
+    return get_results_summary(
+        primary_case_dir(problem_dir, iter_dir) / "results.json", reference_time_us
+    )
+
+
 def format_results_summary(summary: dict) -> str:
-    """
-    Format results summary as human-readable string.
-
-    Args:
-        summary: Summary dict from get_results_summary
-
-    Returns:
-        Formatted string
-    """
+    """Render a get_results_summary dict as human-readable text."""
     lines = []
     lines.append(f"Configurations tested: {summary['num_total']}")
     lines.append(f"Successful: {summary['num_successful']}")

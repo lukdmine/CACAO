@@ -18,29 +18,44 @@ from api.helpers import (
     _check_gpu_orphans,
     is_problem_running,
     terminate_run,
-    load_yaml,
     write_pid_file,
     remove_pid_file,
+    _last_exit_codes,
+    _reap_unlocked,
 )
 from api.schemas import RunConfig
 from utils.log import TeeWriter
+from utils.problem import gpu_index as problem_gpu_index, load_problem_yaml
 
 router = APIRouter()
 
 
 def _get_gpu_index(problem_dir) -> int:
-    """Read the GPU index from problem.yaml."""
-    py = problem_dir / "problem.yaml"
-    if py.exists():
-        config = load_yaml(py)
-        return config.get("gpu", {}).get("index", 0)
-    return 0
+    """The GPU ordinal from this problem's problem.yaml, 0 when unset."""
+    return problem_gpu_index(load_problem_yaml(problem_dir))
 
 
-# ── Top-level process targets (must be picklable) ────────────────────────────
+# ── Top-level process target (must be picklable) ─────────────────────────────
 
 
-def _run_target(
+def _write_startup_error(problem_dir: Path, exc: Exception):
+    """Record a failure that happened before the log redirect was installed.
+
+    run.log is the only place the UI ever looks, so a config or archive failure that
+    only reached the server's own stderr showed up as a run that simply stopped.
+    """
+    import traceback
+
+    try:
+        log_path = problem_dir / "output" / "run.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(f"\n[ERROR] {exc}\n{traceback.format_exc()}\n")
+    except OSError:
+        pass
+
+
+def _optimizer_target(
     problem_dir: Path,
     max_iter: int,
     max_depth: int,
@@ -48,124 +63,73 @@ def _run_target(
     timeout: Optional[int],
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    resume: bool = False,
 ):
-    """Process target for a fresh optimization run."""
+    """Process target for a run, or for resuming an interrupted one.
+
+    The preflight runs *inside* the log redirect: a missing API key (ValueError from
+    check_api_key) and a missing inputs.yaml (FileNotFoundError from load_problem_inputs)
+    are the two startup failures users actually hit, and on the fresh-run path they used
+    to be raised before the TeeWriter existed — the traceback went to the server's stderr
+    and the UI showed the previous run's log.
+
+    Ordering is load-bearing: archive_output_dir renames output/ wholesale, so the log
+    cannot be opened before it, and the PID file — which also lives in output/ — has to
+    be written again on the other side of it.
+    """
+    died: Optional[BaseException] = None
     try:
         import config as cfg
         from config import OptimizerConfig, init_from_config
-        from engine.master import run_optimization_engine
-        from utils.files import archive_output_dir
 
         try:
             os.setsid()
         except OSError:
             pass
 
-        init_from_config(
-            OptimizerConfig(
-                output_dir=problem_dir / "output",
-                problem_dir=problem_dir,
-                max_iterations=max_iter,
-                max_branch_depth=max_depth,
-                path_budget=path_budget,
-                tuner_timeout=timeout,
-                model=model,
-                provider=provider,
-            )
-        )
-        cfg.check_api_key()
-
-        problem_yaml, ref_kernel = load_problem_inputs(problem_dir)
-        archive_output_dir()
-
-        # Write run metadata so the server can report the correct model/provider
-        import json as _json
-
-        meta_dir = problem_dir / "output"
-        meta_dir.mkdir(parents=True, exist_ok=True)
-        (meta_dir / "run_meta.json").write_text(
-            _json.dumps(
-                {
-                    "model": cfg.get_model(),
-                    "provider": cfg.get_provider(),
-                }
-            ),
-            encoding="utf-8",
-        )
-
-        # Re-write PID file after archive_output_dir
         write_pid_file(problem_dir, os.getpid())
+
+        try:
+            init_from_config(
+                OptimizerConfig(
+                    output_dir=problem_dir / "output",
+                    problem_dir=problem_dir,
+                    max_iterations=max_iter,
+                    max_branch_depth=max_depth,
+                    path_budget=path_budget,
+                    tuner_timeout=timeout,
+                    model=model,
+                    provider=provider,
+                )
+            )
+            if not resume:
+                from utils.files import archive_output_dir
+
+                archive_output_dir()
+                write_pid_file(problem_dir, os.getpid())  # output/ was just renamed away
+        except Exception as e:
+            _write_startup_error(problem_dir, e)
+            # Non-zero, or the registry records this as "finished normally" and
+            # last_exit_code cannot tell a dead run from a completed one.
+            raise SystemExit(1) from e
 
         log_path = problem_dir / "output" / "run.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with log_path.open("w", encoding="utf-8") as log_file:
+        with log_path.open("a" if resume else "w", encoding="utf-8") as log_file:
             old_stdout, old_stderr = sys.stdout, sys.stderr
             sys.stdout = TeeWriter(old_stdout, log_file)
             sys.stderr = TeeWriter(old_stderr, log_file)
 
             try:
                 import asyncio as _asyncio
-
-                _asyncio.run(run_optimization_engine(problem_yaml, ref_kernel))
-            except Exception as e:
-                print(f"\n[ERROR] {e}", flush=True)
-            finally:
-                sys.stdout = old_stdout
-                sys.stderr = old_stderr
-    finally:
-        remove_pid_file(problem_dir)
-
-
-def _resume_target(
-    problem_dir: Path,
-    max_iter: int,
-    max_depth: int,
-    path_budget: int,
-    timeout: Optional[int],
-    model: Optional[str] = None,
-    provider: Optional[str] = None,
-):
-    """Process target for resuming an interrupted optimization."""
-    try:
-        log_path = problem_dir / "output" / "run.log"
-        log_path.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            os.setsid()
-        except OSError:
-            pass
-
-        write_pid_file(problem_dir, os.getpid())
-
-        with log_path.open("a", encoding="utf-8") as log_file:
-            old_stdout, old_stderr = sys.stdout, sys.stderr
-            sys.stdout = TeeWriter(old_stdout, log_file)
-            sys.stderr = TeeWriter(old_stderr, log_file)
-
-            try:
-                import config as cfg
-                from config import OptimizerConfig, init_from_config
-                from engine.master import run_optimization_engine
-                from engine.resume import get_resume_states
-
-                init_from_config(
-                    OptimizerConfig(
-                        output_dir=problem_dir / "output",
-                        problem_dir=problem_dir,
-                        max_iterations=max_iter,
-                        max_branch_depth=max_depth,
-                        path_budget=path_budget,
-                        tuner_timeout=timeout,
-                        model=model,
-                        provider=provider,
-                    )
-                )
-                cfg.check_api_key()
-
-                # Write run metadata so the server can report the correct model/provider
                 import json as _json
 
+                from engine.master import run_optimization_engine
+
+                cfg.check_api_key()
+
+                # Run metadata, so the server can report the correct model/provider
                 (problem_dir / "output" / "run_meta.json").write_text(
                     _json.dumps(
                         {
@@ -178,18 +142,28 @@ def _resume_target(
 
                 problem_yaml, ref_kernel = load_problem_inputs(problem_dir)
 
-                resume_states = get_resume_states()
-                if resume_states:
-                    import asyncio as _asyncio
+                resume_states = None
+                if resume:
+                    from engine.resume import get_resume_states
 
-                    _asyncio.run(
-                        run_optimization_engine(problem_yaml, ref_kernel, resume_states)
-                    )
+                    resume_states = get_resume_states()
+                    if not resume_states:
+                        return  # get_resume_states has already said why
+
+                _asyncio.run(
+                    run_optimization_engine(problem_yaml, ref_kernel, resume_states)
+                )
             except Exception as e:
-                print(f"\n[ERROR] {e}", flush=True)
+                import traceback as _traceback
+
+                print(f"\n[ERROR] {e}\n{_traceback.format_exc()}", flush=True)
+                died = e
             finally:
                 sys.stdout = old_stdout
                 sys.stderr = old_stderr
+
+        if died is not None:
+            raise SystemExit(1) from died
     finally:
         remove_pid_file(problem_dir)
 
@@ -201,7 +175,7 @@ def _check_gpu_unlocked(gpu_index: int):
     """Raise 409 if the in-memory dict shows the GPU is in use. Caller must hold _running_lock."""
     for name, entry in list(_running_problems.items()):
         if not entry.process.is_alive():
-            del _running_problems[name]
+            _reap_unlocked(name)
             continue
         if entry.gpu_index == gpu_index:
             raise HTTPException(
@@ -211,10 +185,10 @@ def _check_gpu_unlocked(gpu_index: int):
 
 
 def _spawn_optimizer(
-    target, problem_dir: Path, config: RunConfig, label: str
+    problem_dir: Path, config: RunConfig, label: str, resume: bool
 ) -> multiprocessing.Process:
     proc = multiprocessing.Process(
-        target=target,
+        target=_optimizer_target,
         args=(
             problem_dir,
             config.max_iter,
@@ -223,6 +197,7 @@ def _spawn_optimizer(
             config.timeout,
             config.model,
             config.provider,
+            resume,
         ),
         daemon=True,
         name=label,
@@ -232,7 +207,12 @@ def _spawn_optimizer(
 
 
 def _reserve_and_spawn(
-    target, name: str, problem_dir: Path, config: RunConfig, gpu_index: int, label: str
+    name: str,
+    problem_dir: Path,
+    config: RunConfig,
+    gpu_index: int,
+    label: str,
+    resume: bool,
 ):
     """Atomically verify name/GPU are free, spawn the process, and record the entry.
 
@@ -246,21 +226,28 @@ def _reserve_and_spawn(
                 status_code=409, detail=f"Optimization already running for '{name}'"
             )
         _check_gpu_unlocked(gpu_index)
-        proc = _spawn_optimizer(target, problem_dir, config, label)
+        proc = _spawn_optimizer(problem_dir, config, label, resume)
         _running_problems[name] = RunEntry(process=proc, gpu_index=gpu_index)
+        # The new run's outcome is the only one worth reporting.
+        _last_exit_codes.pop(name, None)
 
 
 def start_run(name: str, problem_dir: Path, config: RunConfig, gpu_index: int):
     """Start a fresh optimization run. Callers must NOT pre-check under _running_lock."""
     _reserve_and_spawn(
-        _run_target, name, problem_dir, config, gpu_index, f"optimizer-{name}"
+        name, problem_dir, config, gpu_index, f"optimizer-{name}", resume=False
     )
 
 
 def start_resume(name: str, problem_dir: Path, config: RunConfig, gpu_index: int):
     """Resume an interrupted optimization. Callers must NOT pre-check under _running_lock."""
     _reserve_and_spawn(
-        _resume_target, name, problem_dir, config, gpu_index, f"optimizer-resume-{name}"
+        name,
+        problem_dir,
+        config,
+        gpu_index,
+        f"optimizer-resume-{name}",
+        resume=True,
     )
 
 

@@ -11,8 +11,10 @@
 
 // All status values from the iteration FSM and branch lifecycle
 export type BranchStatus =
+  | "idle"
   | "initialized"
   | "planning"
+  | "authoring"
   | "implementing"
   | "configuring"
   | "running"

@@ -1,12 +1,13 @@
 """Strategize prompt — identifies optimization strategies from analysis."""
 
 from config import MAX_STRATEGIES
+from prompts._format import format_reference
 from prompts._system_overview import SYSTEM_OVERVIEW
 
 
 def build(ctx: dict) -> tuple[str, str]:
     system = (
-        f"""# Identify Optimization Strategies
+        """# Identify Optimization Strategies
 
 You are a CUDA optimization expert. Your task is to identify discrete, independent optimization strategies based on the kernel analysis.
 
@@ -89,9 +90,7 @@ You must output a JSON object with:
     if ctx.get("inputs_hpp"):
         parts.append(f"## I/O Boundary (inputs.hpp):\n```cpp\n{ctx['inputs_hpp']}\n```")
     if ctx.get("ref_kernel"):
-        parts.append(
-            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
-        )
+        parts.append(format_reference(ctx))
     if ctx.get("analysis"):
         parts.append(f"## Kernel Analysis:\n{ctx['analysis']}")
     parts.append(

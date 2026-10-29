@@ -203,7 +203,16 @@ def set_provider(provider: Optional[str]) -> None:
     global _current_provider, _llm_creative, _llm_precise
     if not provider:
         return
-    _current_provider = _normalise_provider(provider) or provider
+    resolved = _normalise_provider(provider)
+    if resolved is None:
+        # Keeping the raw name turns a typo in a run request into a KeyError inside
+        # get_default_model, in the child process, several layers from its cause.
+        log(
+            f"provider={provider!r} is not a known provider "
+            f"({', '.join(PROVIDERS)}) — falling back to API-key detection.",
+            "WARN",
+        )
+    _current_provider = resolved
     _llm_creative = None
     _llm_precise = None
 

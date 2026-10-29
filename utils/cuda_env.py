@@ -188,16 +188,7 @@ def _load_config_file(project_root: Path) -> dict:
 
 
 def detect(project_root: Optional[Path] = None) -> CudaEnv:
-    """
-    Detect the CUDA environment. Returns a CudaEnv with resolved paths.
-
-    Discovery order for each tool:
-    1. cuda_env.yaml explicit path
-    2. CUDA_PATH / CUDA_HOME / CUDA_ROOT env vars
-    3. which <tool> (PATH lookup)
-    4. Common install locations
-    5. HPC module system probe
-    """
+    """Detect the CUDA environment; see the module docstring for the discovery order."""
     if project_root is None:
         project_root = Path(__file__).parent.parent
 
@@ -276,13 +267,25 @@ def detect(project_root: Optional[Path] = None) -> CudaEnv:
         env.gcc = _find_tool("gcc") or _find_tool("cc")
 
     if not env.gcc:
-        env._errors.append(
-            "gcc not found — required for compiling CPU reference implementations.\n"
-            "  Fix: Install gcc (e.g., apt install gcc, dnf install gcc)"
+        env._warnings.append(
+            "gcc not found. Nothing in the pipeline invokes it — the driver and the\n"
+            "  cpu_c reference are both built with g++ — so this is informational."
         )
 
-    # --- g++ ---
-    env.gpp = _find_tool("g++") or _find_tool("c++")
+    # --- g++ (utils/build.py compiles the KTT driver and ref_cpu.c with it) ---
+    if "gpp" in config:
+        p = Path(config["gpp"])
+        env.gpp = p if p.exists() else None
+        if not env.gpp:
+            env._errors.append(f"cuda_env.yaml: gpp path '{p}' does not exist")
+    else:
+        env.gpp = _find_tool("g++") or _find_tool("c++")
+
+    if not env.gpp:
+        env._errors.append(
+            "g++ not found — every driver compile fails without it.\n"
+            "  Fix: Install g++ (e.g., apt install g++), or set gpp in cuda_env.yaml"
+        )
 
     # --- CUDA include dir ---
     if "cuda_include" in config:
@@ -349,6 +352,10 @@ def get_subprocess_env(env: Optional[CudaEnv] = None) -> dict:
     # Force POSIX numeric locale so tools like NCU always use '.' as the
     # decimal separator, regardless of the host machine's regional settings.
     sub_env["LC_NUMERIC"] = "C"
+    # Enumerate CUDA devices in PCI bus order. nvidia-smi always does, and its index is
+    # what the GPU picker writes into problem.yaml `gpu.index` and hands to the driver;
+    # CUDA's default FASTEST_FIRST agrees only on a homogeneous machine.
+    sub_env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     # Redirect NCU's fixed-path lock file to a per-user dir so profiling doesn't
     # collide between users sharing this machine (see get_ncu_tmpdir).
     sub_env["TMPDIR"] = str(get_ncu_tmpdir())

@@ -320,6 +320,15 @@ def update_problem(name: str, req: CreateProblemRequest):
             status_code=400, detail=f"Cannot update '{name}' while running"
         )
 
+    # The check create_problem and clone_problem both apply. Without it a slug of
+    # '..' passed the != name test and _write_problem_files wrote problem.yaml and the
+    # reference source outside problems/ entirely.
+    if not re.match(r"^[a-z0-9_]+$", req.slug):
+        raise HTTPException(
+            status_code=400,
+            detail="Slug must be lowercase alphanumeric with underscores",
+        )
+
     problem_dir = get_problem_dir(name)
     if req.slug != name:
         raise HTTPException(
@@ -388,7 +397,7 @@ async def upload_input_file(
         except Exception as e:
             raise HTTPException(
                 status_code=400, detail=f"Cannot read this problem's cases: {e}"
-            )
+            ) from e
         target = next((c for c in cases if c.name == case), None)
         if target is None:
             raise HTTPException(
@@ -413,7 +422,7 @@ async def upload_input_file(
         raise HTTPException(
             status_code=400,
             detail=f"Buffer '{buffer_name}': cannot evaluate size '{buf.size}': {e}",
-        )
+        ) from e
     want = elems * np.dtype(DTYPE_MAP[buf.dtype]).itemsize
 
     # path.parent (not inputs_dir): file_name may name a subdirectory.
@@ -459,12 +468,20 @@ async def upload_input_file(
 def delete_problem(name: str):
     """Delete a problem entirely from the file system."""
     problem_dir = get_problem_dir(name)
-    terminate_run(name, problem_dir)
+    # A kill that fails must not make the problem undeletable — the directory is going
+    # away regardless, and /stop is where a stuck optimizer should be reported.
+    terminate_run(name, problem_dir, raise_on_failure=False)
     try:
         shutil.rmtree(problem_dir)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete: {e}") from e
     return {"status": "deleted", "name": name}
+
+
+# How much of the log's end is decoded and split. The panel asks for 500 lines; a
+# multi-hour run.log reaches ~700 KB, all of which used to be split into a list of
+# lines on every 5-second poll, per open tab.
+_LOG_TAIL_BYTES = 256 * 1024
 
 
 @router.get("/api/problems/{name}/logs")
@@ -473,12 +490,24 @@ def get_logs(name: str, tail: int = 200):
     problem_dir = get_problem_dir(name)
     log_path = problem_dir / "output" / "run.log"
     if not log_path.exists():
-        return {"log": "", "lines": 0}
+        return {"log": "", "lines": 0, "truncated": False}
 
-    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    total = len(lines)
-    tail_lines = lines[-tail:] if tail < total else lines
-    return {"log": "\n".join(tail_lines), "lines": total, "truncated": total > tail}
+    raw = log_path.read_bytes()
+    # ``lines`` is the file's real total — the panel displays it — so it is counted on
+    # the bytes rather than derived from the window.
+    total = raw.count(b"\n") + (1 if raw and not raw.endswith(b"\n") else 0)
+    windowed = len(raw) > _LOG_TAIL_BYTES
+    text = raw[-_LOG_TAIL_BYTES:] if windowed else raw
+    lines = text.decode("utf-8", errors="replace").splitlines()
+    if windowed and lines:
+        del lines[0]  # the window starts mid-line
+    # ``lines[-0:]`` is the whole file, the opposite of what tail=0 asked for.
+    tail_lines = lines[-tail:] if tail > 0 else []
+    return {
+        "log": "\n".join(tail_lines),
+        "lines": total,
+        "truncated": len(tail_lines) < total,
+    }
 
 
 @router.get("/api/problems/{name}/detail")

@@ -1,28 +1,18 @@
-"""Reading other branches' results.
+"""Read-only views of other branches' results, tolerant of concurrent writers.
 
-Branches run as parallel coroutines and, apart from a sub-branch inheriting its
-parent's last iteration, are invisible to each other. In one real run that cost about
-four iterations: three branches each independently tried async double-buffering and
-reverted it, each independently found ``__launch_bounds__``, and each separately
-diagnosed the same API outage.
-
-What is shared, and what is not, is deliberate. The one-line iteration summaries carry
-*what was tried and what happened* without carrying the kernel, so they prune dead ends
-without collapsing parallel strategies into one bet. Kernel bodies and framework
-regions are reachable only by explicitly naming a branch, an iteration, and a file --
-never surfaced automatically.
-
-Everything here is read-only and tolerant of concurrent writers: a sibling's worker
-rewrites branch.json wholesale, so a partial read is expected, not exceptional. Only
-iterations strictly below a branch's ``current_iter`` are read, so a half-decided
-iteration is never observed.
+Only decided iterations are read — those below a running branch's ``current_iter``, and
+its last one once the branch has terminated — so an iteration a worker is mid-write on
+is never observed. No function here exposes another branch's kernel or framework
+regions, at any access level: parallel branches are parallel bets, and one that can
+read the leader's code converges on it.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 # A prompt-resident index has to stay small enough to be worth its space. Rows are
 # sorted fastest-first, so a deep tree keeps the branches worth investigating and drops
@@ -164,7 +154,7 @@ def branch_log(output_dir, name: str) -> str:
     """What a branch tried, one line per iteration, with the outcome.
 
     Deliberately excludes kernel code: this is the pruning signal, not a template to
-    copy. Use read_branch_file to look at an iteration that turns out to matter.
+    copy. branch_errors is the deepest read there is; nothing reaches a sibling's files.
     """
     path = resolve_branch(output_dir, name)
     if path is None:
@@ -222,17 +212,35 @@ def list_iterations(branch_path) -> str:
     return "\n".join(rows)
 
 
+# A failure analysis is free-form model output, written by a prompt that carried the
+# compiler's stderr — which quotes the failing branch's source. Uncapped, one call
+# splices a sibling's code into this branch's context, which is both the budget blow-up
+# the pull tools exist to avoid and a breach of the no-code-sharing rule. Every other
+# cross-branch surface is bounded; so is this one.
+_MAX_ERROR_ENTRIES = 6
+_MAX_ERROR_FIELD_CHARS = 400
+
+_FENCED_BLOCK = re.compile(r"```.*?```", re.DOTALL)
+
+
+def _condense(text) -> str:
+    """A prompt-sized line of an analysis field: fences dropped, whitespace flat, capped."""
+    if not isinstance(text, str):
+        return ""
+    # An unclosed fence takes the rest of the field with it — that tail is the code.
+    stripped = _FENCED_BLOCK.sub(" ", text).split("```", 1)[0]
+    flat = " ".join(stripped.split())
+    if len(flat) > _MAX_ERROR_FIELD_CHARS:
+        flat = flat[:_MAX_ERROR_FIELD_CHARS].rstrip() + " …"
+    return flat
+
+
 def branch_errors(output_dir, name: str) -> str:
-    """What went wrong in another branch, and what it concluded about the cause.
+    """What went wrong in another branch and what it concluded caused it.
 
-    Deliberately the deepest cross-branch read available. There is no route to a
-    sibling's kernel or framework regions, because the value of running four branches
-    is that they are four independent attempts: a branch that can read the current
-    leader's code converges on it, and the parallelism buys one bet instead of four.
-
-    Failure analyses do not have that effect. "cp.async double buffering regressed and
-    was reverted" removes a dead end without supplying a solution, which is the whole
-    reason cross-branch sharing is worth having.
+    The deepest cross-branch read there is — a failure analysis prunes a dead end
+    without supplying a solution. Capped and condensed on the way out, so what the
+    reader gets is bounded regardless of what the writing branch's model produced.
     """
     path = resolve_branch(output_dir, name)
     if path is None:
@@ -247,13 +255,20 @@ def branch_errors(output_dir, name: str) -> str:
         if not analysis:
             continue
         n = snap.get("iter_num", "?")
-        parts = [f"- iter {n}: {analysis.get('error_type', 'error')}"]
-        if analysis.get("root_cause"):
-            parts.append(f"  cause: {analysis['root_cause']}")
-        if analysis.get("suggested_fix"):
-            parts.append(f"  fix applied: {analysis['suggested_fix']}")
+        parts = [f"- iter {n}: {_condense(analysis.get('error_type')) or 'error'}"]
+        cause = _condense(analysis.get("root_cause"))
+        if cause:
+            parts.append(f"  cause: {cause}")
+        fix = _condense(analysis.get("suggested_fix"))
+        if fix:
+            parts.append(f"  fix applied: {fix}")
         entries.append("\n".join(parts))
 
     if not entries:
         return f"Branch '{name}' recorded no failure analyses."
-    return f"## Failures recorded in branch '{name}':\n" + "\n".join(entries)
+
+    shown = entries[-_MAX_ERROR_ENTRIES:]
+    header = f"## Failures recorded in branch '{name}':"
+    if len(entries) > len(shown):
+        header += f"  (most recent {len(shown)}; {len(entries) - len(shown)} earlier omitted)"
+    return header + "\n" + "\n".join(shown)

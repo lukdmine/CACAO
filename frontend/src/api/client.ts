@@ -14,6 +14,15 @@ function resolveApiBase(): string {
 }
 
 const API_BASE = resolveApiBase();
+
+// The one place a non-2xx becomes an Error, so a status-specific message or
+// FastAPI's `detail` field only has to be unpacked once.
+async function throwIfNotOk(res: Response): Promise<void> {
+    if (res.ok) return;
+    const body = await res.text();
+    throw new Error(`API ${res.status}: ${body}`);
+}
+
 /**
  * Typed fetch wrapper for the backend API.
  */
@@ -25,16 +34,11 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
             ...options?.headers,
         },
     });
-    if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`API ${res.status}: ${body}`);
-    }
+    await throwIfNotOk(res);
     return res.json();
 }
 
-// =============================================================================
-// Problem endpoints
-// =============================================================================
+// --- Problem endpoints ---
 
 export interface ProblemsResponse {
     problems: Array<{
@@ -99,16 +103,11 @@ export async function uploadProblemInput(
         `${API_BASE}/api/problems/${name}/inputs/${encodeURIComponent(buffer)}${q}`,
         { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: file },
     );
-    if (!res.ok) {
-        const body = await res.text();
-        throw new Error(`API ${res.status}: ${body}`);
-    }
+    await throwIfNotOk(res);
     return res.json() as Promise<{ status: string; buffer: string; file_name: string; bytes: number }>;
 }
 
-// =============================================================================
-// Tree endpoint
-// =============================================================================
+// --- Tree endpoint ---
 
 import type { TreeNode, TokenUsage, IterationDetail } from '@/api/types.generated';
 
@@ -137,16 +136,10 @@ async function apiFetchConditional<T>(path: string, etag: string | null): Promis
     if (res.status === 304) {
         return { data: null, etag };
     }
-    if (!res.ok) {
-        throw new Error(`API ${res.status}: ${await res.text()}`);
-    }
+    await throwIfNotOk(res);
     // Null when the backend is reached through something that strips ETag —
     // the caller then simply polls unconditionally, which is the old behaviour.
     return { data: (await res.json()) as T, etag: res.headers.get('ETag') };
-}
-
-export async function fetchTree(problemName: string): Promise<TreeResponse> {
-    return apiFetch<TreeResponse>(`/api/problems/${problemName}/tree`);
 }
 
 export function fetchTreeConditional(problemName: string, etag: string | null) {
@@ -179,9 +172,7 @@ export function fetchIteration(
     );
 }
 
-// =============================================================================
-// Create Problem
-// =============================================================================
+// --- Create Problem ---
 
 // The correctness oracle a kernel is validated against.
 export type ReferenceType = 'cuda' | 'cpu_c' | 'python';
@@ -341,9 +332,7 @@ export async function cloneProblem(name: string, newName: string) {
     );
 }
 
-// =============================================================================
-// Run / Resume
-// =============================================================================
+// --- Run / Resume ---
 
 export interface RunConfig {
     max_iter?: number;
@@ -368,9 +357,7 @@ export async function resumeProblem(name: string, config?: RunConfig) {
     });
 }
 
-// =============================================================================
-// Models
-// =============================================================================
+// --- Models ---
 
 export interface ModelsResponse {
     [provider: string]: {
@@ -383,9 +370,7 @@ export async function fetchModels(): Promise<ModelsResponse> {
     return apiFetch<ModelsResponse>('/api/models');
 }
 
-// =============================================================================
-// Stop
-// =============================================================================
+// --- Stop ---
 
 export async function stopProblem(name: string) {
     return apiFetch(`/api/problems/${name}/stop`, {
@@ -403,17 +388,7 @@ export async function fetchLogs(name: string, tail = 500): Promise<LogsResponse>
     return apiFetch<LogsResponse>(`/api/problems/${name}/logs?tail=${tail}`);
 }
 
-// =============================================================================
-// Status
-// =============================================================================
-
-export async function fetchStatus() {
-    return apiFetch<{ running_problems: Record<string, boolean>; active_count: number }>('/api/status');
-}
-
-// =============================================================================
-// GPU
-// =============================================================================
+// --- GPU ---
 
 export interface GpuDevice {
     index: number;
@@ -429,9 +404,7 @@ export async function fetchGpuDevices() {
     return apiFetch<{ devices: GpuDevice[] }>('/api/gpu/devices');
 }
 
-// =============================================================================
-// Branch Control
-// =============================================================================
+// --- Branch Control ---
 
 export async function stopBranch(problem: string, branchId: string) {
     return apiFetch<{ status: string; branch: string }>(

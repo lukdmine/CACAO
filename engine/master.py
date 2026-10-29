@@ -21,6 +21,7 @@ from nodes.strategize import strategize_node
 
 from utils.files import create_branch_dir
 from utils.log import log
+from utils.problem import gpu_index
 from utils.ref_timing import preflight_python_reference, time_python_reference
 from state import (
     MainState,
@@ -210,12 +211,12 @@ async def run_optimization_engine(
     gpu_info = None
     try:
         config = yaml.safe_load(problem_yaml)
-        gpu_index = config.get("gpu", {}).get("index", 0)
-        gpu_info = get_gpu_details(gpu_index)
+        index = gpu_index(config)
+        gpu_info = get_gpu_details(index)
         if gpu_info:
             config["gpu"].update(gpu_info)
             problem_yaml = yaml.dump(config, default_flow_style=False, sort_keys=False)
-            log(f"Detected GPU {gpu_index}: {gpu_info.get('model')}", "INFO")
+            log(f"Detected GPU {index}: {gpu_info.get('model')}", "INFO")
     except Exception as e:
         log(f"Failed to detect GPU info: {e}", "WARN")
 
@@ -228,11 +229,26 @@ async def run_optimization_engine(
 
     strategy_queue: asyncio.Queue = asyncio.Queue()
 
+    # Branch paths queued or held by a worker. The monitor re-queues whatever it finds
+    # in output/requeue/ and nothing checked it against the queue, so a leftover file
+    # could hand a second worker a branch that is already running — two coroutines
+    # writing one branch.json, and the one-writer-per-file rule gone.
+    in_flight: set = set()
+
+    def _enqueue(path) -> bool:
+        """Queue a branch unless it is already queued or running. True when queued."""
+        key = str(Path(path).resolve())
+        if key in in_flight:
+            return False
+        in_flight.add(key)
+        strategy_queue.put_nowait(Path(path))
+        return True
+
     if resume_states:
         global_tracker.load(get_output_dir())
         log(f"Resuming {len(resume_states)} branches directly into the queue!", "INFO")
         for branch_path in resume_states:
-            strategy_queue.put_nowait(Path(branch_path))
+            _enqueue(branch_path)
     else:
         main_state = await analyze_node(main_state)
         global_tracker.save(get_output_dir())
@@ -258,8 +274,7 @@ async def run_optimization_engine(
         )
 
         for strat in strategies:
-            branch_path = _init_branch(strat, current_depth=_cfg.MAX_BRANCH_DEPTH)
-            strategy_queue.put_nowait(branch_path)
+            _enqueue(_init_branch(strat, current_depth=_cfg.MAX_BRANCH_DEPTH))
 
     print("\n" + "=" * 60)
     print("  PHASE 2: Parallel Branch Execution")
@@ -271,6 +286,14 @@ async def run_optimization_engine(
     from config import get_problem_dir
 
     await time_python_reference(get_problem_dir(), get_output_dir())
+
+    # Anything still in output/requeue/ predates this process — write_requeue only fires
+    # while an optimizer is live, and a resume has already picked those branches up by
+    # status. Consume them here so the monitor's first tick cannot queue a branch a
+    # worker is already holding.
+    stale = read_requeue(get_output_dir())
+    if stale:
+        log(f"Discarded {len(stale)} stale re-queue file(s) from an earlier run.")
 
     # No lock guards `busy` or the exit check: every read/write below sits
     # between awaits, which is atomic under asyncio's cooperative scheduler.
@@ -298,13 +321,37 @@ async def run_optimization_engine(
             try:
                 new_sub_strategies = await run_branch_loop(branch_path)
             finally:
-                if new_sub_strategies:
-                    for child_path in _spawn_sub_branches(
-                        branch_path, new_sub_strategies
-                    ):
-                        strategy_queue.put_nowait(child_path)
-
-                busy -= 1
+                try:
+                    if new_sub_strategies:
+                        for child_path in _spawn_sub_branches(
+                            branch_path, new_sub_strategies
+                        ):
+                            _enqueue(child_path)
+                except Exception as e:
+                    # Spawning fails for real reasons — an ancestor revert removed the
+                    # tree, a full disk — and unguarded here it replaced whatever
+                    # exception was in flight *and* skipped the decrement below.
+                    log(
+                        f"Failed to spawn sub-branches under {branch_path}: {e}",
+                        "ERROR",
+                    )
+                    # run_branch_loop cleared the cache before handing the list over, so
+                    # swallowing here would lose a whole decision's sub-strategies with
+                    # nothing on disk to recover them. Put them back: resume re-queues a
+                    # "branching" branch whose cache is populated.
+                    try:
+                        m = load_branch_manifest(branch_path)
+                        m.sub_strategies_cache = new_sub_strategies
+                        save_branch_manifest(branch_path, m)
+                    except Exception as restore_error:
+                        log(
+                            f"  and could not preserve them for resume: {restore_error}",
+                            "ERROR",
+                        )
+                finally:
+                    in_flight.discard(str(Path(branch_path).resolve()))
+                    # monitor only exits on busy == 0, so a leaked count hangs the run.
+                    busy -= 1
 
     async def monitor():
         while not shutdown_event.is_set():
@@ -314,16 +361,31 @@ async def run_optimization_engine(
                 pass
             leftovers = read_requeue(get_output_dir())
             for bp in leftovers:
-                strategy_queue.put_nowait(bp)
-                log(f"Re-queued branch from disk: {bp.name}", "INFO")
+                if _enqueue(bp):
+                    log(f"Re-queued branch from disk: {bp.name}", "INFO")
+                else:
+                    log(
+                        f"Ignored re-queue for {bp.name}: already queued or running",
+                        "WARN",
+                    )
             if busy == 0 and strategy_queue.empty():
+                shutdown_event.set()
+            elif all(task.done() for task in worker_tasks):
+                # Every worker died with work still queued; nothing will ever drain it.
+                log("All branch workers exited with work still queued.", "ERROR")
                 shutdown_event.set()
 
     max_workers = 4
     worker_tasks = [asyncio.create_task(worker()) for _ in range(max_workers)]
     monitor_task = asyncio.create_task(monitor())
 
-    await asyncio.gather(monitor_task, *worker_tasks)
+    # return_exceptions: without it the first worker to die propagated straight out of
+    # here, skipping the final summary and the token flush below while the other three
+    # coroutines were cancelled mid-node at loop teardown.
+    outcomes = await asyncio.gather(monitor_task, *worker_tasks, return_exceptions=True)
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException):
+            log(f"Engine task ended with an exception: {outcome!r}", "ERROR")
 
     log("All branches and sub-branches have completed!", "SUCCESS")
 

@@ -1,7 +1,7 @@
 """Shared tensor-core API reference block.
 
-Imported by plan, implement, and propose prompts. Keep single-sourced so
-the shape tables don't drift.
+Single-sourced so the shape tables don't drift. Grep for the importers rather than
+trusting a list here — the last hand-kept one named three of the four.
 """
 
 TENSOR_CORE_REFERENCE = """## Tensor Cores (Ampere sm_80 / sm_86)

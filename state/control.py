@@ -8,6 +8,7 @@ and running worker coroutines:
   - disk surgery for reverting a branch to a prior iteration
 """
 
+import itertools
 import json
 import os
 import shutil
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from state.persistence import (
-    grant_one_more_iteration,
+    atomic_write_json,
     load_branch_manifest,
     save_branch_manifest,
     load_iter_state,
@@ -40,44 +41,74 @@ def _inject_user_message(iter_state, message: str):
 
 
 def _stop_sub_branches(branch_path: Path):
-    """Signal stop to all sub-branches and remove the branches directory."""
+    """Remove the sub-branch tree. Deletion is the stop.
+
+    Signalling each child first cannot work: the signals live inside the directory
+    being removed, and a worker polls once per node — an LLM call or a tuner run
+    later. The child notices instead by finding its own directory gone, which
+    engine/worker.py checks before every save (a save would mkdir it back).
+    """
     branches_dir = branch_path / "branches"
     if not branches_dir.is_dir():
         return
-    for branch_file in branches_dir.rglob("branch.json"):
-        write_control_signal(branch_file.parent, {"action": "stop"})
     shutil.rmtree(branches_dir, ignore_errors=True)
 
 
-def read_control_signal(branch_path: Path) -> Optional[dict]:
-    """Read and consume a ``control.json`` signal from a branch directory.
+# Signals queue as one file each under this directory. A single ``control.json`` slot
+# lost whichever of two signals arrived first, and with the worker polling once per node
+# — minutes apart — a stop followed by a message is the ordinary case, not a race.
+_CONTROL_DIR = "control"
 
-    Uses atomic rename to prevent lost signals: if the rename succeeds,
-    this caller owns the file and no concurrent writer can interfere.
+# Per-process tiebreaker for two signals written within the same nanosecond.
+_signal_seq = itertools.count()
+
+
+def _pending_signals(branch_path: Path) -> List[Path]:
+    """Queued signal files, oldest first. Names sort chronologically by construction."""
+    queue = branch_path / _CONTROL_DIR
+    queued = sorted(queue.glob("*.json")) if queue.is_dir() else []
+    legacy = branch_path / "control.json"  # written by a run that predates the queue
+    return ([legacy] if legacy.is_file() else []) + queued
+
+
+def read_control_signal(branch_path: Path) -> Optional[dict]:
+    """Read and consume the oldest pending signal for a branch, or None if there is none.
+
+    Claiming is an atomic rename: whoever renames a file owns it, so a concurrent
+    reader or writer cannot interfere with a signal already being processed.
     """
-    control_file = branch_path / "control.json"
+    branch_path = Path(branch_path)
     consumed = branch_path / f".control_consumed_{os.getpid()}.json"
-    try:
-        os.rename(control_file, consumed)
-    except (FileNotFoundError, OSError):
-        return None
-    try:
-        with consumed.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return None
-    finally:
-        consumed.unlink(missing_ok=True)
+    for candidate in _pending_signals(branch_path):
+        try:
+            os.rename(candidate, consumed)
+        except OSError:
+            continue  # vanished, or another reader got there first
+        try:
+            with consumed.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return None
+        finally:
+            consumed.unlink(missing_ok=True)
+    return None
 
 
 def write_control_signal(branch_path: Path, signal: dict):
-    """Write a control signal to a branch directory (atomic via tmp+rename)."""
-    branch_path.mkdir(parents=True, exist_ok=True)
-    tmp = branch_path / "control.json.tmp"
-    final = branch_path / "control.json"
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(signal, f)
-    tmp.replace(final)
+    """Queue a control signal for a branch. Never displaces an unread one."""
+    name = f"{time.time_ns():020d}_{os.getpid()}_{next(_signal_seq)}.json"
+    atomic_write_json(Path(branch_path) / _CONTROL_DIR / name, signal)
+
+
+def clear_control_signals(branch_path: Path):
+    """Drop every pending signal, consumed or not.
+
+    For a caller that has just done the work a queued signal would have asked for:
+    replaying it afterwards would undo that work.
+    """
+    branch_path = Path(branch_path)
+    shutil.rmtree(branch_path / _CONTROL_DIR, ignore_errors=True)
+    (branch_path / "control.json").unlink(missing_ok=True)
 
 
 # -------------------------------------------------------------------------
@@ -87,14 +118,10 @@ def write_control_signal(branch_path: Path, signal: dict):
 
 def write_requeue(output_dir: Path, branch_path: Path):
     """Drop a re-queue file so a worker picks up this branch."""
-    requeue_dir = output_dir / "requeue"
-    requeue_dir.mkdir(parents=True, exist_ok=True)
     filename = f"{branch_path.name}_{int(time.time() * 1000)}.json"
-    tmp = requeue_dir / f"{filename}.tmp"
-    final = requeue_dir / filename
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump({"branch_path": str(branch_path)}, f)
-    tmp.replace(final)
+    atomic_write_json(
+        output_dir / "requeue" / filename, {"branch_path": str(branch_path)}
+    )
 
 
 def read_requeue(output_dir: Path) -> List[Path]:
@@ -122,18 +149,11 @@ def read_requeue(output_dir: Path) -> List[Path]:
 
 
 def _recompute_branch_best(branch_path: Path, through_iter: int) -> tuple:
-    """The best time and speedup across iterations 1..through_iter, from what is on disk.
+    """Best time and speedup across iterations 1..through_iter, recomputed from disk.
 
-    ``best_time_us`` is a running minimum that nothing ever raises: nodes/run.py only
-    lowers it, the worker copies it back onto the manifest, and api/tree.py treats the
-    manifest value as a floor it can only lower further. That is right while a branch
-    only moves forward, and wrong the moment a revert deletes the iteration that set it
-    — the branch would keep advertising a time whose kernel and results.json no longer
-    exist, to the frontend, to --best, and to the sibling branches that read it as the
-    score to beat.
-
-    Returns (best_time_us, speedup), either of which is None when no surviving
-    iteration recorded one.
+    ``best_time_us`` is a running minimum nothing ever raises, so a revert that deletes
+    the iteration which set it would leave the branch advertising a time whose
+    results.json is gone. Returns (best_time_us, speedup), either possibly None.
     """
     best_time = None
     best_speedup = None
@@ -160,6 +180,10 @@ def revert_branch_on_disk(
 
     Restores branch manifest to point at target_iter, deletes later
     iteration directories and sub-branches, and returns the manifest dict.
+
+    Does not touch ``branch_config.json``: it has one writer, the server, which
+    grants the extra iteration an exhausted branch needs before it gets here (or
+    before it signals the worker to run this).
     """
     branch_path = Path(branch_path)
     manifest = load_branch_manifest(branch_path)
@@ -169,8 +193,6 @@ def revert_branch_on_disk(
     manifest.current_iter = target_iter
     manifest.status = "running"
     manifest.pre_stop_status = None
-
-    grant_one_more_iteration(branch_path, manifest.current_iter)
 
     _inject_user_message(iter_state, message)
     # Re-run propose → decide so the agent reconsiders with fresh analysis
@@ -208,8 +230,9 @@ def continue_branch_on_disk(
     Re-open a dead branch (success/failed/branching) so it continues
     from its current iteration without deleting any work.
 
-    Sets status to ``running``, lifts the iteration budget if the branch has
-    exhausted it, and optionally appends a user message to the current iteration.
+    Sets status to ``running`` and optionally appends a user message to the current
+    iteration. Lifting an exhausted branch's budget is the server's to do — see
+    ``revert_branch_on_disk`` — because ``branch_config.json`` has one writer.
     """
     branch_path = Path(branch_path)
     manifest = load_branch_manifest(branch_path)
@@ -222,8 +245,6 @@ def continue_branch_on_disk(
 
     manifest.status = "running"
     manifest.pre_stop_status = None
-
-    grant_one_more_iteration(branch_path, manifest.current_iter)
 
     iter_state = load_iter_state(branch_path, manifest.current_iter)
     if message:

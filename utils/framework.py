@@ -141,9 +141,23 @@ int main(int argc, char** argv)
 
 
 def _dim_args(d: dict) -> str:
-    """Build DimensionVector ctor args from an {x,y,z} mapping (x required)."""
+    """Build DimensionVector ctor args from an {x,y,z} mapping (x required).
+
+    The ctor is positional, so a mapping that declares z without y would put z in the
+    y slot and silently launch a different grid than the one written down. Fill the
+    gap with an explicit 1 instead, and say so.
+    """
     parts = [str(d["x"])]
-    if "y" in d:
+    if "z" in d and "y" not in d:
+        from utils.log import log
+
+        log(
+            f"grid/block {d} declares z without y — DimensionVector args are positional, "
+            "so y is filled with 1. Declare y explicitly to silence this.",
+            "WARN",
+        )
+        parts.append("1")
+    elif "y" in d:
         parts.append(str(d["y"]))
     if "z" in d:
         parts.append(str(d["z"]))

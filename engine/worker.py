@@ -87,13 +87,8 @@ def _compose_working_state(
 def _dispatch_status(iter_state: IterState) -> str:
     """Which node runs for this iteration's status.
 
-    decide.py still emits "implementing" and "configuring"; the merged authoring step
-    answers for both when AGENTIC_STEPS is on. Translating here rather than in decide
-    keeps that prompt and its schema untouched, and lets an output directory written
-    before the merge resume from whichever status it stopped at.
-
-    The scope distinction the two statuses carried is not lost: it rides on
-    IterState.authoring_scope, set alongside the status in create_initial_iter_state.
+    decide.py still emits "implementing"/"configuring"; both route to the merged
+    authoring step when AGENTIC_STEPS is on. Scope rides on IterState.authoring_scope.
     """
     import config as _cfg
 
@@ -101,6 +96,34 @@ def _dispatch_status(iter_state: IterState) -> str:
     if getattr(_cfg, "AGENTIC_STEPS", False) and status in ("implementing", "configuring"):
         return "authoring"
     return status
+
+
+def _branch_deleted(branch_path: Path, strategy_name: str) -> bool:
+    """Whether this branch's directory has been deleted out from under the worker.
+
+    A parent revert rmtrees the subtree, and that deletion is the only stop signal a
+    sub-branch gets — a control file inside the tree goes with it, and the worker polls
+    only once per node anyway. Every write path mkdirs its parent, so a save that runs
+    after the deletion rebuilds the branch and it carries on running: the check has to
+    gate the saves, not follow them.
+    """
+    if branch_path.exists():
+        return False
+    log(f"Branch {strategy_name} directory deleted (parent reverted). Exiting.", "WARN")
+    return True
+
+
+def _advance_after_decision(manifest: BranchManifest, iter_state: IterState):
+    """Apply a decided iteration to the manifest: terminal status, or the next iteration.
+
+    A missing ``next_status`` means decide never recorded one, and "decided" is not a
+    status anything can run from — replaying that one would advance forever. Both are
+    failures rather than statuses to run.
+    """
+    nxt = iter_state.next_status
+    manifest.status = nxt if nxt and nxt != "decided" else "failed"
+    if manifest.status not in ("success", "failed", "branching"):
+        manifest.current_iter += 1
 
 
 def _decompose_to_iter_state(working: WorkingState) -> IterState:
@@ -191,11 +214,7 @@ async def _wait_for_resume(
     while True:
         await asyncio.sleep(2)
 
-        if not branch_path.exists():
-            log(
-                f"Branch {strategy_name} directory deleted (parent reverted). Exiting.",
-                "WARN",
-            )
+        if _branch_deleted(branch_path, strategy_name):
             manifest.status = "failed"
             return
 
@@ -215,14 +234,9 @@ async def _wait_for_resume(
 
 
 async def run_branch_loop(branch_path: Path) -> List[dict]:
-    """
-    Execute the optimization loop for a specific branch.
+    """Run one branch to a terminal status.
 
-    Loads state from disk, runs nodes, saves state back.
-    Uses the composed view pattern: nodes see a unified dict.
-
-    Returns:
-        List of SubStrategy dicts for master to spawn (if branching).
+    Returns the sub-strategy dicts master should spawn, or [].
     """
     branch_path = Path(branch_path)
 
@@ -248,13 +262,7 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
         try:
             iter_num = manifest.current_iter
 
-            # Every write path mkdirs its parent, so without this a branch deleted by a
-            # parent revert rebuilds itself and keeps running.
-            if not branch_path.exists():
-                log(
-                    f"Branch {strategy_name} directory deleted (parent reverted). Exiting.",
-                    "WARN",
-                )
+            if _branch_deleted(branch_path, strategy_name):
                 return []
 
             # Load or create iteration state
@@ -274,6 +282,14 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
                     await _wait_for_resume(manifest, iter_state, branch_path)
                 continue
             current_status = _dispatch_status(iter_state)
+
+            # "decided" reaches disk when a crash lands between save_iter_state and the
+            # manifest advance below. There is no node for it: replay the advance the
+            # crash interrupted, or the branch is unroutable and fails on every resume.
+            if current_status == "decided":
+                _advance_after_decision(manifest, iter_state)
+                save_branch_manifest(branch_path, manifest)
+                continue
 
             # Compose working state for the node
             working = _compose_working_state(context, manifest, iter_state, branch_path)
@@ -300,23 +316,32 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
                     "ERROR",
                 )
                 manifest.status = "failed"
+                # Persist it, or resume re-queues the branch into this same arm forever.
+                try:
+                    save_branch_manifest(branch_path, manifest)
+                except Exception as save_error:
+                    log(
+                        f"Could not persist the failure for {strategy_name}: {save_error}",
+                        "ERROR",
+                    )
                 break
 
             # Validate the status transition the node made
             validate_transition(current_status, working.status)
 
+            # The node ran for minutes; a parent revert may have deleted this branch
+            # meanwhile, and the saves below would rebuild the directory.
+            if _branch_deleted(branch_path, strategy_name):
+                return []
+
             # Decompose back
             iter_state = _decompose_to_iter_state(working)
             _update_manifest_from_working(manifest, working)
 
-            # Manifest first, then the iteration state — the order the other save sites in
-            # this file already use. The manifest now carries the branch plan, so a crash
-            # between the two writes must not leave state.json advanced past "planning"
-            # with the plan unwritten: plan_node dispatches on status, so it would never
-            # re-run and every implement prompt for the branch would silently lose its plan
-            # section. In this order such a crash leaves status="planning", and plan_node
-            # re-runs and resumes from the persisted plan without another LLM call.
-            # (If it's deciding, the logic below will save the manifest instead.)
+            # Manifest before iter state: the manifest carries the branch plan, so a
+            # crash between the two writes must leave status="planning" (plan_node
+            # re-runs and reuses the persisted plan) rather than an advanced state.json
+            # with no plan. The deciding arm below saves the manifest itself.
             if current_status != "deciding":
                 save_branch_manifest(branch_path, manifest)
 
@@ -329,11 +354,7 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
 
             # On iteration complete: advance or finish
             if current_status == "deciding":
-                manifest.status = iter_state.next_status
-                if iter_state.next_status not in ("success", "failed", "branching"):
-                    # Start new iteration
-                    manifest.current_iter += 1
-
+                _advance_after_decision(manifest, iter_state)
                 save_branch_manifest(branch_path, manifest)
 
         except Exception as e:
@@ -341,6 +362,8 @@ async def run_branch_loop(branch_path: Path) -> List[dict]:
             traceback.print_exc()
             # Status first: iter_state may be unbound if the failure was in loading it.
             manifest.status = "failed"
+            if _branch_deleted(branch_path, strategy_name):
+                return []
             try:
                 if iter_state is not None:
                     iter_state.status = "decided"

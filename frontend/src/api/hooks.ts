@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '@/store/appStore';
-import { fetchProblems, fetchTree, fetchTreeConditional, fetchIteration, fetchAnalysis, fetchModels } from './client';
+import { fetchProblems, fetchTreeConditional, fetchIteration, fetchAnalysis, fetchModels } from './client';
+import type { TreeResponse } from './client';
 import type { IterationDetail } from './types.generated';
 
 export const POLL_INTERVAL_MS = 3000;
@@ -19,20 +20,35 @@ export async function refreshProblems() {
 
 // ETag of the tree currently in the store. Shared between the poll loop and
 // refreshTree so a mutation-driven refresh doesn't leave the loop holding a
-// stale validator. Cleared whenever we fetch unconditionally.
+// stale validator: whoever writes the store writes the matching validator.
 let treeEtag: string | null = null;
+
+/**
+ * The one reading of a tree payload's run state. Both fetch paths derived it
+ * differently, and the copy without the empty-tree case reported 'completed' for a
+ * problem that had never produced a branch — so the badge flickered on the next poll.
+ */
+export function runStatusFrom(data: Pick<TreeResponse, 'running' | 'nodes'>): 'running' | 'completed' | 'idle' {
+    if (data.running) return 'running';
+    return data.nodes.length > 1 ? 'completed' : 'idle';
+}
 
 /**
  * Immediately refresh the tree for the active problem (call after any branch mutation).
  */
 export async function refreshTree() {
-    const { activeProblem, setTreeFromAPI, setRunStatus } = useAppStore.getState();
-    if (!activeProblem) return;
+    const startedFor = useAppStore.getState().activeProblem;
+    if (!startedFor) return;
     try {
-        treeEtag = null;
-        const data = await fetchTree(activeProblem);
-        setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage);
-        setRunStatus(data.running ? 'running' : 'completed');
+        // Unconditional (null etag), so `data` is always the full tree.
+        const { data, etag } = await fetchTreeConditional(startedFor, null);
+        // The user can switch problems while this is in flight; writing then paints
+        // the old problem's branches onto the new one's canvas.
+        const store = useAppStore.getState();
+        if (!data || store.activeProblem !== startedFor) return;
+        treeEtag = etag;
+        store.setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage);
+        store.setRunStatus(runStatusFrom(data));
     } catch {
         // silent — next poll will pick it up
     }
@@ -65,6 +81,7 @@ export function usePollProblems() {
                 }
             } catch (err) {
                 console.debug('[usePollProblems] Backend not available:', err);
+                if (!cancelled) useAppStore.getState().setConnected(false);
             }
 
             if (!cancelled) {
@@ -241,10 +258,11 @@ export function usePollTree() {
                     treeEtag = etag;
                     const { setTreeFromAPI, setRunStatus } = useAppStore.getState();
                     setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage);
-                    setRunStatus(data.running ? 'running' : (data.nodes.length > 1 ? 'completed' : 'idle'));
+                    setRunStatus(runStatusFrom(data));
                 }
             } catch (err) {
                 console.debug('[usePollTree] Error:', err);
+                if (!cancelled) useAppStore.getState().setConnected(false);
             }
 
             if (!cancelled) {

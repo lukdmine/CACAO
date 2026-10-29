@@ -1,43 +1,18 @@
 """Per-problem rules constraining what a kernel is allowed to do.
 
-Nothing in the pipeline stops a branch from winning the wrong way. A kernel that
-drops to fp16 accumulation, or swaps a real reduction for tensor cores at a precision
-the problem never permitted, is faster and passes validation whenever the tolerance is
-loose enough — and the run reports a speedup that does not mean what it appears to
-mean. The reference implementation defines correctness, not intent, so intent has to
-be stated somewhere.
-
-Rules live in ``problem.yaml`` under ``rules:``, beside the problem they constrain,
-and are re-read every iteration like the rest of that file.
-
-Two kinds, deliberately:
-
-* ``text`` — stated in every prompt that writes or judges a kernel. Guidance the model
-  can reason about and apply in cases nobody enumerated.
-* ``forbid`` — regular expressions checked against the kernel at compile time. A rule
-  that is only asked for is a rule that gets dropped when it competes with a speedup,
-  so anything worth enforcing gets teeth here.
-
-Example::
-
-    rules:
-      text:
-        - "Accumulate in fp32. Reduced-precision accumulation is not a valid optimization."
-      forbid:
-        - pattern: "wmma::|mma\\\\.sync"
-          reason: "tensor cores change the numerics this problem is measuring"
-        - pattern: "\\\\b__half\\\\b|nv_bfloat16"
-          reason: "fp16/bf16 storage is not permitted"
+Declared under ``rules:`` in problem.yaml and re-read every iteration. ``text`` rules
+are stated in every prompt that writes or judges a kernel; ``forbid`` regexes are
+checked against the kernel before it compiles. forbid exists because a rule that is
+only asked for is dropped the moment it competes with a speedup — a kernel that
+quietly accumulates in fp16 is faster and still validates whenever the tolerance is
+loose enough. See docs/PROBLEM_YAML_GUIDE.md for the schema and an example.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import List, Optional
-
-import yaml
 
 from utils.log import log
 
@@ -47,14 +22,29 @@ class ForbiddenPattern:
     pattern: str
     reason: str = ""
     _compiled: Optional[re.Pattern] = field(default=None, repr=False)
+    error: str = field(default="", repr=False)
+
+    def __post_init__(self) -> None:
+        """Compile at construction, and remember a failure.
+
+        Compiling lazily meant a bad pattern was first noticed deep inside the
+        authoring loop, and — because the failure was not cached — re-logged on every
+        check. Doing it here reports it once, at problem load.
+        """
+        if self._compiled is not None:
+            return
+        try:
+            self._compiled = re.compile(self.pattern)
+        except re.error as e:
+            self.error = str(e)
+            log(
+                f"rules.forbid: {self.pattern!r} is not a valid regular expression "
+                f"({e}) — every kernel check will fail until problem.yaml is fixed",
+                "ERROR",
+            )
 
     def compiled(self) -> Optional[re.Pattern]:
-        if self._compiled is None:
-            try:
-                self._compiled = re.compile(self.pattern)
-            except re.error as e:
-                log(f"rules.forbid: invalid pattern {self.pattern!r} ({e}) — ignored", "WARN")
-                return None
+        """The compiled pattern, or None when it does not compile."""
         return self._compiled
 
 
@@ -89,11 +79,23 @@ class Rules:
         return "\n".join(lines)
 
     def violations(self, kernel_src: str) -> List[str]:
-        """Forbidden patterns present in the kernel, as reportable strings."""
+        """Forbidden patterns present in the kernel, as reportable strings.
+
+        A pattern that does not compile is reported as a violation rather than skipped.
+        Skipping disarms the rule while ``prompt_block`` still tells the model it is
+        machine-checked, so a typo'd regex becomes a silent failure of enforcement —
+        the one outcome this module exists to prevent. Failing every check instead
+        makes it a loud failure of the problem, which is fixable.
+        """
         found = []
         for pattern in self.forbid:
             rx = pattern.compiled()
             if rx is None:
+                found.append(
+                    f"problem.yaml declares the forbid pattern /{pattern.pattern}/, "
+                    f"which is not a valid regular expression ({pattern.error}). "
+                    "Nothing can be checked against it until the rule is fixed."
+                )
                 continue
             match = rx.search(kernel_src)
             if match:

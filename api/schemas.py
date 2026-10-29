@@ -3,6 +3,7 @@
 from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
+import config as _config
 from models.cases import CaseSpec
 from models.inputs import InputsSpec
 
@@ -83,9 +84,13 @@ class PreviewInputsRequest(BaseModel):
 
 
 class RunConfig(BaseModel):
-    max_iter: int = 5
-    max_depth: int = 2
-    path_budget: int = 20
+    # Read from config rather than restated here: cli.py's argparse defaults read the
+    # same three values, and while path_budget disagreed, a UI run and `python cli.py`
+    # on the same problem ran different budget modes — the UI one at four times the
+    # iterations, with the max_iter in this request silently dead.
+    max_iter: int = Field(default_factory=lambda: _config.MAX_ITERATIONS)
+    max_depth: int = Field(default_factory=lambda: _config.MAX_BRANCH_DEPTH)
+    path_budget: int = Field(default_factory=lambda: _config.PATH_BUDGET)
     # None = let problem.yaml tuning.duration_s drive the tuner budget (falling back
     # to config.TUNER_TIMEOUT). Set a value to override for this run only.
     timeout: Optional[int] = None

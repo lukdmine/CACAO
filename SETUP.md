@@ -138,8 +138,9 @@ python cli.py --dir problems/mmul
 launches, and the driver is linked with an rpath to the project root.
 
 See the flag table in [README.md](README.md#cli-options), or `python cli.py --help`.
-`--model` is not validated against the roster in `llm/providers.py`, so a typo fails at the
-provider rather than at startup.
+Budgeting defaults to path-budget mode — see README for what `--max-iter` does there.
+`--model` is not validated against the roster in `llm/providers.py`, so a typo fails at
+the provider rather than at startup.
 
 ## Running the Server + Frontend
 
@@ -210,8 +211,10 @@ conda create -n ktt python=3.10 -y
 # Required (one LLM provider)
 # ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY, or CERIT_API_KEY + CERIT_API_BASE
 
-# Required for runtime
-export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$(pwd):$LD_LIBRARY_PATH
+# Not needed to run the optimizer: it builds LD_LIBRARY_PATH for every subprocess it
+# launches, and the driver is linked with an rpath to the project root. Set it only to
+# run a driver by hand, or to clear the loader errors under Troubleshooting.
+# export LD_LIBRARY_PATH=/usr/local/cuda/lib64:$(pwd):$LD_LIBRARY_PATH
 
 # For building KTT (one-time)
 export CUDA_PATH=/usr/local/cuda   # or /usr for a system-installed CUDA

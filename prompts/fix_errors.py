@@ -1,7 +1,7 @@
 """Fix errors prompt — fixes compilation or validation errors in CUDA kernel."""
 
-from prompts._format import format_strategy
-from prompts._system_overview import SYSTEM_OVERVIEW, NVRTC_RULES
+from prompts._format import format_reference, format_strategy, inputs_hpp_block
+from prompts._system_overview import SYSTEM_OVERVIEW, NVRTC_RULES, closing_reminders
 from prompts._tensor_core_reference import TENSOR_CORE_REFERENCE
 
 
@@ -123,25 +123,18 @@ Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
     )
 
     parts = []
+    # Rules first: they constrain everything below.
+    if ctx.get("rules_block"):
+        parts.append(ctx["rules_block"])
     if ctx.get("problem_yaml"):
         parts.append(f"## Problem Definition:\n```yaml\n{ctx['problem_yaml']}\n```")
     if ctx.get("ref_kernel"):
-        # ref_language: the reference may be CUDA, C, or Python — fencing a Python
-        # reference as ```cuda misleads the model about what it is reading.
-        parts.append(
-            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
-        )
+        parts.append(format_reference(ctx))
     # The boundary and the scalar contract: a retry is often fixing exactly this — an
     # undefined identifier because a scalar was used as a macro when it is a runtime
     # argument. Without them the fix is a guess.
     if ctx.get("inputs_hpp"):
-        parts.append(
-            "## Inputs (inputs.hpp) — your kernel's I/O boundary.\n"
-            "**Compiled into the host driver, NOT into your kernel.** NVRTC compiles "
-            "kernels.cu on its own, so nothing here — including every `inline constexpr` "
-            "— is visible to a kernel unless it is a `-D` macro or an argument.\n"
-            f"```cpp\n{ctx['inputs_hpp']}\n```"
-        )
+        parts.append(inputs_hpp_block(ctx["inputs_hpp"]))
     if ctx.get("cases_block"):
         parts.append(ctx["cases_block"])
 
@@ -168,11 +161,9 @@ Output ONLY the corrected CUDA kernel code. No markdown, no explanation.
         parts.append(ctx["user_messages"])
     parts.append(
         "Fix the kernel errors. Output ONLY the corrected kernel code, no markdown.\n\n"
-        "CRITICAL REMINDERS — verify before writing code:\n"
-        "1. Static `__shared__ arr[MACRO_SIZE]` unless configure binds AddArgumentLocal.\n"
-        "2. No glibc-reaching headers (`<stdint.h>`, `<cstdint>`, `<cuda.h>`, `<stdio.h>`).\n"
-        '3. `extern "C"` on every kernel; no gratuitous signature changes.\n'
-        "4. Every global and shared memory access must be provably in-bounds."
+        + closing_reminders(
+            '`extern "C"` on every kernel; no gratuitous signature changes.'
+        )
     )
 
     return system, "\n\n".join(parts)

@@ -44,8 +44,13 @@ def get_resume_states() -> List[Path]:
                 )
                 continue
 
-            # Already branched — skip
-            if status == "branching":
+            # Already branched — skip, unless the children were never created. The
+            # worker writes status "branching" with sub_strategies_cache populated and
+            # clears it only once master has the list; a stop in that window leaves a
+            # full decision's worth of sub-strategies on disk that nothing would ever
+            # spawn. run_branch_loop's while excludes "branching", so a re-queued branch
+            # falls straight through and hands the cache back.
+            if status == "branching" and not manifest.sub_strategies_cache:
                 log(
                     f"  Branch '{branch_name}': branching complete (skipping)",
                     "SUCCESS",

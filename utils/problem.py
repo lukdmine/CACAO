@@ -40,6 +40,15 @@ def reference_spec(meta: dict) -> Reference:
     )
 
 
+def gpu_index(meta: dict) -> int:
+    """The configured GPU ordinal, defaulting to 0.
+
+    ``(meta.get("gpu") or {})`` rather than ``meta.get("gpu", {})``: a bare ``gpu:``
+    key parses to None, which the latter form hands straight to ``.get``.
+    """
+    return ((meta or {}).get("gpu") or {}).get("index", 0)
+
+
 def reference_source(problem_dir) -> str:
     """The reference implementation's source text, or "" if it cannot be read."""
     ref = reference_spec(load_problem_yaml(problem_dir))

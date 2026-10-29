@@ -11,6 +11,7 @@ only the agent kernel(s) are launched — the reference never appears in the met
 import asyncio
 import csv
 import io
+from typing import Optional
 
 import yaml
 
@@ -19,6 +20,7 @@ from utils.build import compile_framework, driver_command, reference_build_extra
 from utils.files import save_output, get_iter_dir
 from utils.gpu_lock import acquire_gpu_lock
 from utils.log import log
+from utils.problem import gpu_index as problem_gpu_index
 from utils.results import check_results, ensure_results_loadable
 from state.types import WorkingState
 
@@ -135,7 +137,7 @@ def _to_number(raw: str):
     return float(cleaned)
 
 
-def parse_ncu_csv(csv_output: str) -> dict:
+def parse_ncu_csv(csv_output: str, reason: Optional[list] = None) -> dict:
     """
     Parse NCU CSV (--page raw) into a metrics dict.
 
@@ -145,7 +147,17 @@ def parse_ncu_csv(csv_output: str) -> dict:
     single kernel the metrics are returned flat; for a multi-kernel pipeline each
     row's metrics are prefixed with the kernel name (duplicates get a #N suffix), so
     a pipeline yields isolated per-stage metrics.
+
+    ``reason`` is an optional list the failure is appended to: an empty dict from a
+    profiler that exited 0 is a parse failure, and the caller has to be able to say so
+    rather than report it as a profile that never ran.
     """
+
+    def fail(message: str) -> dict:
+        if reason is not None:
+            reason.append(message)
+        return {}
+
     try:
         csv_lines = [
             line
@@ -153,12 +165,15 @@ def parse_ncu_csv(csv_output: str) -> dict:
             if line.startswith('"') or (line and line[0].isdigit())
         ]
         if len(csv_lines) < 3:
-            return {}
+            return fail(
+                f"only {len(csv_lines)} CSV-looking line(s) in {len(csv_output)} bytes "
+                "of NCU output — expected a header, a units row and at least one data row"
+            )
         header_line, data_lines = csv_lines[0], csv_lines[2:]  # skip units row
         reader = csv.DictReader(io.StringIO("\n".join([header_line] + data_lines)))
         rows = list(reader)
         if not rows:
-            return {}
+            return fail("the CSV carried a header but no data rows")
 
         per_kernel = []
         for r in rows:
@@ -188,7 +203,7 @@ def parse_ncu_csv(csv_output: str) -> dict:
 
     except Exception as e:
         log(f"Failed to parse NCU CSV: {e}", "WARN")
-        return {}
+        return fail(f"{type(e).__name__}: {e}")
 
 
 async def profile_node(state: WorkingState) -> WorkingState:
@@ -243,8 +258,13 @@ async def profile_node(state: WorkingState) -> WorkingState:
     driver = iter_dir / "driver"
     if not driver.exists():
         extra_sources, extra_flags = reference_build_extras(get_problem_dir(), primary_case)
-        build_result = compile_framework(
-            iter_dir, extra_sources=extra_sources, extra_flags=extra_flags
+        # Off the event loop: three other branch coroutines share it, including the
+        # tasks draining their running drivers' stdout pipes.
+        build_result = await asyncio.to_thread(
+            compile_framework,
+            iter_dir,
+            extra_sources=extra_sources,
+            extra_flags=extra_flags,
         )
         if not build_result.ok:
             log("Driver rebuild for profiling failed, skipping", "WARN")
@@ -259,7 +279,7 @@ async def profile_node(state: WorkingState) -> WorkingState:
     try:
         with open(problem_dir / "problem.yaml", encoding="utf-8") as f:
             cfg_yaml = yaml.safe_load(f) or {}
-        gpu_index = cfg_yaml.get("gpu", {}).get("index", 0)
+        gpu_index = problem_gpu_index(cfg_yaml)
         ref_file = (cfg_yaml.get("reference") or {}).get("file", ref_file)
     except Exception as e:
         log(f"Failed to parse problem.yaml, using defaults: {e}", "WARN")
@@ -336,15 +356,28 @@ async def profile_node(state: WorkingState) -> WorkingState:
             stderr = stderr_b.decode("utf-8", errors="replace")
 
             if proc.returncode == 0:
-                ncu_metrics = parse_ncu_csv(stdout)
+                parse_failure: list = []
+                parsed = parse_ncu_csv(stdout, parse_failure)
                 save_output(iter_dir, stdout, "ncu_profile.csv")
-                log(f"Profiling complete, collected {len(ncu_metrics)} metrics", "SUCCESS")
-                for key in (
-                    "dram__throughput.avg.pct_of_peak_sustained_elapsed",
-                    "sm__throughput.avg.pct_of_peak_sustained_elapsed",
-                ):
-                    if key in ncu_metrics:
-                        log(f"  {key}: {ncu_metrics[key]:.1f}%")
+                if not parsed:
+                    # NCU ran and exited 0, so an empty result is our parser, not a
+                    # profile that was skipped. Reported as SUCCESS with "0 metrics" it
+                    # sent everyone looking elsewhere while the full CSV sat on disk.
+                    log(
+                        "NCU exited 0 but its CSV yielded no metrics "
+                        f"({parse_failure[0] if parse_failure else 'unknown parse failure'}) "
+                        f"— the raw output is at {iter_dir / 'ncu_profile.csv'}",
+                        "ERROR",
+                    )
+                else:
+                    ncu_metrics = parsed
+                    log(f"Profiling complete, collected {len(parsed)} metrics", "SUCCESS")
+                    for key in (
+                        "dram__throughput.avg.pct_of_peak_sustained_elapsed",
+                        "sm__throughput.avg.pct_of_peak_sustained_elapsed",
+                    ):
+                        if key in parsed:
+                            log(f"  {key}: {parsed[key]:.1f}%")
             elif proc.returncode is not None:
                 combined = (
                     f"[NCU exit code: {proc.returncode}]\n\n"

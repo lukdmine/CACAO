@@ -16,6 +16,7 @@ Usage:
 """
 
 import sys
+import types
 from pathlib import Path
 from typing import get_origin, get_args, Union
 
@@ -38,8 +39,9 @@ def python_type_to_ts(annotation) -> str:
     origin = get_origin(annotation)
     args = get_args(annotation)
 
-    # Handle Optional[X] → X | null
-    if origin is Union:
+    # Handle Optional[X] → X | null. Both spellings: get_origin(X | None) is
+    # types.UnionType, not Union, so testing only for Union misses PEP 604 entirely.
+    if origin is Union or origin is types.UnionType:
         non_none = [a for a in args if a is not type(None)]
         if len(non_none) == 1 and len(args) == 2:
             return f"{python_type_to_ts(non_none[0])} | null"
@@ -90,7 +92,12 @@ def python_type_to_ts(annotation) -> str:
     if isinstance(annotation, type):
         return annotation.__name__
 
-    return "unknown"
+    # Loudly, not as "unknown": a silent fallthrough ships a field the frontend
+    # cannot use, with no `?` marker and no warning to say it happened.
+    raise TypeError(
+        f"generate_types: no TypeScript mapping for {annotation!r}. "
+        "Add it to TYPE_MAP or teach python_type_to_ts the construct."
+    )
 
 
 # ============================================================
@@ -107,7 +114,7 @@ def pydantic_to_ts(cls) -> str:
 
         origin = get_origin(annotation)
         args = get_args(annotation)
-        is_nullable = origin is Union and type(None) in args
+        is_nullable = (origin is Union or origin is types.UnionType) and type(None) in args
         optional_marker = "?" if is_nullable else ""
 
         lines.append(f"  {field_name}{optional_marker}: {ts_type};")
@@ -126,7 +133,7 @@ def main():
     print(f"  Output file: {OUTPUT_FILE}")
 
     # Import backend models
-    from state.types import Context, BranchConfig, BranchManifest, IterState, MainState, BranchResult, SubStrategyDict, StrategyInfo
+    from state.types import BRANCH_STATUSES, Context, BranchConfig, BranchManifest, IterState, MainState, BranchResult, SubStrategyDict, StrategyInfo
     from models.strategy import Strategy, StrategizeOutput
     from models.decision import OptimizationDecision, ErrorAnalysis, SubStrategy as SubStrategyPydantic
 
@@ -145,22 +152,13 @@ def main():
     sections.append("//")
     sections.append("")
 
-    # BranchStatus — all statuses from the iteration FSM + branch-level statuses
+    # BranchStatus — generated from state.types.BRANCH_STATUSES, not restated here, so
+    # the vocabulary cannot drift between the engine and the frontend.
     sections.append("// All status values from the iteration FSM and branch lifecycle")
     sections.append("export type BranchStatus =")
-    sections.append('  | "initialized"')
-    sections.append('  | "planning"')
-    sections.append('  | "implementing"')
-    sections.append('  | "configuring"')
-    sections.append('  | "running"')
-    sections.append('  | "profiling"')
-    sections.append('  | "proposing"')
-    sections.append('  | "deciding"')
-    sections.append('  | "decided"')
-    sections.append('  | "success"')
-    sections.append('  | "failed"')
-    sections.append('  | "branching"')
-    sections.append('  | "stopped";')
+    for i, status in enumerate(BRANCH_STATUSES):
+        end = ";" if i == len(BRANCH_STATUSES) - 1 else ""
+        sections.append(f'  | "{status}"{end}')
     sections.append("")
 
     # Pydantic models from models/

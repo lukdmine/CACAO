@@ -1,9 +1,8 @@
-"""Case list, layout and budget resolution.
+"""Case list, layout, staging and budget resolution.
 
-Kept out of utils/inputs.py: that module renders inputs.hpp and is already 628 lines,
-and none of this is codegen. The one rule worth stating up front is the layout rule —
-a problem with a single case (declared or implicit) writes its artifacts at the
-iteration root, exactly as every run before this feature did.
+The layout rule is worth stating up front: a problem with a single case (declared or
+implicit) writes its artifacts at the iteration root, exactly as every run before this
+feature did.
 """
 
 from __future__ import annotations
@@ -81,19 +80,50 @@ def case_duration(meta: dict, case: CaseSpec) -> Optional[float]:
     return None if value is None else float(value)
 
 
+def stage_engine_files(problem_dir, iter_dir, meta: dict) -> str:
+    """Place the files the engine owns beside the ones the LLM writes, and return
+    ``inputs.hpp``'s text.
+
+    inputs.hpp is generated once per run from inputs.yaml, so the LLM neither owns it
+    nor can author it, and its absence is not something an iteration can recover from —
+    hence the raise rather than a route to the fix loop. Shared by the agentic and the
+    single-shot authoring paths, which need exactly the same files staged.
+    """
+    import shutil
+
+    from utils.problem import reference_spec
+
+    problem_dir = Path(problem_dir)
+    iter_dir = Path(iter_dir)
+
+    inputs_src = problem_dir / "inputs.hpp"
+    if not inputs_src.exists():
+        raise FileNotFoundError(
+            f"{inputs_src} not found — the problem's I/O boundary was never generated. "
+            "It comes from inputs.yaml at the start of a run; check that inputs.yaml exists."
+        )
+    shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
+
+    ref = reference_spec(meta)
+    if ref.type == "python":
+        ref_py = problem_dir / ref.file
+        if not ref_py.exists():
+            raise FileNotFoundError(
+                f"{ref_py} not found — python reference file required by problem.yaml"
+            )
+        shutil.copyfile(ref_py, iter_dir / "ref.py")
+        shutil.copyfile(problem_dir / "inputs.yaml", iter_dir / "inputs.yaml")
+
+    return inputs_src.read_text(encoding="utf-8")
+
+
 def stage_case(problem_dir, iter_dir, spec, meta: dict, cases, case, regions: dict) -> Path:
     """Lay out one case's build directory and return it.
 
-    Writes, into the case directory:
-      * ``inputs.hpp``  — generated from the case-resolved spec, so its constexpr sizes,
-        -D macros and init=file paths are this case's.
-      * ``inputs.yaml`` — the resolved spec. The driver's cwd is this directory and
-        utils/inputs bakes ``--inputs inputs.yaml`` into the python-reference command,
-        so the reference runner reads this case's scalars with no flag and no new code.
-      * ``framework.cpp`` — identical text for every case: the grid expression and the
-        three LLM regions are shared, and only the constexprs in inputs.hpp differ.
-      * ``kernels.cu`` — copied from the iteration root, which is where the LLM's single
-        kernel source lives.
+    The staged ``inputs.yaml`` is the resolved spec, not the declared one: the driver's
+    cwd is this directory and utils/inputs bakes ``--inputs inputs.yaml`` into the
+    python-reference command, so the reference runner reads this case's scalars with no
+    flag and no new code.
 
     For a single-case problem the case directory IS the iteration root, so this writes
     exactly the files the pre-multi-case pipeline wrote, in the same place.
@@ -121,9 +151,12 @@ def stage_case(problem_dir, iter_dir, spec, meta: dict, cases, case, regions: di
         ),
         encoding="utf-8",
     )
-    (cdir / "framework.cpp").write_text(
-        assemble_framework_cpp(meta, regions), encoding="utf-8"
-    )
+    # An all-empty regions dict assembles a skeleton whose KERNELS region never declares
+    # `kernel`, which the rest of the template references. Never write that over a driver
+    # that is already here — the regions could not be recovered, not proven absent.
+    framework = cdir / "framework.cpp"
+    if any((regions or {}).values()) or not framework.exists():
+        framework.write_text(assemble_framework_cpp(meta, regions), encoding="utf-8")
 
     kernels = iter_dir / "kernels.cu"
     if cdir != iter_dir and kernels.exists():

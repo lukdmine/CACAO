@@ -57,9 +57,11 @@ def change_decision(name: str, branch_id: str, req: ChangeDecisionRequest):
     """
     from state import (
         write_control_signal,
+        clear_control_signals,
         revert_branch_on_disk,
         continue_branch_on_disk,
         write_requeue,
+        grant_one_more_iteration,
         load_branch_config,
         load_branch_manifest,
     )
@@ -80,6 +82,14 @@ def change_decision(name: str, branch_id: str, req: ChangeDecisionRequest):
         )
     try:
         live = is_branch_live(name, branch_path)
+        manifest = load_branch_manifest(branch_path)
+        current_iter = manifest.current_iter
+
+        # Reviving an exhausted branch needs its budget lifted, or decide_node ends it
+        # again on the first pass. It happens here whoever does the surgery: this
+        # process writes branch_config.json, the worker only reads it. The revert path
+        # lands on target_iter, the continue path stays at current_iter.
+        grant_one_more_iteration(branch_path, min(req.target_iter, current_iter))
 
         if live:
             write_control_signal(
@@ -97,15 +107,14 @@ def change_decision(name: str, branch_id: str, req: ChangeDecisionRequest):
             }
 
         # Dead branch — server-side disk surgery
-        manifest = load_branch_manifest(branch_path)
-        current_iter = manifest.current_iter
-
         if req.target_iter < current_iter:
             revert_branch_on_disk(branch_path, req.target_iter, req.content)
         else:
             continue_branch_on_disk(branch_path, req.content)
 
-        (branch_path / "control.json").unlink(missing_ok=True)
+        # The surgery is already done; a queued stop or revert replayed after it would
+        # undo the state the user just asked for.
+        clear_control_signals(branch_path)
 
         optimizer_alive = is_problem_running(name)
         if optimizer_alive:
@@ -141,9 +150,11 @@ def change_decision(name: str, branch_id: str, req: ChangeDecisionRequest):
 def configure_branch(name: str, branch_id: str, req: BranchConfigRequest):
     """Update branch configuration (e.g. max_iter).
 
-    Writes branch_config.json, which nothing but this endpoint ever writes. The
-    worker reads it fresh when it composes the state for each node, so the new
-    budget takes effect from the next node onwards with no signal needed.
+    Writes branch_config.json, which only this process writes — this endpoint and the
+    budget grant in change-decision. (The worker creates it once when migrating a
+    pre-split max_iter, and never overwrites it.) The worker reads it fresh when it
+    composes the state for each node, so the new budget takes effect from the next node
+    onwards with no signal needed.
 
     This deliberately does not touch branch.json: the worker holds that manifest
     in memory for the duration of a node and rewrites it wholesale afterwards,
@@ -206,6 +217,16 @@ def delete_branch(name: str, branch_id: str):
         raise HTTPException(
             status_code=409,
             detail="Cannot delete a branch that has children. Delete children first.",
+        )
+
+    # The resolver keeps branch_id inside the tree; this re-checks the resolved target,
+    # symlinks and all, because what follows is an unrecoverable rmtree.
+    branches_root = (get_problem_dir(name) / "output" / "branches").resolve()
+    target = branch_path.resolve()
+    if branches_root not in target.parents:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Refusing to delete '{branch_id}': outside the branch tree",
         )
 
     lock = get_branch_lock(branch_path)

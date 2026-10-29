@@ -8,18 +8,22 @@ TuningDuration; a watchdog covers subprocess hangs.
 """
 
 import asyncio
+import os
 import re
-import sys
+import signal
 import time
 import yaml
 from pathlib import Path
 
 import config as _cfg
-from config import SCRIPT_DIR, get_problem_dir
+from config import get_problem_dir
+from agentic.workspace import REGION_KEYS
 from utils.build import compile_framework, driver_command, reference_build_extras
-from utils.files import save_output
+from utils.files import get_iter_dir, save_output
+from utils.framework import extract_regions
 from utils.gpu_lock import acquire_gpu_lock
 from utils.log import log
+from utils.problem import gpu_index as problem_gpu_index
 from utils.results import (
     parse_reference_time_from_output,
     save_reference_time,
@@ -31,8 +35,6 @@ from utils.results import (
 from state.types import WorkingState
 
 
-# How often (seconds) the monitor thread checks progress
-_MONITOR_INTERVAL = 2.0
 # Extra slack beyond the tuning budget before the outer watchdog trips.
 # KTT's TuningDuration stop is the primary mechanism; this only fires on hangs.
 _WATCHDOG_MARGIN_S = 30.0
@@ -74,7 +76,6 @@ class TunerProgressTracker:
         self.completed = 0
         self.config_durations: list[float] = []  # seconds per completed config
         self.last_launch_time: float | None = None
-        self.compilation_failed = False
 
     def parse_line(self, line: str, wall_time: float):
         """Parse a single tuner output line and update state."""
@@ -97,13 +98,6 @@ class TunerProgressTracker:
 
             self.launched = new_launched
             self.last_launch_time = wall_time
-
-        # Detect compilation failures (surfaced in summary, not acted on)
-        if (
-            "[Error] Kernel compilation failed" in line
-            or "NVRTC compilation failed" in line
-        ):
-            self.compilation_failed = True
 
     def summary(self, elapsed: float) -> str:
         """Return a human-readable progress summary."""
@@ -137,6 +131,25 @@ async def _execute_driver(
     output_lines = []
     watchdog_tripped = False
 
+    def kill_tree(process) -> None:
+        """Kill the driver *and* whatever it spawned.
+
+        A python reference runs through std::system, so the driver has an `sh` and a
+        torch process under it. Killing the driver alone reparents those, and they keep
+        the CUDA context and its allocations while the next branch takes the GPU lock.
+        """
+        try:
+            pgid = os.getpgid(process.pid)
+            if pgid == os.getpgrp():
+                raise OSError("driver shares our process group")  # never signal ourselves
+            os.killpg(pgid, signal.SIGKILL)
+        except OSError:
+            # Already reaped, or it has no group of its own. The PID is still killable.
+            try:
+                process.kill()
+            except (ProcessLookupError, OSError):
+                pass
+
     log("Acquiring GPU lock...")
     async with acquire_gpu_lock():
         log("GPU lock acquired. Running tuner...")
@@ -151,6 +164,8 @@ async def _execute_driver(
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=str(cwd),
                 env=get_subprocess_env(),
+                # Its own process group, so a kill reaches the reference subprocesses too.
+                start_new_session=True,
             )
 
             start_time = time.time()
@@ -184,7 +199,7 @@ async def _execute_driver(
                     f"KTT did not honor its stop condition — killing subprocess.",
                     "ERROR",
                 )
-                process.kill()
+                kill_tree(process)
                 await process.wait()
                 output_lines.append(
                     f"\n[WATCHDOG] Subprocess killed at {elapsed:.0f}s (budget {budget_s:.0f}s). "
@@ -210,7 +225,7 @@ async def _execute_driver(
         except asyncio.CancelledError:
             log("Run node cancelled — killing tuner", "WARN")
             if process is not None and process.returncode is None:
-                process.kill()
+                kill_tree(process)
                 await process.wait()
             output_lines.append("\n[INTERRUPTED] Tuner killed by cancellation")
             raise
@@ -223,12 +238,40 @@ async def _execute_driver(
     return "".join(output_lines)
 
 
+def _load_regions(iter_dir: Path) -> dict:
+    """The three driver regions of this iteration, keyed as assemble_framework_cpp wants.
+
+    Only the agentic path writes ``region_*.cpp``. An iteration authored by
+    configure_node, or by any run that predates those files, carries the same bodies
+    spliced into its framework.cpp — so recover them from there rather than
+    re-assembling a skeleton whose KERNELS region never declares ``kernel``.
+    """
+    regions = {
+        key: (iter_dir / name).read_text(encoding="utf-8")
+        for name, key in REGION_KEYS.items()
+        if (iter_dir / name).exists()
+    }
+    if len(regions) == len(REGION_KEYS):
+        return regions
+
+    framework = iter_dir / "framework.cpp"
+    if framework.exists():
+        try:
+            recovered = extract_regions(framework.read_text(encoding="utf-8"))
+        except Exception as e:
+            log(f"Could not recover driver regions from framework.cpp: {e}", "WARN")
+            recovered = {}
+        for key, body in recovered.items():
+            regions.setdefault(key, body)  # a region file present wins over the splice
+    return regions
+
+
 async def run_node(state: WorkingState) -> WorkingState:
     """
     Run the KTT tuner as a subprocess.
 
     KTT's TuningDuration stop condition enforces the wall-clock budget inside
-    the tuner itself. This function only monitors for visibility and provides
+    the tuner itself. This function logs progress for visibility and provides
     a loose outer watchdog for truly hung subprocesses.
     """
     iteration = state.iter_num
@@ -239,13 +282,7 @@ async def run_node(state: WorkingState) -> WorkingState:
     print(f"  NODE: Run Tuner [{branch_name}] (iter {iteration})")
     print("=" * 60)
 
-    branch_path_str = state.branch_path
-    if branch_path_str:
-        iter_dir = Path(branch_path_str) / f"iter{iteration}"
-    else:
-        from config import get_output_dir
-
-        iter_dir = get_output_dir() / f"iter{iteration}"
+    iter_dir = get_iter_dir(state)
 
     log(f"Executing tuner in: {iter_dir}")
 
@@ -253,13 +290,17 @@ async def run_node(state: WorkingState) -> WorkingState:
     problem_dir = get_problem_dir()
     problem_yaml_path = problem_dir / "problem.yaml"
 
+    # Defaults for a file that will not parse. config_yaml belongs here too: a save from
+    # the problem editor mid-run can be read half-written, and without a default the
+    # "using defaults" path dies on a NameError that buries the YAML error.
+    config_yaml = {}
     gpu_index = 0
     tolerance = 1e-4
     ref_file = "ref_kernel.cu"
     try:
         with open(problem_yaml_path, encoding="utf-8") as f:
             config_yaml = yaml.safe_load(f) or {}
-        gpu_index = config_yaml.get("gpu", {}).get("index", 0)
+        gpu_index = problem_gpu_index(config_yaml)
         tolerance = (config_yaml.get("validation") or {}).get("tolerance", tolerance)
         ref_file = (config_yaml.get("reference") or {}).get("file", ref_file)
     except Exception as e:
@@ -273,14 +314,7 @@ async def run_node(state: WorkingState) -> WorkingState:
     cases = case_list(config_yaml)
     primary = cases[0].name
     spec = load_inputs_spec(problem_dir / "inputs.yaml")
-    regions = {
-        name: (
-            (iter_dir / f"region_{name}.cpp").read_text(encoding="utf-8")
-            if (iter_dir / f"region_{name}.cpp").exists()
-            else ""
-        )
-        for name in ("kernels", "params", "launcher")
-    }
+    regions = _load_regions(iter_dir)
     if len(cases) > 1:
         log(f"{len(cases)} input cases: {', '.join(c.name for c in cases)}")
 
@@ -293,8 +327,10 @@ async def run_node(state: WorkingState) -> WorkingState:
         cdir = stage_case(problem_dir, iter_dir, spec, config_yaml, cases, case, regions)
         # cpu_c references add ref_cpu.c + this case's -D scalar macros to the build.
         extra_sources, extra_flags = reference_build_extras(problem_dir, case)
-        build_result = compile_framework(
-            cdir, extra_sources=extra_sources, extra_flags=extra_flags
+        # g++ takes a second or more and this coroutine shares its loop with three other
+        # branches — including the tasks draining their drivers' stdout pipes.
+        build_result = await asyncio.to_thread(
+            compile_framework, cdir, extra_sources=extra_sources, extra_flags=extra_flags
         )
         if not build_result.ok:
             label = "" if len(cases) == 1 else f" [case {case.name}]"
@@ -348,12 +384,10 @@ async def run_node(state: WorkingState) -> WorkingState:
         # The full log is the artifact; keep it on disk.
         save_output(cdir, output, "tuner_output.txt")
 
-        # State carries the summary, not the log. KTT runs every configuration, so a
-        # kernel that does not compile fails all of them with the same diagnostics — one
-        # real run was 957 KB across 333 configurations carrying two distinct causes.
-        # KTT prepends one #define per tuning parameter before NVRTC sees the source, so
-        # device diagnostics are reported against line numbers that do not exist in
-        # kernels.cu. The offset is the parameter count, which results.json carries.
+        # State carries the summary, not the log. KTT prepends one #define per tuning
+        # parameter before NVRTC sees the source, so device diagnostics cite line numbers
+        # that do not exist in kernels.cu. The offset is the parameter count, which
+        # results.json carries.
         failures = summarize_failures(
             output, kernel_offset=kernel_line_offset(cdir / "results.json")
         )

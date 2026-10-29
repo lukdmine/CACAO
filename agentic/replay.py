@@ -26,6 +26,10 @@ from langchain_core.messages import AIMessage
 # how a turn cut off at the provider's token cap is scripted.
 Turn = Union[List[Dict[str, Any]], str, Dict[str, Any]]
 
+# Stands in for a stalled turn whose text the trace did not keep (it is recorded only
+# when there was content or reasoning to record).
+_STALL_TEXT = "(recorded turn: prose, no tool call)"
+
 
 class ScriptedLLM:
     """Stand-in for a bound chat model that emits a fixed sequence of turns.
@@ -111,15 +115,50 @@ def load_trace(trace_path) -> List[dict]:
 
 
 def turns_from_trace(trace_path) -> List[Turn]:
-    """Group a trace's tool calls back into per-turn batches, in order."""
-    grouped: Dict[int, List[dict]] = {}
+    """Every recorded turn, in order: the tool-call batches and the empty-handed replies.
+
+    Keeping only the tool calls made a truncated or stalled step — the failure mode the
+    correction policy exists for — the one step a replay could not reproduce: the script
+    ran out early and the loop ended NO_TOOL_CALLS instead.
+    """
+    batches: Dict[int, List[dict]] = {}
+    replies: Dict[int, Dict[str, Any]] = {}
+
     for record in load_trace(trace_path):
-        if record.get("event") != "tool_call":
+        event = record.get("event")
+        try:
+            turn = int(record.get("turn", 0) or 0)
+        except (TypeError, ValueError):
             continue
-        grouped.setdefault(int(record.get("turn", 0)), []).append(
-            {"tool": record.get("tool", ""), "args": record.get("args") or {}}
-        )
-    return [grouped[turn] for turn in sorted(grouped)]
+
+        if event == "tool_call":
+            batches.setdefault(turn, []).append(
+                {"tool": record.get("tool", ""), "args": record.get("args") or {}}
+            )
+        elif event == "assistant":
+            reply = replies.setdefault(turn, {})
+            reply["text"] = record.get("text") or ""
+            reply["finish_reason"] = record.get("finish_reason") or ""
+        elif event in ("truncation_nudge", "truncated"):
+            # A turn that spent the whole cap on reasoning writes no assistant record,
+            # so the nudge is the only trace of it.
+            reply = replies.setdefault(turn, {})
+            reply.setdefault("text", "")
+            if not reply.get("finish_reason"):
+                reply["finish_reason"] = "length"
+        elif event in ("stall_nudge", "no_tool_calls"):
+            reply = replies.setdefault(turn, {})
+            if not reply.get("text"):
+                # The text has to be non-empty, or a reply with no content and no
+                # stated reason replays as a truncation rather than a stall.
+                reply["text"] = _STALL_TEXT
+
+    # A turn with both text and tool calls is a tool-call turn: the calls are what the
+    # loop acts on, and the text is already in the record for the reader.
+    return [
+        batches[turn] if turn in batches else replies[turn]
+        for turn in sorted(set(batches) | set(replies))
+    ]
 
 
 def scripted_from_trace(trace_path) -> ScriptedLLM:
@@ -173,14 +212,20 @@ def summarize_trace(trace_path) -> str:
     return "\n".join(lines)
 
 
-async def replay_step(trace_path, toolbox, *, budget: int = 50) -> Any:
+async def replay_step(trace_path, toolbox, *, budget: Optional[int] = None) -> Any:
     """Re-drive a recorded step against the current code.
 
     Returns the StepResult, with the toolbox mutated exactly as a live run would leave
-    it, so the resulting workspace can be inspected or diffed.
+    it, so the resulting workspace can be inspected or diffed. The budget defaults to
+    the configured one: a hardcoded copy diverges from every BUDGET_EXHAUSTED step the
+    moment the knob is changed.
     """
+    import config
+
     from agentic.loop import run_agentic_step
 
+    if budget is None:
+        budget = getattr(config, "STEP_TOOL_BUDGET", 50)
     llm = scripted_from_trace(trace_path)
     return await run_agentic_step(
         llm,

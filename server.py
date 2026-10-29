@@ -3,8 +3,12 @@
 FastAPI server for the CUDA Agentic Optimizer frontend.
 
 Usage:
-    python server.py              # starts on http://localhost:8003 (or $PORT)
+    python server.py              # binds 0.0.0.0:8003 (env: HOST, PORT)
     python server.py --port 8080  # custom port
+
+The default bind is every interface and the API has no authentication: on a shared
+box, anyone who can reach the port can start runs on the operator's LLM key or delete
+a problem. Pass --host 127.0.0.1 (or HOST=127.0.0.1) where that matters.
 """
 
 import argparse
@@ -60,8 +64,11 @@ if __name__ == "__main__":
     for fmt in log_config["formatters"].values():
         fmt["datefmt"] = "%Y-%m-%d %H:%M:%S"
 
+    # The app object, not "server:app": resolving an import string re-imports this
+    # module and builds a second app, leaving the one built above orphaned. Reload
+    # needs the string, and re-imports by design.
     uvicorn.run(
-        "server:app",
+        "server:app" if args.reload else app,
         host=args.host,
         port=args.port,
         reload=args.reload,

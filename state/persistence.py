@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -15,8 +16,13 @@ logger = logging.getLogger(__name__)
 # --- Atomic JSON write helper ---
 
 
-def _atomic_write_json(path: Path, data: dict):
-    """Write JSON atomically via tmp+rename."""
+def atomic_write_json(path: Path, data: dict):
+    """Write JSON atomically via tmp+rename, leaving no temp file behind on failure.
+
+    The shared implementation: anything writing JSON into the output tree calls this
+    rather than repeating the sequence and forgetting the cleanup.
+    """
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
@@ -28,12 +34,34 @@ def _atomic_write_json(path: Path, data: dict):
         raise
 
 
+def _write_json_if_absent(path: Path, data: dict) -> bool:
+    """Create *path* atomically; return False and touch nothing if it already exists.
+
+    ``os.link`` is the atomic form of create-if-absent: the loser of a race cannot
+    half-overwrite the winner's file. Its temp name carries the pid so two processes
+    creating the same target never share one.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(f"{path.suffix}.{os.getpid()}.tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 # --- Context (output/context.json) ---
 
 
 def save_context(output_dir: Path, context: Context):
     """Save shared context to ``output/context.json``. Called once after analysis."""
-    _atomic_write_json(output_dir / "context.json", context.model_dump())
+    atomic_write_json(output_dir / "context.json", context.model_dump())
 
 
 def load_context_for_branch(branch_path: Path) -> Context:
@@ -63,7 +91,7 @@ _MAX_ITER_FALLBACK = 5
 
 def save_branch_config(branch_path: Path, config: BranchConfig):
     """Save frontend-owned branch settings to ``branch_config.json``."""
-    _atomic_write_json(
+    atomic_write_json(
         Path(branch_path) / "branch_config.json", config.model_dump()
     )
 
@@ -77,6 +105,10 @@ def _migrate_legacy_max_iter(branch_path: Path) -> Optional[BranchConfig]:
     longer declares ``max_iter``, so the next ``save_branch_manifest`` writes a
     dict without it and the value is gone for good. The migration therefore has
     to persist, and has to happen before that save — see its call site there.
+
+    It creates the file and never overwrites one: this is the single write the
+    worker process makes to a file the API otherwise owns, so it must not be able
+    to land on top of a budget the user just set.
     """
     branch_path = Path(branch_path)
     if (branch_path / "branch_config.json").exists():
@@ -93,7 +125,9 @@ def _migrate_legacy_max_iter(branch_path: Path) -> Optional[BranchConfig]:
 
     config = BranchConfig(max_iter=legacy)
     try:
-        save_branch_config(branch_path, config)
+        _write_json_if_absent(
+            branch_path / "branch_config.json", config.model_dump()
+        )
     except OSError as e:
         # Read-only or vanished directory: still report the budget we found.
         logger.warning("Could not migrate max_iter for %s: %s", branch_path, e)
@@ -135,6 +169,10 @@ def grant_one_more_iteration(branch_path: Path, current_iter: int) -> BranchConf
     lifted, or decide_node terminates it again immediately. A user who already
     raised the limit past ``current_iter`` keeps their value — the whole point
     of the config file being theirs to set.
+
+    Call it from the server process only: ``branch_config.json`` has one writer,
+    and the worker revert/continue paths reach it through a signal the API grants
+    the budget for before sending.
     """
     config = load_branch_config(branch_path)
     if current_iter >= config.max_iter:
@@ -156,7 +194,7 @@ def save_branch_manifest(branch_path: Path, manifest: BranchManifest):
     """
     branch_path = Path(branch_path)
     _migrate_legacy_max_iter(branch_path)
-    _atomic_write_json(
+    atomic_write_json(
         branch_path / "branch.json", manifest.model_dump(exclude_none=True)
     )
 
@@ -173,7 +211,7 @@ def load_branch_manifest(branch_path: Path) -> BranchManifest:
 def save_iter_state(branch_path: Path, iter_num: int, state: IterState):
     """Save iteration state to ``iter_N/state.json``."""
     iter_dir = Path(branch_path) / f"iter{iter_num}"
-    _atomic_write_json(iter_dir / "state.json", state.dump_for_disk())
+    atomic_write_json(iter_dir / "state.json", state.dump_for_disk())
 
 
 def load_iter_state(
@@ -197,14 +235,9 @@ def create_initial_iter_state(
 ) -> IterState:
     """Create the next iteration's state. It owns only what it will produce itself.
 
-    Previous-iteration context (the last kernel, feedback, decision, run output) is NOT
-    copied: state/history.py already loads it from disk per-field with configurable
-    depth, and every consuming node already requests it. Copying it forward duplicated
-    that — the same kernel reached the implement prompt twice — and left the frontend
-    rendering the previous iteration's decision as this one's.
-
-    What cannot come from history is a value to branch on, since history returns
-    formatted markdown: hence ``mode``, computed once here from the previous decision.
+    Previous-iteration context is loaded per-field from disk by state/history.py, not
+    copied forward. Only ``mode`` has to travel, because history returns formatted
+    markdown rather than a value to branch on.
     """
     if prev_state is None:
         return IterState(iter_num=iter_num, status="planning")

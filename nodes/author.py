@@ -1,18 +1,9 @@
-"""Author node — writes the kernel and its tuning driver in one agentic step.
+"""Author node — writes kernels.cu and the three driver regions in one agentic tool step.
 
-Replaces the implement -> configure pair. They were split, but the kernel and the
-parameter space are one contract: a tile size in the kernel has to match a launcher's
-thread count and a parameter declared in the params region, and two independent LLM
-calls authoring two halves of that is a failure mode by construction. It is also the
-only shape in which a compile check means anything, since the kernel cannot be
-NVRTC-compiled without the ``#define``s the params region declares.
-
-A step that cannot author its files fails the iteration and routes to decide, which is
-what the branch already does with an implementation that comes back empty. It does not
-quietly re-run the work through the two single-shot calls: a run once lost its tool
-loop for its last 33 authoring steps that way, because the silent path made the
-failure look like a success to everything downstream. ``AGENTIC_STEPS`` remains as a deliberate
-switch back to those calls; nothing turns it off on your behalf.
+One step, not two, because the kernel cannot be NVRTC-compiled without the ``#define``s
+region_params.cpp declares. A step that authors nothing fails the iteration and routes
+to decide; it never falls back to the single-shot calls. ``AGENTIC_STEPS=False`` selects
+those deliberately, and the worker dispatches them without passing through here.
 """
 
 from pathlib import Path
@@ -22,11 +13,11 @@ import yaml
 
 import config as _cfg
 from config import get_llm_precise, get_problem_dir, get_output_dir
-from utils.files import create_iter_dir, save_output
+from utils.cases import stage_engine_files
+from utils.files import get_iter_dir, save_output
 from utils.framework import assemble_framework_cpp
 from utils.inputs import load_inputs_spec, scalar_contract_text
 from utils.log import log
-from utils.problem import reference_spec
 from utils.rules import parse_rules
 from state.types import WorkingState
 from agentic.loop import StepResult, run_agentic_step
@@ -34,37 +25,6 @@ from agentic.tools import Toolbox, schemas_for
 from agentic.workspace import ALL_FILES, REGION_KEYS, Workspace
 from nodes._llm_helper import build_prompt_context
 import prompts.author
-
-
-def _stage_engine_files(state: WorkingState, iter_dir: Path, meta: dict) -> str:
-    """Place the files the engine owns beside the ones the LLM writes.
-
-    Identical to configure_node's staging, and for the same reason: inputs.hpp is
-    generated once per run from inputs.yaml, so the LLM neither owns it nor can author
-    it, and its absence is not something an iteration can recover from.
-    """
-    import shutil
-
-    problem_dir = get_problem_dir()
-    inputs_src = problem_dir / "inputs.hpp"
-    if not inputs_src.exists():
-        raise FileNotFoundError(
-            f"{inputs_src} not found — the problem's I/O boundary was never generated. "
-            "It comes from inputs.yaml at the start of a run; check that inputs.yaml exists."
-        )
-    shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
-
-    ref = reference_spec(meta)
-    if ref.type == "python":
-        ref_py = problem_dir / ref.file
-        if not ref_py.exists():
-            raise FileNotFoundError(
-                f"{ref_py} not found — python reference file required by problem.yaml"
-            )
-        shutil.copyfile(ref_py, iter_dir / "ref.py")
-        shutil.copyfile(problem_dir / "inputs.yaml", iter_dir / "inputs.yaml")
-
-    return inputs_src.read_text(encoding="utf-8")
 
 
 def _read_owned_files(directory: Path) -> dict:
@@ -193,19 +153,6 @@ def _task_text(state: WorkingState, seeded: list) -> str:
     return "\n".join(lines)
 
 
-async def _legacy(state: WorkingState) -> WorkingState:
-    """The two single-shot calls this node replaces, unchanged."""
-    from nodes.implement import implement_node
-    from nodes.configure import configure_node
-
-    scope = getattr(state, "authoring_scope", "full") or "full"
-    if scope != "config_only":
-        state = await implement_node(state)
-        if state.status == "deciding":  # implement failed and routed itself
-            return state
-    return await configure_node(state)
-
-
 def _fail_iteration(state: WorkingState, detail: str, result: StepResult) -> WorkingState:
     """End the iteration on a step that produced nothing, and say why.
 
@@ -249,19 +196,11 @@ async def author_node(state: WorkingState) -> WorkingState:
     print(f"  NODE: Author [{branch_name}] (iter {iteration}/{state.max_iter})")
     print("=" * 60)
 
-    iter_dir = (
-        create_iter_dir(branch_path, iteration)
-        if branch_path
-        else get_output_dir() / f"iter{iteration}"
-    )
+    iter_dir = get_iter_dir(state)
     iter_dir.mkdir(parents=True, exist_ok=True)
 
     meta = yaml.safe_load(state.problem_yaml) if state.problem_yaml else {}
-    inputs_hpp = _stage_engine_files(state, iter_dir, meta)
-
-    if not _cfg.AGENTIC_STEPS:
-        log("AGENTIC_STEPS disabled — using single-shot implement + configure", "INFO")
-        return await _legacy(state)
+    inputs_hpp = stage_engine_files(get_problem_dir(), iter_dir, meta)
 
     # --- workspace ---
     ws = Workspace(iter_dir)
@@ -287,6 +226,8 @@ async def author_node(state: WorkingState) -> WorkingState:
     )
     ctx["inputs_hpp"] = inputs_hpp
     ctx["rules_block"] = parse_rules(meta).prompt_block()
+    # A config_only step must not be told to write kernels.cu; the prompt closes on this.
+    ctx["authoring_scope"] = getattr(state, "authoring_scope", "full") or "full"
     ctx["task"] = _task_text(state, seeded)
     # Inlined rather than read back: the model read all four on turn one every time,
     # so the tokens are paid regardless and the read-back only costs a round trip.
@@ -350,9 +291,21 @@ async def author_node(state: WorkingState) -> WorkingState:
         f"{len(schemas)} tools bound (history={has_history}, siblings={has_siblings})"
     )
 
+    # A tool of ours raised and left the model with nothing to converge on. Worth saying
+    # out loud on every exit route: the fix for that is here, not in the branch.
+    engine_fault = (
+        f" (after {toolbox.internal_errors} internal tool error(s) — "
+        "an engine bug, not the model's)"
+        if toolbox.internal_errors
+        else ""
+    )
+
     # `aborted` cannot tell "never called a tool" from "stalled after finishing", so
-    # a complete, compile-checked workspace is committed either way.
-    salvageable = ws.complete() and toolbox.check_passed
+    # a complete, compile-checked workspace is committed either way — but only if the
+    # step actually wrote something. The seeded files from iteration N-1 pass a
+    # compile check untouched, and committing those re-benchmarks the same kernel and
+    # spends a max_iter slot on it. end_step guards this; salvage bypasses end_step.
+    salvageable = ws.complete() and toolbox.check_passed and toolbox.mutations > 0
 
     if result.outcome.aborted and salvageable:
         log(
@@ -363,13 +316,9 @@ async def author_node(state: WorkingState) -> WorkingState:
 
     if result.outcome.aborted and not salvageable:
         detail = result.outcome.diagnosis
-        if toolbox.internal_errors:
-            # A tool of ours raised and left the model with nothing to converge on.
-            # Worth saying out loud: the fix for that is here, not in the branch.
-            detail += (
-                f" (after {toolbox.internal_errors} internal tool error(s) — "
-                "an engine bug, not the model's)"
-            )
+        if toolbox.mutations == 0:
+            detail += " (no file was written)"
+        detail += engine_fault
         if result.error:
             detail += f": {result.error}"
         return _fail_iteration(state, detail, result)
@@ -377,7 +326,8 @@ async def author_node(state: WorkingState) -> WorkingState:
     if not ws.complete():
         return _fail_iteration(
             state,
-            f"{result.outcome.diagnosis} — missing {', '.join(ws.missing())}",
+            f"{result.outcome.diagnosis} — missing {', '.join(ws.missing())}"
+            + engine_fault,
             result,
         )
 
@@ -406,7 +356,8 @@ async def author_node(state: WorkingState) -> WorkingState:
     log("Step ended without a passing compilation check — routing to propose", "WARN")
     state.run_output = (
         "[COMPILE ERROR] The authoring step ended without a passing compilation "
-        "check (tool budget exhausted).\n\n" + (toolbox.last_check or "No check was run.")
+        f"check (tool budget exhausted){engine_fault}.\n\n"
+        + (toolbox.last_check or "No check was run.")
     )
     state.status = "proposing"
     return state

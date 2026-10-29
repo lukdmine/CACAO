@@ -3,9 +3,12 @@ apply across nodes. Import these instead of restating the execution model or
 NVRTC constraints per prompt; per-prompt paraphrases drift (the single-kernel
 prohibition survived two days past the framework migration that lifted it).
 
-SYSTEM_OVERVIEW  — execution model; for every LLM node that reasons about kernels.
-NVRTC_RULES      — compile-environment facts; for nodes that write or debug kernel code
-                   (implement, fix_errors, propose).
+SYSTEM_OVERVIEW    — the execution model.
+NVRTC_RULES        — the compile environment, for prompts that write or debug kernel code.
+closing_reminders  — the pre-write checklist that echoes both.
+
+Which prompts import which is a grep, not a list to maintain here: the last hand-kept
+enumeration named a module that had never imported the block.
 """
 
 SYSTEM_OVERVIEW = """## How This System Works
@@ -49,3 +52,20 @@ NVRTC_RULES = """## NVRTC Compilation Rules (kernels.cu is compiled by NVRTC at 
 - Static `__shared__` > 48KB fails at launch, not in the NVRTC log (invalid config — expected).
 - `extern "C"` is required on every `__global__` kernel.
 """
+
+
+def closing_reminders(signature_rule: str) -> str:
+    """The last four checks before the model writes code.
+
+    Items 1, 2 and 4 restate SYSTEM_OVERVIEW and NVRTC_RULES on purpose — they are the
+    mistakes that survive a whole prompt. Kept here so an edit to the authoritative block
+    cannot leave a stale echo of it further down the same prompt; only the signature rule
+    differs between writing a kernel and repairing one.
+    """
+    return (
+        "CRITICAL REMINDERS — verify before writing code:\n"
+        "1. Static `__shared__ arr[MACRO_SIZE]` unless configure binds AddArgumentLocal.\n"
+        "2. No glibc-reaching headers (`<stdint.h>`, `<cstdint>`, `<cuda.h>`, `<stdio.h>`).\n"
+        f"3. {signature_rule}\n"
+        "4. Every global and shared memory access must be provably in-bounds."
+    )

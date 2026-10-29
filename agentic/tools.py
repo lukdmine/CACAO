@@ -84,6 +84,13 @@ class grep_tuner_output(BaseModel):
 
     iteration: int = Field(description="Iteration number in this branch.")
     pattern: str = Field(description="Regular expression.")
+    case: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which input case's log to search. Omit for the primary case. Only "
+            "meaningful when the problem declares several input cases."
+        ),
+    )
 
 
 class list_iterations(BaseModel):
@@ -136,18 +143,10 @@ def schemas_for(
 ) -> List[type]:
     """Tool schemas to bind for one step.
 
-    A tool that cannot succeed is not free: the model calls it, spends a round trip,
-    and gets an error that was knowable before the request was sent. Observed on a live
-    run's first iteration — three `grep_tuner_output` calls each answered
-    "iter1 has no tuner_output.txt", plus two `branch_log` calls against siblings that
-    were themselves on iteration 1. Two branches spent 22 and 23 of a 25-call budget
-    that way.
-
-    So history tools bind only once this branch has a completed iteration, and
-    cross-branch tools only once some other branch has a result worth reading. Both are
-    computed from the run's actual state rather than assumed from the iteration number:
-    branches run concurrently, and a revert can leave a sibling ahead of a branch that
-    is starting over.
+    History tools bind only once this branch has a completed iteration, cross-branch
+    tools only once a sibling has a result: a tool that cannot succeed still costs a
+    round trip. Both flags come from run state, not the iteration number — a revert can
+    leave a sibling ahead.
     """
     schemas = list(_CORE_SCHEMAS)
     if has_history:
@@ -211,8 +210,21 @@ class Toolbox:
 
     # -- helpers -----------------------------------------------------------
 
-    def _iter_dir(self, iteration: int) -> Path:
-        return self.branch_path / f"iter{iteration}"
+    def _iter_dir(self, iteration) -> Path:
+        """This branch's iteration directory, for a model-supplied iteration number.
+
+        Coerced and range-checked here so all three callers are covered by one guard:
+        nothing validates tool arguments against the schemas, so the declared ``int``
+        is advisory and a value like "1/../../<sibling>/iter4" would otherwise resolve
+        into another branch and hand back its kernel.
+        """
+        try:
+            n = int(iteration)
+        except (TypeError, ValueError):
+            raise ToolError(f"iteration must be a number, got {iteration!r}.") from None
+        if n < 0:
+            raise ToolError(f"iteration must not be negative, got {n}.")
+        return self.branch_path / f"iter{n}"
 
     def _handlers(self) -> Dict[str, Callable[..., str]]:
         return {
@@ -240,10 +252,7 @@ class Toolbox:
         except TypeError as e:
             return f"ERROR: bad arguments for {name}: {e}"
         except Exception as e:  # a tool bug must not kill the branch
-            # Distinct from ToolError: this is our defect, not the model's. It gets
-            # counted so the caller does not read the resulting dead-end as evidence
-            # that the provider cannot drive tools — a broken check_compilation
-            # otherwise blames the model for a step it drove correctly.
+            # Counted so author_node can say the dead end was ours, not the model's.
             self.internal_errors += 1
             log(f"Tool '{name}' raised: {e}", "WARN")
             return f"ERROR: {name} failed: {e}"
@@ -461,16 +470,14 @@ class Toolbox:
 
     # -- read/query tools --------------------------------------------------
 
-    def tuning_landscape(
-        self,
-        iteration: int,
-        mode: str = "top",
-        param: Optional[str] = None,
-        n: int = 10,
-        case: Optional[str] = None,
-    ) -> str:
+    def _case_artifact(self, iteration, case: Optional[str], name: str):
+        """(path, label) for one case's artifact in an earlier iteration.
+
+        Both history tools resolve here: a multi-case run writes its per-case artifacts
+        into ``iter_N/case_<name>/``, and grep_tuner_output anchored on the iteration
+        root instead — so it could never find the log on a problem with cases.
+        """
         from utils.cases import case_dir, case_list
-        from utils.landscape import describe
 
         cases = case_list(self.meta)
         target = (
@@ -481,22 +488,34 @@ class Toolbox:
                 f"No case named '{case}'. This problem's cases are: "
                 + ", ".join(c.name for c in cases)
             )
-        results = case_dir(self._iter_dir(iteration), cases, target) / "results.json"
+        label = f"iter{iteration}" + ("" if len(cases) == 1 else f" case '{target.name}'")
+        return case_dir(self._iter_dir(iteration), cases, target) / name, label
+
+    def tuning_landscape(
+        self,
+        iteration: int,
+        mode: str = "top",
+        param: Optional[str] = None,
+        n: int = 10,
+        case: Optional[str] = None,
+    ) -> str:
+        from utils.landscape import describe
+
+        results, label = self._case_artifact(iteration, case, "results.json")
         if not results.exists():
-            where = "" if len(cases) == 1 else f" case '{target.name}'"
-            raise ToolError(
-                f"iter{iteration}{where} has no results.json (it may not have run)."
-            )
+            raise ToolError(f"{label} has no results.json (it may not have run).")
         return describe(results, mode=mode, param=param, n=n)
 
-    def grep_tuner_output(self, iteration: int, pattern: str) -> str:
-        path = self._iter_dir(iteration) / "tuner_output.txt"
+    def grep_tuner_output(
+        self, iteration: int, pattern: str, case: Optional[str] = None
+    ) -> str:
+        path, label = self._case_artifact(iteration, case, "tuner_output.txt")
         if not path.exists():
-            raise ToolError(f"iter{iteration} has no tuner_output.txt.")
+            raise ToolError(f"{label} has no tuner_output.txt.")
         try:
             rx = re.compile(pattern)
         except re.error as e:
-            raise ToolError(f"invalid regular expression: {e}")
+            raise ToolError(f"invalid regular expression: {e}") from e
 
         hits = []
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -506,7 +525,7 @@ class Toolbox:
                 if len(hits) >= _GREP_MAX_HITS:
                     break
         if not hits:
-            return f"No match for /{pattern}/ in iter{iteration}/tuner_output.txt."
+            return f"No match for /{pattern}/ in {label}/tuner_output.txt."
         header = f"{len(hits)} match(es)" + (
             f", showing the first {_GREP_MAX_HITS}" if len(hits) >= _GREP_MAX_HITS else ""
         )

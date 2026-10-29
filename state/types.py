@@ -59,15 +59,11 @@ class StrategyInfo(BaseModel):
 
 
 class BranchConfig(BaseModel):
-    """
-    Frontend-owned branch settings, stored as ``branch_config.json``.
+    """Frontend-owned branch settings (``branch_config.json``).
 
-    Deliberately its own file rather than fields on ``BranchManifest``: the API
-    writes this, the worker only ever reads it. The manifest cannot hold it,
-    because the worker keeps that model in memory across a whole node — an LLM
-    call or a tuner run, minutes at a time — and rewrites it wholesale
-    afterwards, which reverted anything the API had edited in the meantime.
-    One writer per file, so there is nothing to race.
+    Its own file because the API writes it and the worker only reads it — one writer
+    per file. The single worker touch is the legacy ``max_iter`` migration, which
+    creates the file when it is absent and never overwrites one.
     """
 
     max_iter: int
@@ -118,15 +114,11 @@ class IterState(BaseModel):
     next_status: Optional[str] = (
         None  # status for the *next* iteration (implementing | configuring | success | failed | branching)
     )
-    # What the authoring step is allowed to change. "config_only" is the agentic
-    # equivalent of the old skip_implement route to `configuring`: the kernel stands and
-    # only the framework regions move. Set by the worker from the decision's next_status,
-    # so decide.py and its prompt keep emitting the statuses they always did.
+    # What the authoring step may change; "config_only" is the agentic form of
+    # skip_implement.
     authoring_scope: Literal["full", "config_only"] = "full"
-    # How this iteration was entered. Computed once by create_initial_iter_state from the
-    # previous decision — implement branches on it to reach the fix_errors prompt. The
-    # previous decision/feedback/kernel themselves come from state/history.py; only this
-    # verdict has to travel, because history returns formatted markdown, not values.
+    # How this iteration was entered; set by create_initial_iter_state from the previous
+    # decision.
     mode: Literal["fresh", "retry", "followup"] = "fresh"
     kernel_code: str = ""
     framework_cpp: str = ""  # assembled framework.cpp driver (framework-file mode)
@@ -185,6 +177,30 @@ class SubStrategyDict(BaseModel):
 # -------------------------------------------------------------------------
 # Status transition enforcement
 # -------------------------------------------------------------------------
+
+# The whole status vocabulary in one place: the iteration FSM, the branch-level
+# statuses no iteration ever holds, and "idle" (api/tree.py, for a problem with an
+# output directory but no branches yet). The transition table below lists only the
+# statuses a node runs from, so it is not the set to read this off. The frontend keeps
+# two more hand-written copies (generate_types.py's BranchStatus, statusColors.ts) which
+# have already drifted from it and from each other; they should be generated from here.
+BRANCH_STATUSES: tuple[str, ...] = (
+    "idle",
+    "initialized",
+    "planning",
+    "authoring",
+    "implementing",
+    "configuring",
+    "running",
+    "profiling",
+    "proposing",
+    "deciding",
+    "decided",
+    "success",
+    "failed",
+    "branching",
+    "stopped",
+)
 
 _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "initialized": {"running", "failed"},

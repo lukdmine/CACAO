@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
     Dialog,
     DialogContent,
@@ -22,9 +22,18 @@ interface CloneDialogProps {
 }
 
 export function CloneDialog({ sourceName, open, onOpenChange }: CloneDialogProps) {
-    const [newName, setNewName] = useState(sourceName + "_copy");
+    const [newName, setNewName] = useState("");
     const [submitting, setSubmitting] = useState(false);
     const [error, setError] = useState("");
+
+    // The sidebar mounts this dialog once, before any target is picked, so the
+    // useState initializer would freeze the suggestion at "_copy" — a name the client
+    // regex and the server slug check both accept. Re-seed it whenever it opens.
+    useEffect(() => {
+        if (!open) return;
+        setNewName(sourceName ? `${sourceName}_copy` : "");
+        setError("");
+    }, [open, sourceName]);
 
     const handleClone = async () => {
         setError("");

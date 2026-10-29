@@ -1,12 +1,14 @@
 """Implement node - writes the optimized CUDA kernel."""
 
 import re
-from pathlib import Path
 
-from config import get_output_dir, get_problem_dir
-from utils.files import save_output, create_iter_dir
+import yaml
+
+from config import get_problem_dir
+from utils.files import save_output, get_iter_dir
 from utils.inputs import load_inputs_spec, scalar_contract_text
 from utils.log import log
+from utils.rules import parse_rules
 from state.types import WorkingState
 from nodes._llm_helper import execute_llm_node, build_prompt_context
 import prompts.implement
@@ -21,21 +23,14 @@ def _select_prompt(mode: str):
 
 async def implement_node(state: WorkingState) -> WorkingState:
     iteration = state.iter_num
-    branch_path = Path(state.branch_path) if state.branch_path else None
     strategy = state.strategy or {}
     branch_name = strategy.name if strategy else "default"
     max_iter = state.max_iter
 
-    # Create iteration directory
-    if branch_path:
-        iter_dir = create_iter_dir(branch_path, iteration)
-    else:
-        iter_dir = get_output_dir() / f"iter{iteration}"
-        iter_dir.mkdir(parents=True, exist_ok=True)
+    iter_dir = get_iter_dir(state)
+    iter_dir.mkdir(parents=True, exist_ok=True)
+
     # How this iteration was entered, decided once at creation (state/persistence.py).
-    # Previously inferred from a decision blob copied forward from the previous
-    # iteration; that no longer exists, and state.decision is always None here anyway --
-    # decide runs last, implement runs first.
     is_retry = state.mode == "retry"
     is_followup = state.mode in ("retry", "followup")
 
@@ -56,8 +51,6 @@ async def implement_node(state: WorkingState) -> WorkingState:
             {"name": "decision"},
             {"name": "feedback", "limit": 1},
             {"name": "proposal", "limit": 1},
-            # A retry must see what it is fixing. This used to ride in on the carried
-            # state.run_output, which no longer exists.
             {"name": "run_output", "limit": 1},
         ],
     )
@@ -66,6 +59,11 @@ async def implement_node(state: WorkingState) -> WorkingState:
     inputs_src = get_problem_dir() / "inputs.hpp"
     if inputs_src.exists():
         ctx["inputs_hpp"] = inputs_src.read_text(encoding="utf-8")
+
+    # What this problem forbids outright — a kernel that wins by dropping precision the
+    # problem never permitted still validates whenever the tolerance is loose enough.
+    meta = yaml.safe_load(state.problem_yaml) if state.problem_yaml else {}
+    ctx["rules_block"] = parse_rules(meta).prompt_block()
 
     # State how THIS problem's scalars reach a kernel. inputs.hpp shows them as
     # `inline constexpr`, which reads like they are available everywhere — but NVRTC

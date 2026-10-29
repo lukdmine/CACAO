@@ -11,7 +11,8 @@ An **agentic CUDA kernel optimizer**: given a reference CUDA kernel and a `probl
 ## Running the Backend
 
 ```bash
-# Activate the conda environment (Python 3.10; what setup.sh provisions)
+# Activate the conda environment (Python 3.10). setup.sh does not create it —
+# it aborts unless a venv or conda env is already active.
 conda activate ktt
 
 # Install Python deps (Python 3.10)
@@ -26,17 +27,17 @@ cp .env.example .env   # or create manually
 python cli.py --dir problems/mmul
 
 # Options (python cli.py --help for the full list)
-python cli.py --dir problems/mmul --resume       # resume interrupted run
-python cli.py --dir problems/mmul --max-iter 3 --max-depth 1
-python cli.py --dir problems/mmul --path-budget 20  # per-path iteration budget (replaces --max-iter)
-python cli.py --dir problems/mmul --timeout 300     # tuner wall-clock budget override (seconds)
-python cli.py --dir problems/mmul --no-clean     # fresh run without archiving output/
-python cli.py --dir problems/mmul --clone mmul_v2   # clone the problem and exit
-python cli.py --dir problems/mmul --best         # show results without running
-python cli.py --dir problems/mmul --prune-archives  # shrink archive/output_* on disk
+python cli.py --dir problems/mmul --resume           # resume interrupted run
+python cli.py --dir problems/mmul --path-budget 30   # a root-to-leaf path shares 30 (default 20)
+python cli.py --dir problems/mmul --path-budget 0 --max-iter 3 --max-depth 1  # depth mode
+python cli.py --dir problems/mmul --timeout 300      # tuner wall-clock budget override (seconds)
+python cli.py --dir problems/mmul --no-clean         # fresh run without archiving output/
+python cli.py --dir problems/mmul --clone mmul_v2    # clone the problem and exit
+python cli.py --dir problems/mmul --best             # show results (needs no API key)
+python cli.py --dir problems/mmul --prune-archives   # shrink archive/output_* on disk
 
 # Start the FastAPI backend server (for frontend)
-python server.py              # http://localhost:8003
+python server.py              # binds 0.0.0.0:8003 — --host 127.0.0.1 to restrict
 python server.py --port 8080
 ```
 
@@ -80,8 +81,8 @@ python frontend/scripts/generate_types.py
 
 Run this whenever `state/types.py`, `models/strategy.py` or `models/decision.py`
 change — those are the only three the generator reads. `models/inputs.py` and
-`models/regions.py` are not covered; their TypeScript counterparts are hand-written
-in `frontend/src/api/client.ts`.
+`models/cases.py` are not covered; their TypeScript counterparts are hand-written in
+`frontend/src/api/client.ts`. `models/regions.py` never crosses HTTP and has none.
 
 ---
 
@@ -109,8 +110,7 @@ cli.py
        └─ engine/worker.py     # Phase 2: per-branch loop (4 parallel async coroutines)
             ├─ nodes/plan.py         # LLM: detailed implementation plan
             ├─ nodes/author.py       # LLM tool loop: kernels.cu + framework regions, with compile check
-            │    └─ used unless AGENTIC_STEPS=False, which selects ↓ instead
-            ├─ nodes/implement.py    # LLM: write kernels.cu          (AGENTIC_STEPS=False only)
+            ├─ nodes/implement.py    # LLM: write kernels.cu           (AGENTIC_STEPS=False only)
             ├─ nodes/configure.py    # LLM: fill framework.cpp regions (AGENTIC_STEPS=False only)
             ├─ nodes/run.py          # subprocess: compile + run the KTT driver, get timing
             ├─ nodes/profile.py      # subprocess: run ncu profiler
@@ -126,12 +126,26 @@ State is split into three typed Pydantic models, plus one input file:
 |------|-------|---------|
 | `output/context.json` | `Context` | Shared problem data (written once, read by all branches) |
 | `output/branches/<name>/branch.json` | `BranchManifest` | Branch identity, control, aggregated results |
-| `output/branches/<name>/branch_config.json` | `BranchConfig` | Settings the frontend owns (`max_iter`) — API writes, worker only reads |
+| `output/branches/<name>/branch_config.json` | `BranchConfig` | Settings the frontend owns (`max_iter`) — see the writer rule below |
 | `output/branches/<name>/iterN/state.json` | `IterState` | Per-iteration work products (kernel, params, results, decision) |
 
 Nodes receive a `WorkingState` (composed from all three), then the worker decomposes it back after each step. See `state/types.py` for full field definitions.
 
-**One writer per file.** The worker holds `BranchManifest` in memory for the duration of a node — an LLM call or a tuner run — and rewrites `branch.json` wholesale afterwards. So anything the user can edit while a branch runs must live in `branch_config.json`, which the worker never writes: a setting kept on the manifest gets reverted by that write minutes later. The worker picks the file up in `_compose_working_state`, alongside the fresh reads of `problem.yaml` and the reference kernel.
+**One writer per file.** The worker holds `BranchManifest` in memory for the duration
+of a node — an LLM call or a tuner run — and rewrites `branch.json` wholesale
+afterwards. So anything the user can edit while a branch runs must live in
+`branch_config.json`: a setting kept on the manifest gets reverted by that write
+minutes later. The worker picks it up fresh in `_compose_working_state`, alongside the
+re-reads of `problem.yaml` and the reference kernel.
+
+`branch_config.json` is created once by the optimizer process, in
+`engine/master._init_branch`, and after that only the server writes it —
+`api/branches.py`'s config endpoint and the budget grant in change-decision, which is
+where `grant_one_more_iteration` is now called from. The revert/continue surgery in
+`state/control.py` no longer grants anything itself, so nothing inside a running worker
+can overwrite the file. The worker's one remaining write is `_migrate_legacy_max_iter`,
+create-if-absent via `os.link`, which cannot land on top of a budget the user just
+set.
 
 ### Iteration Status Machine
 
@@ -145,12 +159,21 @@ manifest — drives the branch-level outcome. The worker copies it into `manifes
 - `branch` → master spawns sub-strategies (up to `MAX_BRANCH_DEPTH`)
 - `stop/success/failed` → terminal
 
+**Path-budget mode is the default.** `config.PATH_BUDGET` is 20 and both entry points
+follow it: `cli.py`'s `--path-budget` defaults to that value, and `api/schemas.RunConfig`
+reads `MAX_ITERATIONS` / `MAX_BRANCH_DEPTH` / `PATH_BUDGET` from `config` rather than
+restating them, so a UI run and `python cli.py` on the same problem run the same budget.
+A whole root-to-leaf path therefore shares 20 iterations, `--max-iter` is ignored (the
+CLI warns when a non-default one is passed), and `MAX_BRANCH_DEPTH` still bounds nesting.
+`--path-budget 0`, or `PATH_BUDGET = 0`, selects depth mode, where `MAX_ITERATIONS` is
+the per-branch budget.
+
 **A raised budget propagates.** `engine/master._spawn_sub_branches` sizes children from
 the parent's *effective* `max_iter` — the value in `branch_config.json`, which the UI
-can raise and which `grant_one_more_iteration` raises when an exhausted branch is
-revived — not from `config`. In path-budget mode the grant extends the path rather than
-coming out of the children's share: `BranchManifest.path_budget_total` carries the
-budget that root-to-leaf path actually runs on, starting at `PATH_BUDGET` and growing by
+can raise and which the server's `grant_one_more_iteration` raises when an exhausted
+branch is revived — not from `config`. In path-budget mode the grant extends the path
+rather than coming out of the children's share: `BranchManifest.path_budget_total`
+carries the budget that path actually runs on, starting at `PATH_BUDGET` and growing by
 whatever an ancestor was granted beyond its allocated share. It defaults to 0, read as
 "use `config.PATH_BUDGET`", so pre-existing manifests keep working.
 
@@ -183,13 +206,17 @@ checking it before `configure` runs is impossible.
 
 The LLM owns four files — `kernels.cu` plus `region_kernels.cpp` / `region_params.cpp`
 / `region_launcher.cpp` — and never the framework skeleton, which is spliced by
-`assemble_framework_cpp` as before. `utils/framework.extract_regions` is its inverse,
-used to seed a step from an iteration that predates the region files.
+`assemble_framework_cpp`. `configure_node` writes the same three region files, so the
+`AGENTIC_STEPS=False` path leaves an iteration in the same shape.
+`utils/framework.extract_regions` is the inverse splice: it seeds a step from an
+iteration that predates the region files, and `nodes/run._load_regions` uses it to
+recover the three bodies out of `framework.cpp` when those files are absent — without
+which the reassembled driver would reference `kernel` without ever declaring it.
 
 Knobs in `config.py`:
 - `AGENTIC_STEPS` — kill switch back to the two single-shot calls. The only route to
   them; nothing selects them at runtime.
-- `STEP_TOOL_BUDGET` — tool calls per step (50); a runaway guard, median use is 12.
+- `STEP_TOOL_BUDGET` — tool calls per step (50); a runaway guard, not a working limit.
 - `STEP_TRUNCATION_RETRIES` — truncated replies corrected before the step gives up (3).
 - `CROSS_BRANCH_ACCESS` — `errors` / `log` / `index` / `off`. **No level exposes
   another branch's kernel or framework regions.** Parallel branches are parallel bets;
@@ -200,23 +227,28 @@ Knobs in `config.py`:
 and they need opposite advice:
 
 - **Truncation** — the reply hit the provider's output token cap before reaching a
-  call. `agentic.loop._was_truncated` spots it from `finish_reason` (or from a reply
-  with no content, no call and no stated reason). The model is told it was cut off and
-  given an escalating correction (`_TRUNCATION_NUDGES`) that shrinks the unit of work.
-  After `STEP_TRUNCATION_RETRIES` the step ends `TRUNCATED`.
-- **A stall** — real prose, no call. One nudge, as before.
+  call. `llm.tracked.was_truncated` spots it from `finish_reason` (`length` or
+  `max_tokens`, matched case-insensitively so all four providers are covered) or from a
+  reply with no content, no call and no stated reason. `agentic/loop.py` and
+  `TrackedLLM` share that one predicate instead of keeping a copy each. The model is
+  told it was cut off and given an escalating correction (`_TRUNCATION_NUDGES`) that
+  shrinks the unit of work. After `STEP_TRUNCATION_RETRIES` the step ends `TRUNCATED`.
+- **A stall** — real prose, no call. One nudge.
 
-This matters because thinking models spend the whole cap reasoning about a "write the
-kernel" prompt: on a 23-hour gdn_chunk_gen run, kimi-k3 did it 6 times in 17 steps,
-and because the loop read every one as "this provider cannot use tools", two
-consecutive hits took the tool loop offline for the remaining 33 authoring steps.
+Thinking models spend the whole cap reasoning about a "write the kernel" prompt often
+enough that mistaking it for "this provider cannot use tools" takes the tool loop
+offline for the rest of a run.
 
 **A step that cannot author its files fails the iteration.** `nodes/author._fail_iteration`
-writes an `[AUTHORING FAILED]` diagnosis to `run_output` and routes to `deciding` —
-the same route `implement_node` takes when its call comes back empty, and `decide`
-already reads it as a generation failure and retries with a smaller ask. Nothing
-re-runs the work through the single-shot calls: the silent path made a broken step
-look identical to a working one everywhere downstream.
+writes an `[AUTHORING FAILED]` diagnosis to `run_output` and routes to `deciding` — the
+same route `implement_node` takes when its call comes back empty, and `decide` reads it
+as a generation failure and retries with a smaller ask. It never falls back to the
+single-shot calls; with `AGENTIC_STEPS=False` the worker dispatches those directly and
+`author_node` is not on the path at all. A step that changed no file has authored
+nothing, even when its workspace compiles: `end_step` refuses, and so does the salvage
+path that commits an aborted-but-complete workspace. The workspace is seeded with the
+previous iteration's files, so committing them untouched re-benchmarks a kernel that
+was already measured and spends a budget slot on it.
 
 **`bind_tools` never raises.** For every provider here it attaches the schemas locally
 and returns — cerit is `ChatOpenAI` with a custom `base_url`, so a server without tool
@@ -229,10 +261,17 @@ fires five times with backoff on every single tool call.
 
 ### Kernel Rules
 
-`problem.yaml` takes a `rules:` block constraining what a kernel may do — the
-mechanism that stops a branch winning by quietly dropping to fp16 accumulation, which
-still validates whenever `validation.tolerance` is loose enough. `text` rules go in the
-prompt; `forbid` regexes are checked before the compiler runs and fail the check. See
+`problem.yaml` takes a `rules:` block constraining what a kernel may do — the mechanism
+that stops a branch winning by quietly dropping to fp16 accumulation, which still
+validates whenever `validation.tolerance` is loose enough.
+
+`text` rules reach every prompt that writes a kernel — `prompts/author.py`,
+`prompts/implement.py` and `prompts/fix_errors.py` all render `ctx["rules_block"]` — so
+both authoring paths carry them. `forbid` regexes are machine-checked, but only inside
+the agentic step (`agentic/tools.py`, before the compile check): **with
+`AGENTIC_STEPS=False` nothing enforces them.** A pattern that does not compile is
+reported as a violation rather than skipped, so a typo'd regex fails the check loudly
+instead of silently disarming the rule it was meant to be. See
 `docs/PROBLEM_YAML_GUIDE.md`.
 
 ### Tests
@@ -261,21 +300,27 @@ that reads one (e.g. `test_nvrtc.py`) needs a problem whose header has been gene
 
 ### LLM Provider Configuration
 
-The LLM stack lives in `llm/` and is re-exported from `config.py` for existing call
-sites. All LLM calls go through the `TrackedLLM` / `TrackedStructuredLLM` wrappers in
-`llm/tracked.py`, which handle retries with exponential backoff and token usage tracking.
+The LLM stack lives in `llm/`: `llm/providers.py` (roster and resolution),
+`llm/tracked.py` (the wrappers), `llm/claude.py` (structured output for the Claude
+models that reject a forced tool call), `llm/retry.py`, `llm/tokens.py`. `config.py`
+re-exports most of it for existing call sites, but defines none of it. All LLM calls go
+through `TrackedLLM` / `TrackedStructuredLLM`, which retry with exponential backoff and
+track token usage.
 
 Supported providers: `openai`, `anthropic`, `gemini`, `cerit` (OpenAI-compatible endpoint).
 
 Provider selection, highest priority first (same order as README):
 
 1. `--provider <name>` CLI flag (or `provider` in a UI run config)
-2. `LLM_PROVIDER` hardcoded in `llm/providers.py` (`None` by default — leave as-is to fall through)
+2. `LLM_PROVIDER` hardcoded in `llm/providers.py` (`None` by default — leave as-is to fall through).
+   It has to be that module's global: `_detect_provider` reads it there, so assigning
+   `config.LLM_PROVIDER` does nothing, and `config.py` no longer re-exports the name.
 3. `LLM_PROVIDER` env var in `.env`
 4. Auto-detect from whichever API key is set. When multiple are set, this order wins: **CERIT > Anthropic > OpenAI > Gemini**.
 
 `claude` and `google` are accepted as aliases; any other unrecognised value warns and
-falls through. The model is set via `--model`; otherwise the provider's default from
+falls through to key detection, on both the `--provider` and the env-var route. The
+model is set via `--model`; otherwise the provider's default from
 `MODELS` in `llm/providers.py` is used.
 
 ### Output Directory Layout
@@ -289,9 +334,11 @@ any size, so there is no cost argument for deleting. A directory with no `branch
 never held work and is removed rather than numbered.
 
 `python cli.py --dir <problem> --prune-archives` strips only regenerable files from
-archived runs (`cacao_*.bin`, `driver`, `__pycache__`, `.staging`) — ~99% of an
-archive's size. Kernels, driver regions, results, decisions and step traces are never
-touched, and `output/` is never touched. Nothing prunes automatically.
+archived runs (`cacao_in_*.bin`, `cacao_ref_*.bin`, `driver`, `__pycache__`) — ~99% of
+an archive's size. Kernels, driver regions, results, decisions, step traces and
+`.staging/` are never touched, and `output/` is never touched at all. `.staging/`
+survives on disk only when an authoring step aborted before committing, which makes it
+the only copy of that attempt. Nothing prunes automatically.
 
 ```
 problems/<name>/output/
@@ -300,7 +347,8 @@ problems/<name>/output/
 └── branches/
     └── <strategy_name>/
         ├── branch.json            # BranchManifest (worker-owned)
-        ├── branch_config.json     # BranchConfig (frontend-owned)
+        ├── branch_config.json     # BranchConfig (server-owned; see the writer rule)
+        ├── control/               # queued stop/revert/message signals, one file each
         ├── iter1/
         │   ├── state.json         # IterState
         │   ├── kernels.cu         # generated kernel(s)
@@ -320,8 +368,10 @@ problems/<name>/output/
 ```
 
 A problem declaring several `cases:` puts each case's `inputs.hpp`, `framework.cpp`,
-`driver` and `results.json` in `iter_N/case_<name>/` instead of at the iteration
-root; `kernels.cu` and the region files stay at the root, shared. One case — which
+`driver`, `results.json` and `tuner_output.txt` in `iter_N/case_<name>/` instead of at
+the iteration root; `kernels.cu` and the region files stay at the root, shared.
+(`tuner_output.txt` was missing from this list, which is how `grep_tuner_output` came
+to look for it at the root and fail on every multi-case problem.) One case — which
 is every problem with no `cases:` block — keeps the layout above exactly.
 `utils.cases.primary_case_dir` is what run-level readers anchor on.
 
@@ -335,7 +385,7 @@ is every problem with no `cases:` block — keeps the layout above exactly.
 | `api/schemas.py` | Pydantic request/response models |
 | `api/helpers.py` | Shared state (`_running_problems`, `RunEntry`), utilities |
 | `api/problems.py` | Problem CRUD (list, create, update, delete, detail, logs) |
-| `api/tree.py` | Tree scanning, results, status, GPU endpoints |
+| `api/tree.py` | Tree scanning, status, and GPU endpoints |
 | `api/optimizer.py` | `/run`, `/stop`, `/resume` with per-GPU locking |
 | `api/branches.py` | Branch control (stop, resume, message, change-decision, config, iterations, delete) |
 

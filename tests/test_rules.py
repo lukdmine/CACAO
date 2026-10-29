@@ -71,9 +71,15 @@ def test_clean_kernel_has_no_violations():
     assert rules.violations("float acc = 0.0f;") == []
 
 
-def test_invalid_pattern_is_ignored_rather_than_raising():
+def test_invalid_pattern_fails_the_check_rather_than_disarming_it():
+    # Skipping a bad regex leaves prompt_block() promising a machine-checked rule that
+    # nothing checks — a silent failure of enforcement. Reported as a violation, a
+    # typo in problem.yaml is instead a loud failure of the problem, which is fixable.
     rules = Rules(forbid=[ForbiddenPattern("(unclosed")])
-    assert rules.violations("anything") == []
+    found = rules.violations("anything")
+    assert len(found) == 1
+    assert "/(unclosed/" in found[0]
+    assert "not a valid regular expression" in found[0]
 
 
 def test_prompt_block_states_both_kinds():

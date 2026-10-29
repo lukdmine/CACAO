@@ -45,6 +45,10 @@ tuner.SetLauncher(kernel, [defA, defB](ktt::ComputeInterface& ci) {
 `GetParameterValue`'s type appears only in the return type, so `<uint64_t>` is
 REQUIRED — omitting it does not compile.
 
+`ci.RunKernel(def)` uses the base sizes scaled by your thread modifiers;
+`ci.RunKernel(def, global, local)` REPLACES both and IGNORES every modifier for that
+launch — per definition, pick one mechanism.
+
 ### Iterative algorithms (BFS, flood fill, relaxation, anything run to a fixed point)
 
 If the reference loops until nothing changes, ONE round of kernel launches is wrong —
@@ -90,6 +94,7 @@ makes blocks terminate independently and produces exactly this class of validati
 failure.
 
 **Global size units follow `global_size_type` in problem.yaml**: `cuda` → grid in
-blocks; `opencl` → total thread count, with KTT computing grid = global/block. `ndRange`
+blocks; `opencl` → total thread count, with KTT computing grid = global/block — passing a
+block count under `opencl` gives a grid of 1 or 0, a launch that does nothing. `ndRange`
 uses the same convention.
 """

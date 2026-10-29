@@ -57,22 +57,6 @@ def get_parent_branch_dir(branch_path: Union[str, Path, None]) -> Optional[Path]
     return None
 
 
-def create_iter_dir(branch_path: Path, iter_num: int) -> Path:
-    """
-    Create an iteration directory within a branch.
-
-    Args:
-        branch_path: Path to branch directory
-        iter_num: Iteration number (1-indexed)
-
-    Returns:
-        Path to created iteration directory
-    """
-    iter_dir = branch_path / f"iter{iter_num}"
-    iter_dir.mkdir(parents=True, exist_ok=True)
-    return iter_dir
-
-
 def save_output(path: Path, content: str, filename: Optional[str] = None) -> Path:
     """
     Save content to a file.
@@ -108,14 +92,6 @@ def load_file(path: Path) -> str:
     return ""
 
 
-def load_json(path: Path) -> Optional[dict]:
-    """Load a JSON file if it exists."""
-    if path.exists():
-        with open(path, encoding="utf-8") as f:
-            return json.load(f)
-    return None
-
-
 def get_iter_dir(state) -> Path:
     """``branch_path/iterN`` for a WorkingState or an equivalent dict.
 
@@ -138,9 +114,11 @@ def get_iter_dir(state) -> Path:
 # Files under an archived run that the engine can regenerate: the tuner's input and
 # reference dumps (~25 MB per iteration) and the compiled driver. Everything else in an
 # iteration — the kernel, the driver regions, the results, the decisions, the step
-# trace — is irreplaceable and is never touched by pruning.
+# trace — is irreplaceable and is never touched by pruning. ``.staging/`` counts as
+# irreplaceable: it survives on disk only when an authoring step aborted before
+# committing, so it holds the only copy of that attempt's kernel and driver regions.
 _REGENERABLE = ("cacao_in_*.bin", "cacao_ref_*.bin", "driver")
-_REGENERABLE_DIRS = ("__pycache__", ".staging")
+_REGENERABLE_DIRS = ("__pycache__",)
 
 _ARCHIVE_DIR_RE = re.compile(r"output_(\d+)$")
 
@@ -190,24 +168,12 @@ def _describe_run(output_dir: Path) -> str:
 def archive_output_dir():
     """Move the previous run's output aside, and start the next one with an empty dir.
 
-    This used to be ``clean_output_dir`` and it used to ``rmtree``. It cost a 23-hour
-    run: the frontend's Run button and ``cli.py`` without ``--resume`` both land here,
-    and neither asks first, so one misclick destroyed every kernel four branches had
-    produced. A rename costs nothing — it is O(1) regardless of size, the archive is on
-    the same filesystem — and turns that misclick into an inconvenience.
-
-    A directory with no ``branches/`` never held iteration work, so it is removed rather
-    than archived; otherwise a run aborted during analysis would leave a numbered
-    archive holding a log and nothing else.
-
-    ``reference_time.json`` is carried into the fresh directory. It may be seeded by
-    hand before the first run, and for a ``python`` or ``cpu_c`` reference it usually
-    must be: timing the reference itself is meaningless as a speedup denominator,
-    because a GPU kernel "beats" a single-threaded C loop or a torch eager call by two
-    orders of magnitude. The incumbent is measured externally and dropped in instead.
-    Everything downstream already respects that seed — ``save_reference_time`` is
-    first-write-wins via ``O_CREAT|O_EXCL``, and reference timing no-ops when the file
-    exists — so this is the one place a hand-measured baseline could be lost.
+    Renamed, never deleted: the frontend's Run button and ``cli.py`` without
+    ``--resume`` both land here without asking, and a rename is O(1) at any size (the
+    archive is on the same filesystem), so irreversible deletion buys nothing. A
+    directory with no ``branches/`` held no iteration work and is removed rather than
+    numbered. ``reference_time.json`` is carried into the fresh directory because it
+    may be a hand-seeded baseline, and this is the one place it could be lost.
 
     Returns the archive path, or None when nothing was archived.
     """
