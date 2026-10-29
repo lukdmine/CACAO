@@ -67,7 +67,7 @@ function boundaryOf(args: ArgSpec[]): ArgSpec[] {
 }
 
 /** What each reference kind is, and what it receives. One table rather than a branch per
- *  call site — the previous two-way splits were spread across ten of them. */
+ *  call site; the previous two-way splits were spread across ten of them. */
 const REFERENCE_KINDS: Record<ReferenceType, {
     label: string;
     field: 'ref_kernel_code' | 'ref_cpu_code' | 'ref_python_code';
@@ -93,7 +93,7 @@ const REFERENCE_KINDS: Record<ReferenceType, {
         positional: true,
         note: 'Compiled and linked into the driver, and run on the host once per validated buffer. '
             + 'It takes every buffer as a pointer, in the order listed under Arguments, and reads '
-            + 'scalars as -D macros — so scalars are not parameters, and block size does not apply.',
+            + 'scalars as -D macros, so scalars are not parameters, and block size does not apply.',
     },
     python: {
         label: 'Python reference',
@@ -104,7 +104,7 @@ const REFERENCE_KINDS: Record<ReferenceType, {
             + '    return buffers["input"] * 2   # flat array for the validated buffer',
         positional: false,
         note: 'Run on the host once per validated buffer, via a subprocess. It receives '
-            + 'def f(scalars, buffers) — two dicts keyed by NAME, with buffers as numpy arrays — '
+            + 'def f(scalars, buffers) (two dicts keyed by NAME, with buffers as numpy arrays) '
             + 'and returns the validated buffer as a flat array. Argument order does not apply, '
             + 'and block size does not either. Requires numpy.',
     },
@@ -139,7 +139,7 @@ function normalizeCases(raw: unknown): CaseSpec[] {
 }
 
 /** Default name for a case's own copy of a buffer's binary: the declared file with the
- *  case name before the extension (`A.bin` + `t127` -> `A_t127.bin`). Only a default —
+ *  case name before the extension (`A.bin` + `t127` -> `A_t127.bin`). Only a default:
  *  the field stays editable, so two cases can still point at one shared binary. */
 function caseFileName(declared: string | null | undefined, buffer: string, caseName: string): string {
     const base = (declared ?? '').trim();
@@ -161,9 +161,9 @@ function caseFileKey(caseName: string, buffer: string): string {
 const PLACEMENTS: Placement[] = ['host', 'define', 'runtime'];
 
 const PLACEMENT_HELP: Record<Placement, string> = {
-    host: 'inline constexpr in inputs.hpp — sizes the data generators',
-    define: '-D macro for NVRTC — a compile-time constant inside the kernels (name must be UPPERCASE)',
-    runtime: 'passed as a kernel argument — joins the reference-signature boundary',
+    host: 'inline constexpr in inputs.hpp; sizes the data generators',
+    define: '-D macro for NVRTC: a compile-time constant inside the kernels (name must be UPPERCASE)',
+    runtime: 'passed as a kernel argument; joins the reference-signature boundary',
 };
 
 const STEPS = ['Basics', 'GPU & Kernel', 'Arguments', 'Grid & Review'];
@@ -188,7 +188,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
     const [previewHpp, setPreviewHpp] = useState('');
     // Picked binaries for init=file buffers, keyed by buffer name; uploaded after save.
     const [inputFiles, setInputFiles] = useState<Record<string, File>>({});
-    // The same for a buffer a case rebinds, keyed "<case>::<buffer>" — a case's binary
+    // The same for a buffer a case rebinds, keyed "<case>::<buffer>". A case's binary
     // is a different file from the declared one, so it needs its own slot.
     const [caseInputFiles, setCaseInputFiles] = useState<Record<string, File>>({});
     // What the server already holds for each file buffer (edit mode only).
@@ -254,7 +254,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
             // rather than silently inventing one.
             if (!data.inputs) {
                 setError(
-                    `'${editProblemName}' has no inputs.yaml — it predates framework mode. ` +
+                    `'${editProblemName}' has no inputs.yaml; it predates framework mode. ` +
                     'Saving will define its I/O boundary from scratch.'
                 );
             }
@@ -317,7 +317,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
     }
 
     // Picked binaries are keyed by case NAME, so a rename has to migrate them the way
-    // renameArg does for buffers — otherwise the pick is orphaned and silently dropped.
+    // renameArg does for buffers, otherwise the pick is orphaned and silently dropped.
     function renameCase(index: number, newName: string) {
         const oldName = cases[index]?.name;
         updateCase(index, { name: newName });
@@ -349,7 +349,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setCaseInputFiles((prev) => ({ ...prev, [caseFileKey(c.name, buffer.name)]: f }));
         // Fill the override if it is blank: the upload resolves its destination through
         // this field, so leaving it empty would write the bytes over the declared
-        // binary — the one every other case reads.
+        // binary (the one every other case reads).
         if (!c.files[buffer.name]) {
             updateCase(index, {
                 files: { ...c.files, [buffer.name]: caseFileName(buffer.file_name, buffer.name, c.name) },
@@ -375,7 +375,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
         setArgs(args.map((a, j) => (j === i ? ({ ...a, ...patch } as ArgSpec) : a)));
     }
 
-    /** Buffers checked against the reference — at least one; a multi-output kernel has several. */
+    /** Buffers checked against the reference: at least one; a multi-output kernel has several. */
     function toggleValidated(i: number) {
         setArgs(args.map((a, j) => (j === i && a.kind === 'buffer' ? { ...a, validate: !a.validate } : a)));
     }
@@ -397,7 +397,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
     }
 
     // Picked files are keyed by buffer NAME (it rides along through reorder/remove).
-    // A rename migrates the key; a duplicate/empty name can only exist mid-typing —
+    // A rename migrates the key; a duplicate/empty name can only exist mid-typing;
     // the server rejects duplicates on save, before any upload runs.
     function pickInputFile(bufferName: string, e: React.ChangeEvent<HTMLInputElement>) {
         const f = e.target.files?.[0];
@@ -456,7 +456,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                 try {
                     await uploadProblemInput(res.name, a.name, f);
                     uploaded.push(a.name);
-                    // Keep the Edit-mode status truthful while the dialog stays open —
+                    // Keep the Edit-mode status truthful while the dialog stays open,
                     // in both places, since a case with no override of its own reads
                     // this very binary and shows its size.
                     setServerInputFiles((prev) => ({
@@ -480,7 +480,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
 
             // Then the per-case binaries. The endpoint resolves both the destination and
             // the expected byte count through the case's `files` override in
-            // problem.yaml, so the save above had to land first — it did.
+            // problem.yaml, so the save above had to land first, and it did.
             const caseUploaded: string[] = [];
             for (const c of form.cases ?? []) {
                 for (const b of form.inputs.args) {
@@ -491,7 +491,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                     const dest = c.files[b.name];
                     if (!dest) {
                         uploadWarnings.push(
-                            `case '${c.name}', buffer '${b.name}': not uploaded — the case has `
+                            `case '${c.name}', buffer '${b.name}': not uploaded: the case has `
                             + `no file name of its own, and sending it would overwrite `
                             + `${b.file_name || 'the declared binary'} for every other case`
                         );
@@ -520,7 +520,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
             // blocked. Keep the dialog open so it is read (and the upload retried).
             // The save checked for the binaries BEFORE the uploads above ran, so its
             // "does not exist" warning (check_input_files' wording) is stale for a
-            // buffer whose upload just succeeded — drop it.
+            // buffer whose upload just succeeded, so drop it.
             const allWarnings = [
                 ...(res.warnings ?? []).filter(
                     (w) => !uploaded.some((n) => w.startsWith(`buffer '${n}' (init=file)`))
@@ -727,8 +727,8 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                             value={form.global_size_type}
                                             onChange={(e) => update('global_size_type', e.target.value as CreateProblemData['global_size_type'])}
                                         >
-                                            <option value="cuda">cuda — grid = number of blocks</option>
-                                            <option value="opencl">opencl — grid = total work-items</option>
+                                            <option value="cuda">cuda: grid = number of blocks</option>
+                                            <option value="opencl">opencl: grid = total work-items</option>
                                         </select>
                                     </div>
                                 </div>
@@ -795,14 +795,14 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                     <span>
                                         {form.reference_type === 'cuda' && (
                                             <><strong>Order is the reference's signature.</strong> Arguments bind by
-                                            position, not by name — a wrong order makes the reference compute from
+                                            position, not by name. A wrong order makes the reference compute from
                                             shuffled inputs and validation compare against garbage, with no error.
                                             Buffers, and scalars marked <code className="font-mono">runtime</code>, are
                                             passed; a host-only scalar is declared but not passed, so it may sit anywhere.</>
                                         )}
                                         {form.reference_type === 'cpu_c' && (
                                             <><strong>Order is the reference's signature.</strong> Arguments bind by
-                                            position, not by name — a wrong order makes the reference compute from
+                                            position, not by name. A wrong order makes the reference compute from
                                             shuffled inputs and validation compare against garbage, with no error. A C
                                             reference takes <strong>every buffer</strong> as a pointer; scalars are{' '}
                                             <code className="font-mono">-D</code> macros, never parameters.</>
@@ -816,7 +816,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                     </span>
                                 </div>
 
-                                {/* What the reference actually receives — each kind takes something different */}
+                                {/* What the reference actually receives: each kind takes something different */}
                                 <div className="rounded-md border bg-zinc-950 px-3 py-2 text-xs font-mono text-zinc-300">
                                     {refKind.positional ? (
                                         <>
@@ -835,10 +835,10 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                                 </span>
                                             ))}
                                             <span className="text-zinc-500">)</span>
-                                            {refParams.length === 0 && <span className="text-zinc-600 italic"> — nothing passed</span>}
+                                            {refParams.length === 0 && <span className="text-zinc-600 italic">: nothing passed</span>}
                                         </>
                                     ) : (
-                                        // Python takes dicts keyed by name — there is no positional signature to show,
+                                        // Python takes dicts keyed by name; there is no positional signature to show,
                                         // so show the keys it will actually find in them.
                                         <>
                                             <span className="text-zinc-500">def {form.ref_function || 'reference'}(scalars, buffers)</span>
@@ -873,7 +873,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                 {args.map((a, i) => (
                                     <div key={i} className="rounded-md border border-border/50 p-2 space-y-1.5">
                                         <div className="flex items-center gap-2">
-                                            {/* Reorder — this list IS the signature order */}
+                                            {/* Reorder: this list IS the signature order */}
                                             <div className="flex flex-col gap-0.5">
                                                 <button type="button" className="text-muted-foreground hover:text-foreground disabled:opacity-40"
                                                     disabled={i === 0}
@@ -979,7 +979,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                                         {mode === 'edit' && serverInputFiles[a.name] && (
                                                             <span className={`text-[11px] ${serverInputFiles[a.name].exists ? 'text-emerald-400' : 'text-amber-400'}`}>
                                                                 {serverInputFiles[a.name].exists
-                                                                    ? `on server (${fmtBytes(serverInputFiles[a.name].bytes)})${inputFiles[a.name] ? ' — will be replaced' : ''}`
+                                                                    ? `on server (${fmtBytes(serverInputFiles[a.name].bytes)})${inputFiles[a.name] ? ', will be replaced' : ''}`
                                                                     : 'not uploaded yet'}
                                                             </span>
                                                         )}
@@ -999,7 +999,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                                     </>
                                                 )}
 
-                                                {/* Several buffers may be validated — a multi-output kernel checks each */}
+                                                {/* Several buffers may be validated; a multi-output kernel checks each */}
                                                 <label className="flex items-center gap-1 text-xs ml-auto"
                                                     title="Compare this buffer against the reference. At least one; a multi-output kernel validates several.">
                                                     <input type="checkbox" checked={a.validate}
@@ -1019,7 +1019,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                                     spellCheck={false}
                                                 />
                                                 <p className="text-[11px] text-muted-foreground mt-1">
-                                                    Body of <code className="font-mono">gen_{a.name || 'name'}()</code> — must
+                                                    Body of <code className="font-mono">gen_{a.name || 'name'}()</code> must
                                                     return a <code className="font-mono">std::vector&lt;{a.dtype}&gt;</code>.
                                                     May use scalars, never tuning parameters.
                                                 </p>
@@ -1182,7 +1182,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                                                 <Input
                                                                     className="text-xs font-mono w-32 h-8"
                                                                     placeholder={b.file_name ?? ''}
-                                                                    title="Stored under inputs/ as this name. Blank uses the declared file_name — which every other case reads, so a case with its own binary needs its own name."
+                                                                    title="Stored under inputs/ as this name. Blank uses the declared file_name, which every other case reads, so a case with its own binary needs its own name."
                                                                     value={c.files[b.name] ?? ''}
                                                                     onChange={(e) => {
                                                                         const files = { ...c.files };
@@ -1198,7 +1198,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                                                     title={`inputs/${dest}`}
                                                                 >
                                                                     {bytes !== undefined
-                                                                        ? `${shared ? 'shared ' : ''}${dest} on server (${fmtBytes(bytes)})${picked ? ' — will be replaced' : ''}`
+                                                                        ? `${shared ? 'shared ' : ''}${dest} on server (${fmtBytes(bytes)})${picked ? ', will be replaced' : ''}`
                                                                         : `${dest} not uploaded yet`}
                                                                 </span>
                                                             )}
@@ -1264,7 +1264,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                     </div>
 
                                     <div className="space-y-1.5">
-                                        <Label className="text-xs">Forbidden patterns — enforced, checked against kernels.cu before compiling</Label>
+                                        <Label className="text-xs">Forbidden patterns: enforced, checked against kernels.cu before compiling</Label>
                                         {(form.rules?.forbid ?? []).map((rule, i) => (
                                             <div key={i} className="flex gap-2">
                                                 <Input
@@ -1326,11 +1326,11 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                 <div className="space-y-2">
                                     <Label>Summary</Label>
                                     <div className="rounded-md border bg-zinc-950 p-3 text-xs font-mono text-zinc-300 space-y-1">
-                                        <div><span className="text-zinc-500">name:</span> {form.name || '—'}</div>
-                                        <div><span className="text-zinc-500">slug:</span> {form.slug || '—'}</div>
+                                        <div><span className="text-zinc-500">name:</span> {form.name || '-'}</div>
+                                        <div><span className="text-zinc-500">slug:</span> {form.slug || '-'}</div>
                                         <div><span className="text-zinc-500">gpu:</span> Index {form.gpu.index} {gpuDevices.find(g => g.index === form.gpu.index)?.name ? `(${gpuDevices.find(g => g.index === form.gpu.index)?.name})` : ''}</div>
                                         <div>
-                                            <span className="text-zinc-500">ref:</span> {form.ref_function || '—'} ({form.reference_type})
+                                            <span className="text-zinc-500">ref:</span> {form.ref_function || '-'} ({form.reference_type})
                                             {form.reference_type === 'cuda' && ` block=[${form.ref_block_x}, ${form.ref_block_y}, ${form.ref_block_z}]`}
                                         </div>
                                         <div>
@@ -1342,7 +1342,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                         <div>
                                             <span className="text-zinc-500">validated:</span>{' '}
                                             {args.filter(a => a.kind === 'buffer' && a.validate).map(a => a.name).join(', ') || (
-                                                <span className="text-amber-400">none — at least one buffer must be validated</span>
+                                                <span className="text-amber-400">none: at least one buffer must be validated</span>
                                             )}
                                         </div>
                                         <div><span className="text-zinc-500">grid:</span> [{form.grid_x}, {form.grid_y}, {form.grid_z}] ({form.global_size_type})  tolerance={form.tolerance}  tuner={form.tuning?.duration_s ?? 100}s</div>
@@ -1356,7 +1356,7 @@ export function NewProblemDialog({ onCreated, mode = 'create', editProblemName, 
                                     </div>
                                 </div>
 
-                                {/* Generated inputs.hpp — rendered by the backend, so what you see is what is written */}
+                                {/* Generated inputs.hpp: rendered by the backend, so what you see is what is written */}
                                 <div className="space-y-2">
                                     <Label>Generated inputs.hpp</Label>
                                     <pre className="rounded-md border bg-zinc-950 p-3 text-[11px] font-mono text-emerald-300 max-h-72 overflow-auto whitespace-pre">
