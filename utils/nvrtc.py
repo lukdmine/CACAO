@@ -26,7 +26,6 @@ import ctypes
 import ctypes.util
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List, Optional
 
 _NVRTC_SUCCESS = 0
@@ -278,6 +277,14 @@ def compile_source(
         lib.nvrtcDestroyProgram(ctypes.byref(prog))
 
 
+def _value_order(value: str) -> tuple:
+    """Sort key over parameter values: numeric where possible, lexical otherwise."""
+    try:
+        return (0, float(value), "")
+    except ValueError:
+        return (1, 0.0, value)
+
+
 def sample_configurations(params: Dict[str, List[str]]) -> List[tuple]:
     """(label, config) pairs to compile: the extremes of each parameter's range.
 
@@ -285,11 +292,17 @@ def sample_configurations(params: Dict[str, List[str]]) -> List[tuple]:
     likely to be constraint-valid; the maximum is where shared-memory and register
     sizing derived from parameters actually overflows. A middle sample adds compile
     time without covering a distinct failure mode.
+
+    The extremes are the sorted ones, not the first and last declared. AddParameter
+    lists are written in whatever order suits their author, and a descending one made
+    "maximum values" compile the smallest configuration — the one case this check is
+    not looking for — while telling the model its maximum had passed.
     """
     if not params:
         return [("default", {})]
-    lo = {name: values[0] for name, values in params.items()}
-    hi = {name: values[-1] for name, values in params.items()}
+    ordered = {name: sorted(values, key=_value_order) for name, values in params.items()}
+    lo = {name: values[0] for name, values in ordered.items()}
+    hi = {name: values[-1] for name, values in ordered.items()}
     if lo == hi:
         return [("only configuration", lo)]
     return [("minimum values", lo), ("maximum values", hi)]

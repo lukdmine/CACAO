@@ -66,7 +66,11 @@ class BufferSpec(BaseModel):
     file_name: Optional[str] = None
     validate_output: bool = Field(False, alias="validate")
 
-    model_config = {"populate_by_name": True}
+    # validate_assignment so a case's `files:` override goes through the same checks as
+    # a declared file_name. Without it InputsSpec.for_case could assign an absolute or
+    # ../ path, and utils.inputs._file_path joins it with `/` — which drops the problem
+    # directory entirely when the right operand is absolute.
+    model_config = {"populate_by_name": True, "validate_assignment": True}
 
     @field_validator("name")
     @classmethod

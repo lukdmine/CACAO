@@ -186,42 +186,50 @@ async def test_prompt_is_saved_and_stays_small(env, monkeypatch):
 
 
 @pytest.fixture
-def spy_legacy(monkeypatch):
-    """Catches any surviving route into the single-shot calls."""
+def spy_single_shot(monkeypatch):
+    """Catches any surviving route from this node into the single-shot calls.
+
+    Patched on the two owning modules rather than on nodes.author: the fallback that
+    used to live here imported them inside the call, and so would anything reviving it.
+    """
     calls = []
 
-    async def fake_legacy(state):
+    async def fake(state):
         calls.append(state.mode)
         state.status = "running"
         return state
 
-    monkeypatch.setattr(author_mod, "_legacy", fake_legacy)
+    import nodes.configure
+    import nodes.implement
+
+    monkeypatch.setattr(nodes.implement, "implement_node", fake)
+    monkeypatch.setattr(nodes.configure, "configure_node", fake)
     return calls
 
 
-async def test_a_provider_that_cannot_bind_tools_fails_the_iteration(env, monkeypatch, spy_legacy):
+async def test_a_provider_that_cannot_bind_tools_fails_the_iteration(env, monkeypatch, spy_single_shot):
     monkeypatch.setattr(
         author_mod, "get_llm_precise", lambda: ScriptedLLM([], bind_error=NotImplementedError())
     )
     state = await author_mod.author_node(make_state(env))
 
-    assert spy_legacy == []
+    assert spy_single_shot == []
     assert state.status == "deciding"
     assert "rejected the tool schemas" in state.run_output
 
 
-async def test_a_model_that_will_not_call_tools_fails_the_iteration(env, monkeypatch, spy_legacy):
+async def test_a_model_that_will_not_call_tools_fails_the_iteration(env, monkeypatch, spy_single_shot):
     # Prose, nudged, prose again.
     monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(["just prose", "still prose"]))
     state = await author_mod.author_node(make_state(env))
 
-    assert spy_legacy == []
+    assert spy_single_shot == []
     assert state.status == "deciding"
     assert "never called a tool" in state.run_output
     assert "still prose" in state.run_output, "decide needs to see what the model said"
 
 
-async def test_a_persistently_truncated_step_fails_with_the_reason(env, monkeypatch, spy_legacy):
+async def test_a_persistently_truncated_step_fails_with_the_reason(env, monkeypatch, spy_single_shot):
     """The failure that started this: the branch has to be told the model ran out of
     room to answer, because the fix is to ask for less, not to change the strategy."""
     monkeypatch.setattr(_cfg, "STEP_TRUNCATION_RETRIES", 2)
@@ -232,14 +240,14 @@ async def test_a_persistently_truncated_step_fails_with_the_reason(env, monkeypa
     )
     state = await author_mod.author_node(make_state(env))
 
-    assert spy_legacy == []
+    assert spy_single_shot == []
     assert state.status == "deciding"
     assert "cut off at its output token limit 3 time(s)" in state.run_output
     assert "ask for less in one go" in state.run_output
     assert "failure to generate code, not a failure of the strategy" in state.run_output
 
 
-async def test_the_budget_running_out_with_files_missing_fails_the_iteration(env, monkeypatch, spy_legacy):
+async def test_the_budget_running_out_with_files_missing_fails_the_iteration(env, monkeypatch, spy_single_shot):
     monkeypatch.setattr(_cfg, "STEP_TOOL_BUDGET", 1)
     monkeypatch.setattr(
         author_mod,
@@ -248,7 +256,7 @@ async def test_the_budget_running_out_with_files_missing_fails_the_iteration(env
     )
     state = await author_mod.author_node(make_state(env))
 
-    assert spy_legacy == []
+    assert spy_single_shot == []
     assert state.status == "deciding"
     assert "missing" in state.run_output and "region_params.cpp" in state.run_output
 
@@ -277,11 +285,30 @@ async def test_a_failed_step_still_leaves_its_trace(env, monkeypatch):
     assert (env["branch"] / "iter1" / "step_trace.jsonl").exists()
 
 
-async def test_agentic_steps_off_is_the_only_route_to_the_single_shot_calls(env, monkeypatch, spy_legacy):
+async def test_agentic_steps_off_is_the_only_route_to_the_single_shot_calls(env, monkeypatch, spy_single_shot):
+    """And it is the worker that takes it, not a fallback inside this node.
+
+    The fallback that used to live here is the silent path the module docstring is
+    about: with the flag on it made a step that could not use tools look like a
+    working one. So the flag off must not reach the single-shot calls from in here —
+    it must never get here at all.
+    """
+    from engine.worker import _dispatch_status
+    from state.types import IterState
+
     monkeypatch.setattr(_cfg, "AGENTIC_STEPS", False)
-    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(HAPPY_TURNS))
-    await author_mod.author_node(make_state(env))
-    assert spy_legacy == ["fresh"]
+    for status in ("implementing", "configuring"):
+        assert _dispatch_status(IterState(iter_num=1, status=status)) == status
+
+    # Called anyway, the node fails the iteration like any other step that cannot
+    # author. It does not quietly run the two calls instead and report success.
+    monkeypatch.setattr(
+        author_mod, "get_llm_precise", lambda: ScriptedLLM([], bind_error=NotImplementedError())
+    )
+    state = await author_mod.author_node(make_state(env))
+    assert spy_single_shot == []
+    assert state.status == "deciding"
+    assert "[AUTHORING FAILED]" in state.run_output
 
 
 async def test_a_truncated_step_that_recovers_is_not_a_failure(env, monkeypatch):

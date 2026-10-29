@@ -18,8 +18,8 @@ python cli.py --dir problems/mmul
 
 ```bash
 python cli.py --dir problems/mmul --resume          # resume an interrupted run
-python cli.py --dir problems/mmul --max-iter 5 --max-depth 2
-python cli.py --dir problems/mmul --path-budget 30  # budget a root-to-leaf path instead
+python cli.py --dir problems/mmul --path-budget 30  # a root-to-leaf path shares 30
+python cli.py --dir problems/mmul --path-budget 0 --max-iter 5 --max-depth 2  # depth mode
 python cli.py --dir problems/mmul --timeout 300     # override the tuner wall-clock budget
 python cli.py --dir problems/mmul --provider cerit --model qwen3.5
 python cli.py --dir problems/mmul --best            # show results without running
@@ -28,9 +28,15 @@ python cli.py --dir problems/mmul --no-clean        # reuse output/ instead of a
 python cli.py --dir problems/mmul --prune-archives  # shrink archived runs on disk
 ```
 
-`--path-budget N` selects a different budgeting mode: instead of `--max-iter`
-iterations per branch, a whole root-to-leaf path shares N. Raising a branch's budget in
-the UI extends that path rather than spending its children's share.
+**Budgeting.** Path-budget mode is the default. A whole root-to-leaf path shares
+`--path-budget` iterations — 20, from `config.PATH_BUDGET` — `--max-depth` still bounds
+nesting, and `--max-iter` is ignored (passing a non-default one warns). Raising a
+branch's budget in the UI extends that path rather than spending its children's share.
+`--path-budget 0` switches to depth mode, where `--max-iter` is the per-branch budget.
+The web UI reads the same three defaults from `config.py`, so a UI run and a CLI run on
+the same problem use the same budget.
+
+`--best` reports what is already in `output/` and needs no API key.
 
 `--dir` may be relative or absolute — the optimizer can be invoked from any working directory.
 
@@ -44,7 +50,7 @@ compiled drivers) from `archive/`, never from `output/`, and never kernels or re
 With `CERIT_API_KEY` and `CERIT_API_BASE` set in `.env`:
 
 ```bash
-python cli.py --dir problems/mmul --provider cerit --model qwen3.5 --max-iter 2 --max-depth 1
+python cli.py --dir problems/mmul --provider cerit --model qwen3.5 --path-budget 2 --max-depth 1
 ```
 
 ## Web UI
@@ -53,7 +59,7 @@ A visual dashboard for tracking, controlling, and inspecting optimization runs i
 
 ```bash
 # Terminal 1: Backend API
-python server.py                    # http://localhost:8003
+python server.py                    # binds 0.0.0.0:8003 — see Security model
 
 # Terminal 2: Frontend
 cd frontend && npm install && npm run dev   # http://localhost:5003
@@ -63,7 +69,7 @@ Features: tree visualization of optimization branches, live log streaming, llm o
 
 ## Security model
 
-CACAO is a research tool intended for use within a **trusted private network**. The HTTP API (`server.py`) is unauthenticated — anyone who can reach port 8003 can create problems, run optimizations, and read or delete files inside `problems/`. The engine compiles and executes LLM-generated CUDA code under the server user's identity.
+CACAO is a research tool intended for use within a **trusted private network**. The HTTP API (`server.py`) is unauthenticated and binds `0.0.0.0` by default — anyone who can reach port 8003 can create problems, run optimizations, and read or delete files inside `problems/`. The engine compiles and executes LLM-generated CUDA code under the server user's identity. Pass `--host 127.0.0.1` (or `HOST=127.0.0.1`) to restrict it to the local machine.
 
 **Do not expose port 8003 to the public internet, and do not run CACAO on `problem.yaml` files from untrusted sources.** See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for the full discussion.
 
@@ -79,18 +85,19 @@ engine/master.py                    # Phase 1: analyze -> strategize -> dispatch
 engine/worker.py                    # Phase 2: per-branch optimization loop
     |-- nodes/plan.py               # LLM: detailed implementation plan
     |-- nodes/author.py             # LLM tool loop: kernel + driver regions, compile-checked
-    |     \-- nodes/implement.py    # LLM: write kernels.cu          (AGENTIC_STEPS=False only)
-    |     \-- nodes/configure.py    # LLM: fill framework.cpp regions (AGENTIC_STEPS=False only)
+    |-- nodes/implement.py          # LLM: write kernels.cu           (AGENTIC_STEPS=False only)
+    |-- nodes/configure.py          # LLM: fill framework.cpp regions (AGENTIC_STEPS=False only)
     |-- nodes/run.py                # subprocess: compile + run the KTT C++ driver
     |-- nodes/profile.py            # subprocess: run NCU profiler
     |-- nodes/propose.py            # LLM: analyze results, propose changes
     |-- nodes/decide.py             # LLM: continue / retry / branch / stop
 ```
 
-When every branch is done, the engine writes `output/final_results.json` — the best
-configuration and a per-branch summary — so both the CLI and the web UI produce it.
-`nodes/merge.py` rebuilds the same summary from what is already on disk and backs
-`--best`.
+When every branch is done, `engine/master.py` writes `output/final_results.json` — the
+best configuration and a per-branch summary — so both the CLI and the web UI produce it.
+`nodes/merge.py` owns that summary and the success verdict that goes with it; the CLI's
+normal path and `--best` both go through it, so they cannot disagree about whether a run
+succeeded.
 
 `author.py` runs the kernel and its KTT driver regions as one tool loop with an NVRTC
 compile check inside the step, so a compile error costs a retry rather than a whole
@@ -105,7 +112,7 @@ State is split into typed Pydantic models, one writer per file:
 |------|-------|---------|
 | `output/context.json` | `Context` | Shared problem data (written once) |
 | `output/branches/<name>/branch.json` | `BranchManifest` | Branch identity, control, results (worker-owned) |
-| `output/branches/<name>/branch_config.json` | `BranchConfig` | Settings the UI owns (`max_iter`); the worker only reads it |
+| `output/branches/<name>/branch_config.json` | `BranchConfig` | Settings the UI owns (`max_iter`); the server writes it, the worker only reads it |
 | `output/branches/<name>/iterN/state.json` | `IterState` | Per-iteration work products |
 
 Each iteration progresses: `planning -> implementing -> configuring -> running -> profiling -> proposing -> deciding -> decided`
@@ -119,7 +126,7 @@ Supports **Anthropic** (Claude), **OpenAI**, **Gemini** (Google), and **CERIT** 
 Provider selection, highest priority first:
 
 1. `--provider <name>` CLI flag
-2. `LLM_PROVIDER` value hardcoded in `config.py` (`None` by default — leave as-is to fall through)
+2. `LLM_PROVIDER` hardcoded in `llm/providers.py` (`None` by default — leave as-is to fall through). Assigning it on `config` does nothing; that is not where it is read.
 3. `LLM_PROVIDER` env var in `.env`
 4. Auto-detect from whichever API key is set in `.env`. When multiple are set, this order wins: **CERIT > Anthropic > OpenAI > Gemini**.
 
@@ -127,12 +134,12 @@ Provider selection, highest priority first:
 unrecognised `LLM_PROVIDER` warns and falls through to key detection rather than
 failing.
 
-The model is set via `--model`; otherwise the provider's default model is used (see `MODELS` in `config.py`).
+The model is set via `--model`; otherwise the provider's default model is used (see `MODELS` in `llm/providers.py`).
 
 ## Adding a Problem
 
 Create a directory under `problems/` with:
-- `problem.yaml` — GPU index, grid, reference, validation tolerance, and an optional `rules:` block constraining what a kernel may do
+- `problem.yaml` — GPU index, grid, reference, validation tolerance, and an optional `rules:` block constraining what a kernel may do. Its `text` rules go into every kernel-writing prompt; its `forbid` regexes are machine-checked only on the agentic authoring path
 - `inputs.yaml` — the I/O boundary (scalars, buffers, which buffers are validated); `inputs.hpp` is generated from it. See [docs/INPUTS_YAML_GUIDE.md](docs/INPUTS_YAML_GUIDE.md)
 - One reference: `ref_kernel.cu` (CUDA), `ref_cpu.c` (a C function linked into the driver), or `ref.py` (Python, e.g. a torch or numpy oracle)
 

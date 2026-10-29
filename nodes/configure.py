@@ -6,13 +6,12 @@ into the fixed skeleton via utils.framework.assemble_framework_cpp(). The iterat
 directory is staged for the compile step (kernels.cu + inputs.hpp beside framework.cpp).
 """
 
-import shutil
-
 import yaml
 
 from config import get_problem_dir
-from utils.problem import reference_spec
+from agentic.workspace import REGION_KEYS
 from models.regions import FrameworkRegions
+from utils.cases import stage_engine_files
 from utils.files import save_output, get_iter_dir
 from utils.framework import assemble_framework_cpp, resolve_cuda_include
 from utils.log import log
@@ -33,34 +32,10 @@ async def configure_node(state: WorkingState) -> WorkingState:
     if state.kernel_code:
         save_output(iter_dir, state.kernel_code, "kernels.cu")
 
-    # inputs.hpp must sit beside framework.cpp for its #include at compile time. It is
-    # generated from inputs.yaml once per run (utils.inputs.ensure_inputs_hpp), so its
-    # absence here is not something this iteration can recover from: the LLM does not own
-    # the file and cannot author it. Fail loudly rather than routing an impossible task to
-    # the fix loop.
-    problem_dir = get_problem_dir()
-    inputs_src = problem_dir / "inputs.hpp"
-    if not inputs_src.exists():
-        raise FileNotFoundError(
-            f"{inputs_src} not found — the problem's I/O boundary was never generated. "
-            "It comes from inputs.yaml at the start of a run; check that inputs.yaml exists."
-        )
-    inputs_hpp = inputs_src.read_text(encoding="utf-8")
-    shutil.copyfile(inputs_src, iter_dir / "inputs.hpp")
-
+    # inputs.hpp must sit beside framework.cpp for its #include at compile time, and the
+    # LLM does not own it — see utils.cases.stage_engine_files for why its absence raises.
     meta = yaml.safe_load(state.problem_yaml) if state.problem_yaml else {}
-    ref = reference_spec(meta)
-    ref_type = ref.type
-
-    if ref_type == "python":
-        ref_py = problem_dir / ref.file
-        if not ref_py.exists():
-            raise FileNotFoundError(
-                f"{ref_py} not found — python reference file required by problem.yaml"
-            )
-        shutil.copyfile(ref_py, iter_dir / "ref.py")
-        inputs_yaml = problem_dir / "inputs.yaml"
-        shutil.copyfile(inputs_yaml, iter_dir / "inputs.yaml")
+    inputs_hpp = stage_engine_files(get_problem_dir(), iter_dir, meta)
 
     # Build context
     ctx = build_prompt_context(
@@ -70,9 +45,6 @@ async def configure_node(state: WorkingState) -> WorkingState:
             {"name": "decision"},
             {"name": "feedback", "limit": 1},
             {"name": "proposal", "limit": 1},
-            # Was a hand-rolled 30-line tail of the carried run_output. History's
-            # formatter produces the same excerpt from the same data, and excerpts a
-            # compile failure from the end that actually holds the diagnosis.
             {"name": "run_output", "limit": 1},
         ],
     )
@@ -93,6 +65,11 @@ async def configure_node(state: WorkingState) -> WorkingState:
             "params": result.params,
             "launcher": result.launcher,
         }
+        # The same three files the agentic path commits. run_node re-assembles
+        # framework.cpp from them per case, so without these its regions would be empty
+        # and the driver would reference `kernel` without ever declaring it.
+        for filename, key in REGION_KEYS.items():
+            save_output(iter_dir, regions[key] or "", filename)
         framework_cpp = assemble_framework_cpp(meta, regions)
         log(
             f"Framework regions configured; framework.cpp assembled "

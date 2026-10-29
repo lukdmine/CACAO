@@ -1,29 +1,14 @@
-"""The agentic step loop.
+"""The agentic step loop: bind tools, call the model, run what it asks for, repeat
+until end_step or the budget runs out.
 
-Drives one step: bind the tools, call the model, execute what it asks for, repeat
-until it ends the step or the budget runs out.
-
-A turn that produces no tool call is not the end of the step. The model is told what
-went wrong and gets another turn, because the two ways a turn comes back empty need
-different corrections and neither of them means the provider cannot use tools:
-
-  * cut off at the output token cap — the model reasoned until it ran out of room and
-    never reached the call. It is told so, and told to stop planning in prose. A
-    thinking model given a "write the whole kernel" prompt does this often enough that
-    swallowing it silently cost a 23-hour run its tool loop after two consecutive hits.
-  * a stall — real prose, no call. One nudge, as before; repeating it turns a confused
-    model into a bill.
-
-When the corrections run out the step ends and the caller fails the iteration. Nothing
-degrades to a quieter path: a step that could not author its files is a fact the branch
-has to see, not one to paper over.
-
-Every tool call is appended to a trace file as it happens, with full arguments, so a
-live run can be replayed offline (see agentic/replay.py) rather than re-run.
+A turn with no tool call is corrected, not surrendered to — truncation and stalls get
+different nudges (see _TRUNCATION_NUDGES). Every call is appended to a trace file for
+offline replay (agentic/replay.py).
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from enum import Enum
@@ -38,6 +23,10 @@ from langchain_core.messages import (
 )
 
 from agentic.tools import SCHEMAS, Toolbox
+
+# One predicate, shared with the retry wrapper that reads the same replies: the two
+# copies drifted and Anthropic/Gemini truncations stopped being recognised on one side.
+from llm.tracked import finish_reason as _finish_reason, was_truncated as _was_truncated
 from utils.log import log
 
 # Sent once if the model stops calling tools without ending the step. A single nudge:
@@ -175,32 +164,6 @@ def _normalize_tool_calls(message: AIMessage) -> List[Dict[str, Any]]:
     return out
 
 
-def _finish_reason(message: AIMessage) -> str:
-    """Why the provider stopped generating, or "" when it did not say.
-
-    ``length`` is the one that matters: it separates a model that chose not to call a
-    tool from one that never got the chance. This loop read both as the former until a
-    run lost its tool loop to the difference.
-    """
-    metadata = getattr(message, "response_metadata", None) or {}
-    reason = metadata.get("finish_reason") or metadata.get("stop_reason") or ""
-    return str(reason)
-
-
-def _was_truncated(message: AIMessage, content: str) -> bool:
-    """Whether an empty-handed turn was cut off rather than declined.
-
-    An explicit ``length`` is the reliable signal. A reply with no content, no tool
-    call and no stated reason gets the same treatment: on the providers seen here it
-    is the same event with the metadata missing, and the correction — be shorter, call
-    a tool directly — is the right advice either way.
-    """
-    reason = _finish_reason(message)
-    if reason in ("length", "max_tokens", "MAX_TOKENS"):
-        return True
-    return not reason and not content.strip()
-
-
 async def run_agentic_step(
     llm,
     system_message: str,
@@ -221,14 +184,18 @@ async def run_agentic_step(
     ``truncation_retries`` is how many times a reply cut off at the token cap is
     corrected before the step gives up on the model reaching a tool call.
     """
+    # Opened before the bind: _Trace truncates the file, so returning above it would
+    # leave a resumed iteration holding the previous attempt's trace as if it were this
+    # one's, with no record that binding failed.
+    trace = _Trace(trace_path)
+    trace.write({"event": "start", "budget": budget})
+
     try:
         bound = llm.bind_tools(schemas if schemas is not None else SCHEMAS)
     except Exception as e:
         log(f"Provider does not support tool binding: {e}", "WARN")
+        trace.write({"event": "bind_unsupported", "error": str(e)})
         return StepResult(StepOutcome.BIND_UNSUPPORTED, error=str(e))
-
-    trace = _Trace(trace_path)
-    trace.write({"event": "start", "budget": budget})
 
     messages: List[Any] = [
         SystemMessage(content=system_message),
@@ -341,7 +308,13 @@ async def run_agentic_step(
                 continue
 
             result.tool_calls += 1
-            output = toolbox.dispatch(call["name"], call["args"])
+            # Off the event loop: check_compilation blocks on g++ and on in-process
+            # NVRTC compiles for tens of seconds, and the four branch coroutines share
+            # one loop — a synchronous call here stalls the other three, including the
+            # subprocess watchdogs whose clocks keep running regardless.
+            output = await asyncio.to_thread(
+                toolbox.dispatch, call["name"], call["args"]
+            )
             result.tools_used[call["name"]] = result.tools_used.get(call["name"], 0) + 1
             messages.append(ToolMessage(content=output, tool_call_id=call["id"]))
             trace.write(

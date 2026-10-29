@@ -30,8 +30,6 @@ interface AppState {
     // Run state
     runStatus: 'idle' | 'running' | 'completed' | 'error';
     tokenUsage: TokenUsage;
-    activeWorkers: number;
-    maxWorkers: number;
 
     // LLM info (from running/completed optimization)
     llmModel: string | null;
@@ -54,7 +52,7 @@ interface AppActions {
     setProblems: (problems: Problem[], llmModel?: string, llmProvider?: string) => void;
     setTreeFromAPI: (nodes: TreeNode[], llmModel?: string, llmProvider?: string, tokenUsage?: TokenUsage | null) => void;
     setRunStatus: (status: AppState['runStatus']) => void;
-    setConnected: () => void;
+    setConnected: (connected: boolean) => void;
     setAvailableModels: (models: ModelsResponse) => void;
     setSelectedProvider: (provider: string) => void;
     setSelectedModel: (model: string) => void;
@@ -70,8 +68,6 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
     selectedNodeId: null,
     runStatus: 'idle',
     tokenUsage: { api_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-    activeWorkers: 0,
-    maxWorkers: 4,
     llmModel: null,
     llmProvider: null,
     availableModels: null,
@@ -100,7 +96,9 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
         tokenUsage: tokenUsage ?? { api_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     }),
     setRunStatus: (status) => set({ runStatus: status }),
-    setConnected: () => set({ connected: true }),
+    // A successful response sets it true as a side effect; only the poll loops'
+    // catch blocks set it false, so a backend that dies mid-session is visible.
+    setConnected: (connected) => set({ connected }),
 
     // Model selection
     setAvailableModels: (models) => {
@@ -132,8 +130,11 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
 }));
 
 // Selector helpers
+// Field selectors, not the bare hook: zustand's default identity selector re-renders
+// every consumer on any set(), and this one is called at the App root.
 export const useSelectedNode = (): TreeNode | null => {
-    const { treeNodes, selectedNodeId } = useAppStore();
+    const treeNodes = useAppStore((s) => s.treeNodes);
+    const selectedNodeId = useAppStore((s) => s.selectedNodeId);
     if (!selectedNodeId) return null;
     return treeNodes.find((n) => n.id === selectedNodeId) ?? null;
 };

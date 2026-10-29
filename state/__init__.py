@@ -24,6 +24,7 @@ from state.types import (
 
 # --- Persistence ---
 from state.persistence import (
+    atomic_write_json,
     save_context,
     load_context_for_branch,
     save_branch_config,
@@ -41,6 +42,7 @@ from state.persistence import (
 from state.control import (
     read_control_signal,
     write_control_signal,
+    clear_control_signals,
     write_requeue,
     read_requeue,
     revert_branch_on_disk,
@@ -70,6 +72,7 @@ __all__ = [
     "WorkingState",
     "validate_transition",
     # Persistence
+    "atomic_write_json",
     "save_context",
     "load_context_for_branch",
     "save_branch_config",
@@ -84,6 +87,7 @@ __all__ = [
     # Control
     "read_control_signal",
     "write_control_signal",
+    "clear_control_signals",
     "write_requeue",
     "read_requeue",
     "revert_branch_on_disk",

@@ -6,16 +6,17 @@ iteration history with full kernel bodies, tuner output, NCU dumps, the best pre
 kernel. With tools, all of that is one call away, so the prompt carries only what
 cannot be derived — the contract, the strategy, the I/O boundary, and the rules.
 
-SYSTEM_OVERVIEW and NVRTC_RULES are imported rather than restated. They are the
-single source of truth for the execution model and the compile environment, and
+The execution model, the compile environment, the region contract and the launcher
+contract are imported rather than restated. They are the single source of truth, and
 prompts/_system_overview.py documents what per-prompt paraphrases cost last time.
 """
 
-from prompts._format import format_strategy
+from prompts._format import format_reference, format_strategy, inputs_hpp_block
 from prompts._launcher_reference import LAUNCHER_RULES
+from prompts._regions_reference import BASE_BLOCK_SIZE, PARAMETER_GROUPS
 from prompts._system_overview import SYSTEM_OVERVIEW, NVRTC_RULES
 
-_SYSTEM = """# Author the kernel and its tuning driver
+_FILES = """# Author the kernel and its tuning driver
 
 You write a CUDA kernel and the KTT driver regions that tune it, using tools. Work
 until the code compiles, then end the step.
@@ -35,10 +36,6 @@ until the code compiles, then end the step.
   ktt::KernelId kernel = tuner.CreateCompositeKernel("Flood", {defA, defB});
   tuner.SetArguments(defA, {in.heights, in.flooded, changedId});
   ```
-
-  The 4th `AddKernelDefinitionFromFile` argument is the BASE block size.
-  `ktt::DimensionVector()` is **(1,1,1)**, not "auto" — pass the real block size, or
-  scale it with `ModifierType::Local` modifiers in every dimension the block uses.
 - `region_params.cpp` — `AddParameter` / `AddConstraint` / `AddThreadModifier`.
 - `region_launcher.cpp` — the launch schedule; see the launcher contract below.
 
@@ -46,7 +43,9 @@ The engine splices the three regions into a fixed `main()`. You do not write
 includes, `main()`, validation, the searcher, or the tuning loop. In scope: `tuner`,
 `Inputs in` (use `in.<name>`), `ndRange`, `kernelFile`.
 
-## How to work
+"""
+
+_HOW_TO_WORK = """## How to work
 
 Open with a tool call, not a plan. Prose before the first call buys nothing, and a
 reply that spends its whole token allowance thinking gets cut off before the call
@@ -66,42 +65,43 @@ targeted `edit_file` is better than a rewrite.
    a parameter sits at the edge of its declared range, widen the range instead of
    restructuring the kernel.
 
-Every parameter macro the kernel uses must be declared in `region_params.cpp`, and
-every parameter named by an `AddConstraint` must share one parameter group — KTT
-drops a constraint split across groups silently.
-
 """
 
 _CLOSING = """Write the kernel and the three regions, get a passing
 `check_compilation()`, then `end_step`."""
 
+# A config_only step is entered with a kernel that already compiles and validates; the
+# task text says to keep it. Closing on "write the kernel" is the last thing the model
+# reads, and it rewrites the working implementation the scope existed to protect.
+_CLOSING_CONFIG_ONLY = """Update the three driver regions — leave `kernels.cu` as it
+is — get a passing `check_compilation()`, then `end_step`."""
+
 
 def build(ctx: dict) -> tuple[str, str]:
-    # LAUNCHER_RULES is the one block that cannot be dropped for brevity: the mistakes
-    # it prevents compile cleanly and surface only as validation failures, which cost a
-    # full iteration each to diagnose.
-    system = _SYSTEM + SYSTEM_OVERVIEW + NVRTC_RULES + LAUNCHER_RULES
+    # LAUNCHER_RULES prevents the mistakes that compile cleanly and fail only validation.
+    system = (
+        _FILES
+        + BASE_BLOCK_SIZE
+        + "\n"
+        + _HOW_TO_WORK
+        + PARAMETER_GROUPS
+        + "\n"
+        + SYSTEM_OVERVIEW
+        + NVRTC_RULES
+        + LAUNCHER_RULES
+    )
 
     parts = []
 
-    # Rules first: they constrain everything below, including anything a past
-    # iteration or a proposal asks for.
+    # Rules first: they constrain everything below.
     if ctx.get("rules_block"):
         parts.append(ctx["rules_block"])
 
-    # Carries the base grid, the validation tolerance, and the detected GPU (compute
-    # capability, SM count, shared memory per block) that the worker enriches it with.
-    # Occupancy and shared-memory budgeting are guesswork without it, and it is small.
     if ctx.get("problem_yaml"):
         parts.append(f"## Problem (problem.yaml):\n```yaml\n{ctx['problem_yaml']}\n```")
 
     if ctx.get("inputs_hpp"):
-        parts.append(
-            "## I/O boundary (inputs.hpp) — compiled into the host driver, NOT into "
-            "your kernel. NVRTC never sees this file, so nothing here is visible to a "
-            "kernel unless it is a `-D` macro or an argument.\n"
-            f"```cpp\n{ctx['inputs_hpp']}\n```"
-        )
+        parts.append(inputs_hpp_block(ctx["inputs_hpp"]))
     if ctx.get("cases_block"):
         parts.append(ctx["cases_block"])
 
@@ -114,28 +114,17 @@ def build(ctx: dict) -> tuple[str, str]:
     if ctx.get("plan"):
         parts.append(f"## Plan:\n{ctx['plan']}")
 
-    # A sub-branch's inheritance: what its parent had reached when it split. Present
-    # only on the first iteration of a spawned branch, which would otherwise start from
-    # the strategy text alone and rediscover the parent's ground.
     if ctx.get("parent_context"):
         parts.append(ctx["parent_context"])
 
-    # Reference source only on the first iteration: afterwards the branch's own kernel
-    # is the thing being changed, and it is one read_file away.
     if ctx.get("ref_kernel"):
-        parts.append(
-            f"## Reference implementation:\n```{ctx.get('ref_language', 'cuda')}\n"
-            f"{ctx['ref_kernel']}\n```"
-        )
+        parts.append(format_reference(ctx))
 
     if ctx.get("iteration_summaries"):
         parts.append(ctx["iteration_summaries"])
     if ctx.get("branch_index"):
         parts.append(ctx["branch_index"])
 
-    # The previous iteration's analysis: what was measured, what decide concluded went
-    # wrong, and the fix it asked for. Without this the step re-derives the problem from
-    # raw output and tends to repeat whatever it did last time.
     if ctx.get("iteration_history"):
         parts.append(ctx["iteration_history"])
 
@@ -147,5 +136,9 @@ def build(ctx: dict) -> tuple[str, str]:
     if ctx.get("user_messages"):
         parts.append(ctx["user_messages"])
 
-    parts.append(_CLOSING)
+    parts.append(
+        _CLOSING_CONFIG_ONLY
+        if ctx.get("authoring_scope") == "config_only"
+        else _CLOSING
+    )
     return system, "\n\n".join(parts)

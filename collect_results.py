@@ -13,7 +13,7 @@ For each `problems/<base_problem>_<model_suffix>/` directory the script extracts
     iters_to_best_path   iterations consumed from root of the branch tree
                          to the iter that produced the best result
     wall_clock_min       elapsed minutes between first and last log entry
-                         in run.log (handles single midnight wrap)
+                         in run.log (counts every midnight crossing)
     prompt_tokens        prompt token count from token_usage.json
     completion_tokens    completion token count from token_usage.json
     tokens_total         prompt + completion tokens
@@ -37,6 +37,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import yaml
+
+from utils.cases import primary_case_dir
 
 SCRIPT_DIR = Path(__file__).parent
 PROBLEMS_DIR = SCRIPT_DIR / "problems"
@@ -85,9 +87,9 @@ def load_json(path: Path) -> Optional[dict]:
         return None
 
 
-def problem_scalars(base_problem_dir: Path) -> dict:
+def problem_scalars(problem_dir: Path) -> dict:
     """The problem's scalar values, by name — inputs.yaml ``args`` with kind: scalar."""
-    spec = load_yaml(base_problem_dir / "inputs.yaml")
+    spec = load_yaml(problem_dir / "inputs.yaml")
     return {
         arg["name"]: arg["value"]
         for arg in spec.get("args", [])
@@ -163,12 +165,16 @@ def iters_to_best_path(output_dir: Path, best_branch_dir: Path, best_iter: int) 
     if pic is not None:
         return pic + best_iter
 
+    # Imported here rather than at module scope: utils.files pulls in config and the
+    # whole LLM stack, which this script otherwise does not need.
+    from utils.files import get_parent_branch_dir
+
     # legacy fallback: walk the chain manually
     total = best_iter
     cur = best_branch_dir
     while True:
-        parent_dir = cur.parent.parent
-        if cur.parent.name != "branches" or not (parent_dir / "branch.json").exists():
+        parent_dir = get_parent_branch_dir(cur)
+        if parent_dir is None:
             break
         # count fully-completed iters in the parent before we branched off.
         # without an explicit branch-point field, approximate as the number of
@@ -183,7 +189,7 @@ def detect_gpu(
     best_branch_dir: Path, best_iter: int, output_dir: Path
 ) -> Optional[str]:
     """Authoritative: KTT's reported device in the best iter's results.json."""
-    iter_dir = best_branch_dir / f"iter{best_iter}"
+    iter_dir = primary_case_dir(output_dir.parent, best_branch_dir / f"iter{best_iter}")
     rj = load_json(iter_dir / "results.json")
     if rj:
         device = (rj.get("Metadata") or {}).get("Device")
@@ -204,11 +210,17 @@ def detect_gpu(
 
 
 def wall_clock_minutes(output_dir: Path) -> Optional[float]:
-    """Elapsed minutes between first and last [HH:MM:SS] entry in run.log."""
+    """Elapsed minutes between first and last [HH:MM:SS] entry in run.log.
+
+    run.log carries no date, so a timestamp going backwards is a midnight crossing.
+    Count every one: 23-hour runs happen, and --resume appends to the same log, so a
+    multi-day log is the normal shape rather than the exception.
+    """
     log = output_dir / "run.log"
     if not log.exists():
         return None
-    first = last = None
+    first = prev = None
+    wraps = 0
     with log.open(encoding="utf-8") as f:
         for line in f:
             m = TS_RE.match(line)
@@ -217,13 +229,12 @@ def wall_clock_minutes(output_dir: Path) -> Optional[float]:
             t = int(m[1]) * 3600 + int(m[2]) * 60 + int(m[3])
             if first is None:
                 first = t
-            last = t
-    if first is None or last is None or first == last:
+            elif t < prev:
+                wraps += 1
+            prev = t
+    if first is None or (wraps == 0 and first == prev):
         return None
-    delta = last - first
-    if delta < 0:
-        delta += 24 * 3600  # midnight wrap
-    return delta / 60.0
+    return (wraps * 24 * 3600 + prev - first) / 60.0
 
 
 def correctness_rate(output_dir: Path) -> tuple[float, int, int]:
@@ -254,8 +265,11 @@ def _collect_run(
     experiment: Optional[str],
 ) -> Optional[dict]:
     """Extract one result row from a single problem run's output directory."""
-    base_dir = PROBLEMS_DIR / base_problem
-    scalars = problem_scalars(base_dir)
+    # The timing being divided is this run's, so the work count has to be this run's
+    # too: a per-model clone carries its own inputs.yaml and may have been resized.
+    scalars = problem_scalars(output_dir.parent) or problem_scalars(
+        PROBLEMS_DIR / base_problem
+    )
     metric_unit, work_fn = METRICS[base_problem]
     size_fn = INPUT_SIZE_FMT[base_problem]
     try:

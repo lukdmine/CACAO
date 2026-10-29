@@ -1,10 +1,8 @@
 """Compile a generated framework.cpp into a runnable KTT driver binary.
 
-Phase 2 of framework-file autotuning. Kept separate from run.py so it can be
-tested independently and reused once configure.py emits framework.cpp per
-iteration. Compile/link flags were locked in Phase 0:
-the driver is host-compiled and linked against libktt.so; libcuda/libnvrtc come
-transitively, and no CUDA host includes are needed (NVRTC uses them at runtime).
+The driver is host-compiled and linked against libktt.so; libcuda/libnvrtc come
+transitively, and no CUDA host includes are needed because NVRTC resolves them at
+runtime.
 """
 from __future__ import annotations
 
@@ -12,6 +10,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from utils.cuda_env import get_env
 from utils.problem import load_problem_yaml, reference_spec
 
 # Repo root = parent of utils/ (libktt.so symlink + KTT/Source live here).
@@ -24,6 +23,32 @@ class BuildResult:
     binary: Path | None
     stderr: str
     cmd: list[str]
+
+
+def cxx_compiler() -> str:
+    """The compiler every host compile here runs.
+
+    Resolved through cuda_env so a ``gpp:`` entry in cuda_env.yaml actually reaches the
+    build — an HPC node whose default g++ is too old for -std=c++17 is exactly the case
+    that key exists for. "g++" when nothing resolves, so the diagnostics stay familiar.
+    """
+    gpp = get_env().gpp
+    return str(gpp) if gpp else "g++"
+
+
+def _missing_compiler(cmd: list[str]) -> BuildResult:
+    """A failed BuildResult for a compiler that is not on disk.
+
+    Callers are documented to read ``ok``/``stderr``; letting FileNotFoundError out
+    instead kills the branch with a traceback the LLM feedback loop never sees.
+    """
+    return BuildResult(
+        False,
+        None,
+        f"compiler not found: {cmd[0]}\n"
+        "Install g++, or set 'gpp' in cuda_env.yaml to a compiler that exists.",
+        cmd,
+    )
 
 
 def object_command(
@@ -40,7 +65,7 @@ def object_command(
     builds .c as C++; the contract requires ``extern "C"``.
     """
     return [
-        "g++",
+        cxx_compiler(),
         "-std=c++17",
         "-m64",
         "-O3",
@@ -65,7 +90,7 @@ def compile_command(
     linked into the driver.
     """
     return [
-        "g++",
+        cxx_compiler(),
         "-std=c++17",
         "-m64",
         "-O3",
@@ -130,7 +155,7 @@ def compile_dump_inputs(
     pulls in transitively. Run the binary with cwd = the desired output dir.
     """
     cmd = [
-        "g++",
+        cxx_compiler(),
         "-std=c++17",
         "-m64",
         "-O3",
@@ -146,6 +171,8 @@ def compile_dump_inputs(
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return BuildResult(False, None, f"compile timed out after {timeout:.0f}s", cmd)
+    except FileNotFoundError:
+        return _missing_compiler(cmd)
     ok = proc.returncode == 0 and out_binary.exists()
     return BuildResult(ok, out_binary if ok else None, proc.stderr, cmd)
 
@@ -160,8 +187,9 @@ def compile_framework(
     """Compile ``<iter_dir>/framework.cpp`` -> ``<iter_dir>/driver``.
 
     ``inputs.hpp`` is resolved relative to framework.cpp (same directory), so it
-    must sit alongside. On failure, ``stderr`` holds the g++ diagnostics for the
-    LLM feedback loop; ``ok`` is False and ``binary`` is None.
+    must sit alongside. On failure, ``stderr`` holds the compiler diagnostics for the
+    LLM feedback loop; ``ok`` is False and ``binary`` is None. Nothing raises — a
+    missing compiler comes back as a failed BuildResult like any other build error.
     """
     iter_dir = Path(iter_dir)
     framework_cpp = iter_dir / "framework.cpp"
@@ -177,9 +205,14 @@ def compile_framework(
         obj = iter_dir / f"{src.stem}.o"
         obj_cmd = object_command(src, obj, repo_root, extra_flags)
         try:
-            proc = subprocess.run(obj_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+            proc = subprocess.run(
+                obj_cmd, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=timeout,
+            )
         except subprocess.TimeoutExpired:
             return BuildResult(False, None, f"compile timed out after {timeout:.0f}s", obj_cmd)
+        except FileNotFoundError:
+            return _missing_compiler(obj_cmd)
         if proc.returncode != 0 or not obj.exists():
             return BuildResult(False, None, proc.stderr, obj_cmd)
         extra_objects.append(obj)
@@ -189,6 +222,8 @@ def compile_framework(
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired:
         return BuildResult(False, None, f"compile timed out after {timeout:.0f}s", cmd)
+    except FileNotFoundError:
+        return _missing_compiler(cmd)
 
     ok = proc.returncode == 0 and out_binary.exists()
     return BuildResult(ok, out_binary if ok else None, proc.stderr, cmd)

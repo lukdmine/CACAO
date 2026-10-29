@@ -6,15 +6,44 @@ import re
 
 from utils.log import log
 
-from llm.retry import _compute_retry_wait, _format_error, _is_transient_error
+from llm.retry import (
+    _backoff_wait,
+    _compute_retry_wait,
+    _format_error,
+    _is_transient_error,
+)
 from llm.tokens import global_tracker
 
+# Appended to the conversation when a reply dies at the token cap with no content: the
+# model reasoned past its budget without answering. Changing the prompt, not just
+# re-rolling it, is what makes the retry meaningfully different.
 TRUNCATION_RETRY_NUDGE = (
     "Your previous attempt consumed the entire token budget on internal reasoning "
     "and produced no output. This time, keep deliberation brief: pick a "
     "straightforward approach, commit to it, and emit the final answer directly. "
     "A complete simple answer beats an unfinished sophisticated one."
 )
+
+
+def finish_reason(response) -> str:
+    """Why the provider stopped generating, or "" when it did not say."""
+    metadata = getattr(response, "response_metadata", None) or {}
+    reason = metadata.get("finish_reason") or metadata.get("stop_reason") or ""
+    return str(reason)
+
+
+def was_truncated(response, content: str) -> bool:
+    """Whether an empty-handed reply was cut off rather than declined.
+
+    One predicate for both call sites here and in agentic.loop: OpenAI says length,
+    Anthropic max_tokens, Gemini MAX_TOKENS, and a copy that knew only one of them
+    re-sent the identical prompt instead of correcting it. No content and no stated
+    reason is the same event with the metadata missing.
+    """
+    reason = finish_reason(response)
+    if reason.lower() in ("length", "max_tokens"):
+        return True
+    return not reason and not content.strip()
 
 
 class TrackedLLM:
@@ -66,14 +95,15 @@ class TrackedLLM:
 
                     additional = getattr(response, "additional_kwargs", None) or {}
                     metadata = getattr(response, "response_metadata", None) or {}
-                    finish_reason = metadata.get("finish_reason", "N/A")
-                    completion_tokens = metadata.get("token_usage", {}).get(
-                        "completion_tokens", "N/A"
-                    )
+                    reason = finish_reason(response) or "N/A"
+                    usage = getattr(response, "usage_metadata", None) or {}
+                    completion_tokens = usage.get("output_tokens") or metadata.get(
+                        "token_usage", {}
+                    ).get("completion_tokens", "N/A")
                     log(
                         f"Empty content response — reasoning_content: {bool(reasoning)}, "
                         f"additional_kwargs keys: {list(additional.keys())}, "
-                        f"finish_reason: {finish_reason}, "
+                        f"finish_reason: {reason}, "
                         f"tokens: {completion_tokens}",
                         "WARN",
                     )
@@ -83,12 +113,7 @@ class TrackedLLM:
                     if self._tools_bound:
                         return response
 
-                    if finish_reason == "length":
-                        # Thinking models (e.g. glm-5.2 behind a ~48k server cap) can
-                        # spend the whole budget on reasoning and emit zero content.
-                        # Retrying the identical prompt re-runs the same risk, so
-                        # append an explicit brevity instruction — the retry prompt
-                        # differs, steering the model to answer.
+                    if was_truncated(response, content):
                         log(
                             "Response hit the token cap with no usable content "
                             "(reasoning consumed the budget). Retrying with a "
@@ -119,7 +144,7 @@ class TrackedLLM:
                             "ERROR",
                         )
                         return response
-                    wait_time = base_wait * (2 ** (retries - 1))
+                    wait_time = _backoff_wait(retries, base_wait)
                     log(
                         f"Retrying {retries}/{max_retries} in {wait_time:.1f}s...",
                         "WARN",
@@ -151,16 +176,23 @@ class TrackedLLM:
                 await asyncio.sleep(wait_time)
 
     def with_structured_output(self, schema):
-        structured_llm = self._llm.with_structured_output(schema)
+        """Bind a schema, keeping the raw reply so its tokens can still be counted.
+
+        include_raw is what makes the accounting work: without it the call returns the
+        parsed pydantic model, which carries no usage metadata, and every decide,
+        strategize and configure call was recorded as an API call with zero tokens.
+        """
+        structured_llm = self._llm.with_structured_output(schema, include_raw=True)
         return TrackedStructuredLLM(structured_llm, self._llm, schema)
 
     def bind_tools(self, tools, **kwargs):
-        """Bind tools, keeping retry and token tracking around the bound model.
+        """Bind tools, keeping transient-error retry and token tracking around the
+        bound model; the empty-content retry is dropped, since the agentic loop has its
+        own truncation policy.
 
-        Raises whatever the provider raises when it has no tool support — the agentic
-        loop treats that as a signal to fall back rather than something to retry.
-
-        Keeps transient-error retry and token tracking, drops the empty-content retry.
+        A provider that cannot take the schemas raises here. The loop reports that as
+        StepOutcome.BIND_UNSUPPORTED and fails the iteration — nothing falls back to
+        the single-shot nodes.
         """
         return TrackedLLM(self._llm.bind_tools(tools, **kwargs), tools_bound=True)
 
@@ -180,8 +212,7 @@ class TrackedStructuredLLM:
             try:
                 response = await self._structured_llm.ainvoke(*args, **kwargs)
                 global_tracker.api_calls += 1
-                global_tracker.record_usage(response)
-                return response
+                return self._unwrap(response)
             except Exception as e:
                 if not _is_transient_error(e):
                     will_fallback = bool(self._base_llm and self._schema)
@@ -208,6 +239,28 @@ class TrackedStructuredLLM:
                     "WARN",
                 )
                 await asyncio.sleep(wait_time)
+
+    @staticmethod
+    def _unwrap(response):
+        """The validated schema instance, with the raw reply's tokens recorded.
+
+        include_raw=True hands back {"raw", "parsed", "parsing_error"}; a wrapper built
+        without it returns the model itself, which is what the callers see either way.
+        A parsing error is raised rather than returned as None, so it still reaches the
+        raw-JSON fallback below.
+        """
+        if not isinstance(response, dict) or "parsed" not in response:
+            global_tracker.record_usage(response)
+            return response
+
+        global_tracker.record_usage(response.get("raw"))
+        parsed = response.get("parsed")
+        if parsed is not None:
+            return parsed
+        error = response.get("parsing_error")
+        if isinstance(error, BaseException):
+            raise error
+        raise ValueError(f"structured output could not be parsed: {error}")
 
     async def _try_raw_fallback_async(self, *args, **kwargs):
         """Async variant of _try_raw_fallback for thinking models."""

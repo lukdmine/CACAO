@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 class ToolError(Exception):
@@ -90,9 +90,6 @@ class Workspace:
 
     # -- queries -----------------------------------------------------------
 
-    def path(self, name: str) -> Path:
-        return self.staging / name
-
     def exists(self, name: str) -> bool:
         return (self.staging / name).exists()
 
@@ -101,9 +98,6 @@ class Workspace:
 
     def complete(self) -> bool:
         return not self.missing()
-
-    def snapshot(self) -> Dict[str, str]:
-        return {n: self.read(n) for n in ALL_FILES if self.exists(n)}
 
     def regions(self) -> Dict[str, str]:
         """Region bodies keyed as assemble_framework_cpp expects."""

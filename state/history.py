@@ -14,7 +14,7 @@ from typing import Optional, Set
 from utils.log import log
 from utils.results import (
     FAILURE_SUMMARY_HEADING as _FAILURE_SUMMARY_HEADING,
-    get_results_summary,
+    iteration_results_summary,
     load_reference_time,
 )
 
@@ -51,10 +51,10 @@ def _load_past_iter_states(
     """
     Load completed iteration states (excluding the current in-progress one).
 
-    Also enriches each state with ``results_summary`` from
-    ``iter{N}/results.json`` if not already present.
+    Also enriches each state with ``results_summary`` from that iteration's
+    results.json if not already present.
     """
-    from config import get_output_dir
+    from config import get_output_dir, get_problem_dir
 
     branch_path = Path(branch_path)
     states = []
@@ -70,15 +70,22 @@ def _load_past_iter_states(
             log(f"Skipping corrupt state iter{n}: {e}", "WARN")
             continue
 
-        # Enrich with results_summary if missing
+        # Enrich with results_summary if missing. iteration_results_summary resolves the
+        # primary case, so a multi-case iteration (which keeps no results.json at its root)
+        # is not rendered as a failure.
         if not snap.get("results_summary"):
-            results_path = branch_path / f"iter{n}" / "results.json"
-            if results_path.exists():
-                ref_time = load_reference_time(get_output_dir())
-                snap["results_summary"] = get_results_summary(results_path, ref_time)
+            ref_time = load_reference_time(get_output_dir())
+            summary = iteration_results_summary(
+                get_problem_dir(), branch_path / f"iter{n}", ref_time
+            )
+            if summary["num_total"]:
+                snap["results_summary"] = summary
 
         states.append(snap)
 
+    # states[-0:] is the whole list, so an explicit 0 has to short-circuit.
+    if max_iters is not None and max_iters <= 0:
+        return []
     if max_iters is not None and len(states) > max_iters:
         states = states[-max_iters:]
 
@@ -94,34 +101,34 @@ def _preview(text: str, max_lines: int) -> str:
     return preview
 
 
-def output_excerpt(text: str, max_lines: int) -> tuple[str, str]:
-    """Most diagnostic slice of driver output, plus an honest label for it.
+# Output that leads with its diagnosis instead of building up to it. Tailing one of these
+# drops the header and the root cause — the model cannot then tell a compile failure from
+# a tuning failure, and gets g++'s cascade instead of its first error.
+_HEAD_EXCERPT_PREFIXES = (
+    "[COMPILE ERROR]",
+    "[AUTHORING FAILED]",
+    _FAILURE_SUMMARY_HEADING,
+)
 
-    Which end matters depends on what failed. Tuner output is back-loaded: the run
-    progresses and the interesting part (the failure, the summary) is at the end. Host
-    compile output is the opposite — g++ leads with the root-cause error and follows with
-    cascading repeats and template "note:" spam. Tailing it drops the [COMPILE ERROR]
-    header, so the model cannot even tell a compile failure from a tuning failure, and
-    hands it the cascade instead of the first error.
+
+def output_excerpt(text: str, max_lines: int) -> tuple[str, str]:
+    """Most diagnostic slice of driver output, plus an honest label.
 
     Returns (excerpt, label) so callers cannot describe a head excerpt as a tail.
     """
     lines = text.strip().split("\n")
     if len(lines) <= max_lines:
         return "\n".join(lines), f"{len(lines)} lines"
-    # Both of these lead with what matters — the [COMPILE ERROR] header and root-cause
-    # error, or the failure summary's header and most frequent cause — so take the head.
-    if text.startswith("[COMPILE ERROR]") or text.startswith(_FAILURE_SUMMARY_HEADING):
+    # These lead with what matters, so take the head; tuner output is the opposite, it
+    # builds up to its failure and gets tailed.
+    if text.startswith(_HEAD_EXCERPT_PREFIXES):
         return "\n".join(lines[:max_lines]), f"first {max_lines} lines"
     return "\n".join(lines[-max_lines:]), f"last {max_lines} lines"
 
 
-# Raw driver output is unbounded, so it gets an excerpt. A summarize_failures() summary
-# is not: it holds one line plus at most four context lines per DISTINCT diagnostic, and
-# the largest seen across recorded runs is 36 lines. Excerpting it at 30 clipped a
-# quarter of real summaries — the worst dropped 5 of 31 diagnostics — which re-creates in
-# miniature the problem deduplication was added to solve: a retry that never sees one of
-# the causes it is supposed to fix. Cap it high enough to be a runaway guard, not a filter.
+# Raw driver output is unbounded and gets a 30-line excerpt. A summarize_failures()
+# summary is already deduplicated, so 200 is a runaway guard, not a filter — clipping it
+# drops distinct diagnostics a retry needs.
 _RUN_OUTPUT_LINES = 30
 _SUMMARY_LINES = 200
 
@@ -219,19 +226,10 @@ def format_iteration_history(
     include,
     max_iters: Optional[int] = None,
 ) -> str:
-    """
-    Format past iteration history for LLM context.
+    """Past iteration history as markdown, or ``""`` if there is none.
 
-    Args:
-        branch_path: Path to the branch directory.
-        current_iter: Current iteration number.
-        include:      Fields to include. Either:
-                      - list of dicts ``[{"name": "field", "limit": N}, ...]``
-                      - iterable of strings ``{"field1", "field2"}`` (all default depth)
-        max_iters:    Global max past iterations (``None`` = config default).
-
-    Returns:
-        Formatted markdown string, or ``""`` if no history.
+    ``include`` takes the shapes _parse_field_depths accepts; ``max_iters`` defaults to
+    config.HISTORY_ITERS.
     """
     from config import HISTORY_ITERS
 
@@ -401,35 +399,18 @@ def format_existing_branches(output_dir: str) -> str:
     if not output_dir:
         return ""
 
-    branches_root = Path(output_dir) / "branches"
-    if not branches_root.is_dir():
-        return ""
+    from state.crossbranch import iter_branches
 
     lines = []
-
-    def _scan(bdir: Path, depth: int = 0):
-        for d in sorted(bdir.iterdir()):
-            if not d.is_dir():
-                continue
-            bfile = d / "branch.json"
-            if not bfile.exists():
-                continue
-            try:
-                with bfile.open(encoding="utf-8") as f:
-                    bm = json.load(f)
-                s = bm.get("strategy", {})
-                name = s.get("name", d.name)
-                desc = s.get("description", "")
-                indent = "  " * depth
-                prefix = "├─ " if depth > 0 else ""
-                lines.append(f"{indent}{prefix}{name} — {desc}")
-            except (json.JSONDecodeError, OSError):
-                continue
-            sub = d / "branches"
-            if sub.is_dir():
-                _scan(sub, depth + 1)
-
-    _scan(branches_root)
+    for qualified_name, d, bm in iter_branches(output_dir):
+        s = bm.get("strategy") or {}
+        name = s.get("name", d.name)
+        desc = s.get("description", "")
+        # iter_branches joins nested names with '/', so the depth is the separator count.
+        depth = qualified_name.count("/")
+        indent = "  " * depth
+        prefix = "├─ " if depth > 0 else ""
+        lines.append(f"{indent}{prefix}{name} — {desc}")
 
     if not lines:
         return ""
@@ -443,28 +424,30 @@ def existing_branch_names(output_dir: str) -> set:
     recursively). Used by the decide node to drop duplicate sub-strategies
     before they spawn a second identical branch.
     """
+    from state.crossbranch import iter_branches
+
     names: set = set()
     if not output_dir:
         return names
 
-    def _scan(bdir: Path):
-        if not bdir.is_dir():
+    # Directory names come from the filesystem, not from iter_branches: a branch whose
+    # branch.json will not parse is skipped there (and its subtree with it), and a name
+    # missing from this set is a name decide is free to spawn a second time.
+    def _dirs(d: Path):
+        if not d.is_dir():
             return
-        for d in sorted(bdir.iterdir()):
-            if not d.is_dir() or not (d / "branch.json").exists():
+        for child in d.iterdir():
+            if not child.is_dir():
                 continue
-            names.add(d.name)
-            try:
-                with (d / "branch.json").open(encoding="utf-8") as f:
-                    bm = json.load(f)
-                strategy_name = (bm.get("strategy") or {}).get("name")
-                if strategy_name:
-                    names.add(strategy_name)
-            except (json.JSONDecodeError, OSError):
-                pass
-            _scan(d / "branches")
+            names.add(child.name)
+            _dirs(child / "branches")
 
-    _scan(Path(output_dir) / "branches")
+    _dirs(Path(output_dir) / "branches")
+
+    for _, _d, bm in iter_branches(output_dir):
+        strategy_name = (bm.get("strategy") or {}).get("name")
+        if strategy_name:
+            names.add(strategy_name)
     return names
 
 

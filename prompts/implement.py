@@ -1,7 +1,7 @@
 """Implement prompt — writes optimized CUDA kernel."""
 
-from prompts._format import format_strategy
-from prompts._system_overview import SYSTEM_OVERVIEW, NVRTC_RULES
+from prompts._format import format_reference, format_strategy, inputs_hpp_block
+from prompts._system_overview import SYSTEM_OVERVIEW, NVRTC_RULES, closing_reminders
 from prompts._tensor_core_reference import TENSOR_CORE_REFERENCE
 
 
@@ -95,27 +95,20 @@ extern "C" __global__ void kernel(
     )
 
     parts = []
+    # Rules first: they constrain everything below.
+    if ctx.get("rules_block"):
+        parts.append(ctx["rules_block"])
     if ctx.get("problem_yaml"):
         parts.append(f"## Problem Definition:\n```yaml\n{ctx['problem_yaml']}\n```")
     if ctx.get("inputs_hpp"):
-        parts.append(
-            "## Inputs (inputs.hpp) — the input/output buffers your kernels consume/produce "
-            "(you'll bind kernel args to these by name next).\n"
-            "**This file is compiled into the host driver, NOT into your kernel.** NVRTC "
-            "compiles kernels.cu on its own, so nothing declared here — including every "
-            "`inline constexpr` — is visible to a kernel unless it is a `-D` macro or an "
-            "argument. See the scalar contract below.\n```cpp\n"
-            f"{ctx['inputs_hpp']}\n```"
-        )
+        parts.append(inputs_hpp_block(ctx["inputs_hpp"]))
     if ctx.get("cases_block"):
         parts.append(ctx["cases_block"])
 
     if ctx.get("scalar_contract"):
         parts.append(ctx["scalar_contract"])
     if ctx.get("ref_kernel"):
-        parts.append(
-            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
-        )
+        parts.append(format_reference(ctx))
     if ctx.get("plan"):
         parts.append(f"## Optimization Plan:\n{ctx['plan']}")
     strategy_text = format_strategy(ctx.get("strategy"))
@@ -142,11 +135,9 @@ extern "C" __global__ void kernel(
         parts.append(ctx["user_messages"])
     parts.append(
         "Write the optimized CUDA kernel. Output ONLY the kernel code, no markdown.\n\n"
-        "CRITICAL REMINDERS — verify before writing code:\n"
-        "1. Static `__shared__ arr[MACRO_SIZE]` unless configure binds AddArgumentLocal.\n"
-        "2. No glibc-reaching headers (`<stdint.h>`, `<cstdint>`, `<cuda.h>`, `<stdio.h>`).\n"
-        '3. `extern "C"` on every kernel; signature is your design, macros stay out of it.\n'
-        "4. Every global and shared memory access must be provably in-bounds."
+        + closing_reminders(
+            '`extern "C"` on every kernel; signature is your design, macros stay out of it.'
+        )
     )
 
     return system, "\n\n".join(parts)

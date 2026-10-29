@@ -72,7 +72,11 @@ async def test_unbound_wrapper_still_retries_an_empty_reply(no_sleep):
     assert response.content == ""
     # Initial call plus max_retries.
     assert provider.calls == 6
-    assert sum(no_sleep) == pytest.approx(2 + 4 + 8 + 16 + 32)
+    # Exponential from base_wait=2, plus the sub-second jitter llm.retry._backoff_wait
+    # adds so four correlated branches do not retry in lockstep.
+    assert len(no_sleep) == 5
+    for slept, expected in zip(no_sleep, (2, 4, 8, 16, 32)):
+        assert expected <= slept < expected + 1
 
 
 async def test_bind_tools_marks_the_wrapper(no_sleep):

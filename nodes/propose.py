@@ -1,8 +1,8 @@
 """Propose node - analyzes results and proposes optimizations before the decide node."""
 
-from config import get_output_dir, MAX_BRANCH_DEPTH
+from config import get_output_dir, get_problem_dir, MAX_BRANCH_DEPTH
 from utils.files import get_iter_dir
-from utils.results import get_results_summary, load_reference_time
+from utils.results import iteration_results_summary, load_reference_time
 from state.types import WorkingState
 from state import format_existing_branches
 from nodes._llm_helper import (
@@ -28,8 +28,11 @@ async def propose_node(state: WorkingState) -> WorkingState:
         return state
 
     iter_dir = get_iter_dir(state)
-    ref_time = load_reference_time(get_output_dir())
-    summary = get_results_summary(iter_dir / "results.json", ref_time)
+    # run_node already aggregated every case into results_summary; the disk read is
+    # the primary case alone and only covers an iteration whose state lost it.
+    summary = state.results_summary or iteration_results_summary(
+        get_problem_dir(), iter_dir, load_reference_time(get_output_dir())
+    )
     tuner_tail = get_tuner_tail(state.run_output)
 
     ctx = build_prompt_context(

@@ -6,7 +6,6 @@ Run ``python cli.py --help`` for the full list of options.
 """
 
 import argparse
-import shutil
 import sys
 from pathlib import Path
 import yaml
@@ -43,6 +42,25 @@ def log_section(title: str):
     print("\n" + "=" * 60, flush=True)
     print(f"  {title}")
     print("=" * 60, flush=True)
+
+
+def _report_final(merge_result: dict) -> int:
+    """Print the verdict and return the process exit code.
+
+    The verdict is ``merge_node``'s. cli.py used to re-derive it and demanded status
+    exactly "success", so a run whose fastest branch was a parent that spawned children
+    ("branching") printed OPTIMIZATION FAILED and exited 1 — while the engine had
+    already written a final_results.json naming that branch the winner.
+    """
+    log_section("FINAL RESULT")
+    if merge_result.get("status") == "success":
+        log("OPTIMIZATION COMPLETE", "SUCCESS")
+        log(f"Results saved to: {config.get_output_dir()}")
+        return 0
+
+    log("OPTIMIZATION FAILED", "ERROR")
+    log(f"Check {config.get_output_dir()} for details")
+    return 1
 
 
 def parse_args():
@@ -231,6 +249,19 @@ async def main():
         log(f"Cloned '{problem_dir.name}' → '{new_name}'", "SUCCESS")
         return 0
 
+    # Handle --best fast bypass. It reports what is already on disk, so it belongs above
+    # the provider block with the other read-only bypasses: init_from_config and
+    # get_default_model both raise "No LLM provider detected", and reading a finished
+    # run must not need an API key. Only the two paths merge_node reads are set.
+    if args.best:
+        config.set_output_dir(problem_dir / "output")
+        config.set_problem_dir(problem_dir)
+
+        log_section("AGGREGATING RESULTS")
+        from nodes.merge import merge_node
+
+        return _report_final(merge_node())
+
     # Build immutable config and apply (must happen before check_api_key/get_provider)
     cfg = OptimizerConfig(
         output_dir=problem_dir / "output",
@@ -285,20 +316,6 @@ async def main():
             f"Tuner budget: from problem.yaml tuning.duration_s (else system default {TUNER_TIMEOUT}s)"
         )
 
-    # Handle --best fast bypass
-    if args.best:
-        log_section("AGGREGATING RESULTS")
-        from nodes.merge import merge_node
-
-        best_state = merge_node()
-        log_section("FINAL RESULT")
-        if best_state.get("status") == "success":
-            log("OPTIMIZATION SUCCESSFUL", "SUCCESS")
-        else:
-            log("OPTIMIZATION FAILED", "ERROR")
-            log(f"Check {config.get_output_dir()} for details")
-        return 0
-
     # Check prerequisites
     if not check_prerequisites(problem_dir):
         return 1
@@ -306,7 +323,11 @@ async def main():
     # Load input files
     problem_yaml = load_file(problem_dir / "problem.yaml")
     problem_config = yaml.safe_load(problem_yaml) or {}
-    ref_file = problem_config.get("reference", {}).get("file", "ref_kernel.cu")
+    # Through reference_spec, as check_prerequisites already is: the hardcoded
+    # "ref_kernel.cu" default here resolved a file a python or cpu_c problem does not
+    # have, and load_file returns "" for a miss — so analyze and strategize ran against
+    # no reference at all, silently.
+    ref_file = reference_spec(problem_config).file
     ref_kernel = load_file(problem_dir / ref_file)
 
     log(f"Loaded problem.yaml ({len(problem_yaml)} chars)")
@@ -347,7 +368,10 @@ async def main():
 
     log_path = problem_dir / "output" / "run.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_mode = "a" if args.resume else "w"
+    # Append whenever the previous output/ was kept. Keyed on --resume alone, --no-clean
+    # truncated the run.log it had just promised to keep — the only record of the
+    # earlier run's wall clock.
+    log_mode = "a" if (args.resume or args.no_clean) else "w"
     log(f"Logging to {log_path}")
 
     log("Starting Queue Execution Engine...")
@@ -361,77 +385,15 @@ async def main():
             sys.stdout = old_stdout
             sys.stderr = old_stderr
 
-    # After all branches complete, aggregate results from disk
+    # After all branches complete, aggregate results from disk. merge_node prints the
+    # per-branch summary, the iteration timeline and the winner, and writes
+    # final_results.json — the same call --best makes, so both paths agree on what
+    # counts as a success.
     log_section("AGGREGATING RESULTS")
 
-    from nodes.merge import (
-        build_final_summary,
-        find_branch_results,
-        get_best_branch_result,
-    )
-    from utils.files import save_json
+    from nodes.merge import merge_node
 
-    output_dir = config.get_output_dir()
-    branches_dir = output_dir / "branches"
-    branch_results = find_branch_results(branches_dir)
-
-    log(f"Found {len(branch_results)} branch result(s)")
-
-    if not branch_results:
-        log("No branch results found!", "ERROR")
-        log("Check output/branches/ for details")
-        return 1
-
-    # Print summary of each branch (including nested sub-branches)
-    for result in branch_results:
-        branch_name = result.get("branch_name", "unknown")
-        branch_path = result.get("branch_path", "")
-        status = result.get("status", "unknown")
-        best_time = result.get("best_time_us")
-        speedup = result.get("speedup")
-        iterations = result.get("iterations", 0)
-
-        # Determine nesting level from path
-        depth = branch_path.count("/branches/") if branch_path else 0
-        indent = "  " * depth
-
-        status_icon = "✓" if status == "success" else "✗"
-        time_str = f"{best_time:.2f} µs" if best_time else "N/A"
-        speedup_str = f"{speedup:.2f}x" if speedup else "N/A"
-
-        log(
-            f"{indent}{status_icon} {branch_name}: {time_str} (speedup: {speedup_str}, iters: {iterations})"
-        )
-
-    # Find best overall result
-    best = get_best_branch_result(branch_results)
-
-    # Print final status
-    log_section("FINAL RESULT")
-
-    if best and best.get("status") == "success":
-        log("OPTIMIZATION COMPLETE", "SUCCESS")
-        log(f"Results saved to: {output_dir}")
-
-        best_time = best.get("best_time_us")
-        log(f"\nBest branch: {best.get('branch_name')}")
-        if best_time is not None:
-            log(f"Best time: {best_time:.2f} µs")
-        if best.get("speedup"):
-            log(f"Speedup: {best.get('speedup'):.2f}x")
-
-        save_json(
-            output_dir / "final_results.json",
-            build_final_summary(branch_results, best),
-        )
-
-        return 0
-    else:
-        log("OPTIMIZATION FAILED", "ERROR")
-        if best:
-            log(f"Best attempt: {best.get('branch_name')} ({best.get('status')})")
-        log("Check output/ for details")
-        return 1
+    return _report_final(merge_node())
 
 
 if __name__ == "__main__":

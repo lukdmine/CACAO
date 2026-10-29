@@ -1,11 +1,11 @@
 """Decide node - reads the proposal and makes a structured action decision."""
 
-from config import get_output_dir, MAX_BRANCH_DEPTH
+from config import get_output_dir, get_problem_dir, MAX_BRANCH_DEPTH
 from models.decision import OptimizationDecision
 from utils.files import save_json, get_iter_dir
 from utils.log import log
 from utils.results import (
-    get_results_summary,
+    iteration_results_summary,
     load_reference_time,
     format_results_summary,
 )
@@ -36,6 +36,37 @@ def _format_run_output(run_output: str) -> str:
     return f"## Run Output ({label}):\n```\n{excerpt}\n```"
 
 
+def _cases_block(summary: dict) -> str:
+    """The per-case table, empty unless the problem declares cases.
+
+    Without it decide sees only format_results_summary, whose flat keys describe the
+    PRIMARY case — so a run where a later case produced nothing looks like a clean
+    success.
+    """
+    try:
+        import yaml as _yaml
+
+        from prompts._cases import cases_block
+
+        meta = _yaml.safe_load(
+            (get_problem_dir() / "problem.yaml").read_text(encoding="utf-8")
+        ) or {}
+        return cases_block(meta, summary)
+    except Exception:
+        return ""
+
+
+def _terminal_status(summary: dict) -> str:
+    """success/failed for a branch that is stopping.
+
+    ``has_success`` describes the PRIMARY case only — aggregate_case_summaries keeps
+    the flat keys from it — so a multi-case run also has to clear ``failed_case``: a
+    kernel that produced no valid configuration at a declared case did not succeed.
+    """
+    ok = summary.get("has_success") and summary.get("failed_case") is None
+    return "success" if ok else "failed"
+
+
 async def decide_node(state: WorkingState) -> WorkingState:
     iteration = state.iter_num
     strategy = state.strategy or {}
@@ -45,9 +76,10 @@ async def decide_node(state: WorkingState) -> WorkingState:
 
     iter_dir = get_iter_dir(state)
 
-    # Load results summary
-    summary = state.results_summary or get_results_summary(
-        iter_dir / "results.json", load_reference_time(get_output_dir())
+    # Load results summary. The disk fallback reads the primary case only — a
+    # multi-case problem keeps no results.json at the iteration root.
+    summary = state.results_summary or iteration_results_summary(
+        get_problem_dir(), iter_dir, load_reference_time(get_output_dir())
     )
     log(f"Results: {summary['num_successful']}/{summary['num_total']} successful")
 
@@ -62,7 +94,7 @@ async def decide_node(state: WorkingState) -> WorkingState:
         save_json(iter_dir / "decision.json", decision_dict)
         state.decision = decision_dict
         state.feedback = decision_dict["feedback"]
-        state.status = "success" if summary["has_success"] else "failed"
+        state.status = _terminal_status(summary)
         state.next_status = state.status
         return state
 
@@ -89,6 +121,7 @@ async def decide_node(state: WorkingState) -> WorkingState:
             f"- Max iterations: {max_iter}\n"
             f"- Strategy: {branch_name}"
         ),
+        "cases_block": _cases_block(summary),
         "results_summary_text": f"## Results Summary:\n{format_results_summary(summary)}",
         "run_output_text": _format_run_output(state.run_output),
         "proposal": getattr(state, "proposal", "") or "",
@@ -147,7 +180,7 @@ async def decide_node(state: WorkingState) -> WorkingState:
     sub_strategies = None
 
     if action == "stop":
-        status = "success" if summary["has_success"] else "failed"
+        status = _terminal_status(summary)
     elif action == "retry":
         status = "configuring" if decision_obj.skip_implement else "implementing"
         if decision_obj.skip_implement:

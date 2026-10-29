@@ -1,4 +1,4 @@
-"""Tree scanning, results, status, and GPU endpoints."""
+"""Tree scanning, status, and GPU endpoints."""
 
 import hashlib
 import threading
@@ -10,9 +10,12 @@ from api.helpers import (
     get_problem_dir,
     load_yaml,
     load_json,
+    _last_exit_codes,
+    _reap_unlocked,
     _running_problems,
     _running_lock,
     is_problem_running,
+    last_exit_code,
 )
 from utils.files import get_parent_branch_dir
 
@@ -75,10 +78,9 @@ def _primary_case_dir(problem_dir, iter_dir):
 def _project_iter(snap: dict) -> dict:
     """Reduce a full IterState to what the tree needs, plus presence flags.
 
-    The panel gates each accordion section on the field being non-empty, so the
-    flags have to survive even though the content does not. ``bool({})`` is
-    False, which matches the frontend's ``Object.keys(...).length > 0`` check on
-    ncu_metrics.
+    The panel gates each accordion section on ``iter.has.<field>`` (DetailPanel),
+    so the flags have to survive even though the content does not. ``bool({})`` is
+    False, so an iteration with an empty ncu_metrics reads as having none.
     """
     light = {k: snap.get(k) for k in _LIGHT_ITER_FIELDS}
     light["has"] = {f: bool(snap.get(f)) for f in _HEAVY_ITER_FIELDS}
@@ -246,15 +248,17 @@ def get_tree(
     response.headers["ETag"] = etag
 
     if not output_dir.is_dir():
-        return {"nodes": [], "running": is_problem_running(name)}
+        # A run that died before archive_output_dir never made output/ — which is
+        # exactly when last_exit_code is the only evidence that it ran at all.
+        return {
+            "nodes": [],
+            "running": is_problem_running(name),
+            "last_exit_code": last_exit_code(name),
+        }
 
-    # Only the count is used (in the root node's hypothesis line), so the
-    # strategy bodies never leave the server.
-    #
-    # Both shapes are accepted: strategize's fallback path wrote a bare list
-    # rather than the {"strategies": [...]} mapping, and those files are already
-    # on disk. Assuming the mapping cost the whole endpoint a 500 — the frontend
-    # rendered nothing for the problem — over a decorative counter.
+    # Only the count is used (the root node's hypothesis line), so strategy bodies
+    # never leave the server. Both shapes are accepted: strategize's fallback path
+    # wrote a bare list rather than the {"strategies": [...]} mapping.
     num_strategies = 0
     strategies_path = output_dir / "strategies.json"
     if strategies_path.exists():
@@ -377,6 +381,9 @@ def get_tree(
         "llm_model": run_meta.get("model"),
         "llm_provider": run_meta.get("provider"),
         "token_usage": _load_token_usage(output_dir),
+        # Non-zero means the last optimizer died rather than finished. Nothing else
+        # distinguishes the two once its registry entry is gone.
+        "last_exit_code": last_exit_code(name),
     }
 
 
@@ -427,26 +434,23 @@ def get_analysis(
     return {"analysis": analysis}
 
 
-@router.get("/api/problems/{name}/results")
-def get_results(name: str):
-    """Get aggregated final results."""
-    problem_dir = get_problem_dir(name)
-    results_path = problem_dir / "output" / "final_results.json"
-    if not results_path.exists():
-        return {"results": None}
-    return {"results": load_json(results_path)}
-
-
 @router.get("/api/status")
 def get_status():
     """Get global engine status."""
     with _running_lock:
         for n in [n for n, e in _running_problems.items() if not e.process.is_alive()]:
-            del _running_problems[n]
+            _reap_unlocked(n)
         running = {
             name: {"gpu_index": e.gpu_index} for name, e in _running_problems.items()
         }
-    return {"running_problems": running, "active_count": len(running)}
+        # How the runs that are no longer here ended — a startup crash and a finished
+        # run look identical without it.
+        exit_codes = dict(_last_exit_codes)
+    return {
+        "running_problems": running,
+        "active_count": len(running),
+        "last_exit_codes": exit_codes,
+    }
 
 
 @router.get("/api/gpu/devices")
@@ -460,15 +464,6 @@ def get_gpu_devices():
         raise HTTPException(
             status_code=500, detail=f"Failed to detect GPUs: {e}"
         ) from e
-
-
-@router.get("/api/gpu/selected")
-def get_selected_gpu(index: int = 0):
-    """Get GPU specs for a given device index."""
-    from utils.gpu_info import get_gpu_details
-
-    info = get_gpu_details(index)
-    return {"index": index, "info": info}
 
 
 @router.get("/api/models")

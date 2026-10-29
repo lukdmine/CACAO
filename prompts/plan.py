@@ -1,6 +1,6 @@
 """Plan prompt — creates strategy-specific optimization plan."""
 
-from prompts._format import format_strategy
+from prompts._format import format_reference, format_strategy
 from prompts._system_overview import SYSTEM_OVERVIEW
 from prompts._tensor_core_reference import TENSOR_CORE_REFERENCE
 
@@ -91,9 +91,7 @@ Write your plan as a markdown document:
     if ctx.get("inputs_hpp"):
         parts.append(f"## I/O Boundary (inputs.hpp):\n```cpp\n{ctx['inputs_hpp']}\n```")
     if ctx.get("ref_kernel"):
-        parts.append(
-            f"## Reference Kernel:\n```{ctx.get('ref_language', 'cuda')}\n{ctx['ref_kernel']}\n```"
-        )
+        parts.append(format_reference(ctx))
     if ctx.get("analysis"):
         parts.append(f"## Kernel Analysis:\n{ctx['analysis']}")
     if ctx.get("parent_context"):

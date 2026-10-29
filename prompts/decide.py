@@ -1,6 +1,7 @@
 """Decide prompt — reads the proposal and makes a structured action decision."""
 
 from config import MAX_STRATEGIES
+from prompts._policy import ANTI_REPETITION, LAST_CHANCE_RULE, PLATEAU_RULE
 
 
 def build(ctx: dict) -> tuple[str, str]:
@@ -30,7 +31,7 @@ If an "Existing Branches" section is included below and all proposed sub-strateg
 ### `stop`
 No further improvements possible after trying. Do not stop just because the current result looks good — if the proposal still has ideas to try, continue. Only stop when previous attempts show no more gains or a fundamental limitation has been confirmed.
 
-**If branching is NOT AVAILABLE (see Branching Status) and no kernel has yet compiled AND validated**, do NOT pick `stop` — pick `retry` with concrete `error_analysis` instead. With no further branching budget, this branch is the last chance for this path; persist on debug fixes rather than ending it as a failure.
+{LAST_CHANCE_RULE} So do NOT pick `stop` in that case — pick `retry` with concrete `error_analysis` instead.
 
 ## Constraints
 - The solution is one or more kernels under the KTT driver — multi-kernel pipelines are
@@ -39,13 +40,14 @@ No further improvements possible after trying. Do not stop just because the curr
 
 ## Stagnation Rules
 
-Review the iteration log carefully. If the last 3+ successful iterations show <5% improvement in best time, the current approach has **plateaued**:
+Review the iteration log carefully. {PLATEAU_RULE} On a plateau:
 - If the proposal suggests sub-strategies, use `branch` to adopt them.
 - Otherwise prefer `stop` — do NOT `continue` with minor parameter variations after a plateau.
 
-Also check the iteration log for **repeated approaches**:
-- If an approach was **implemented correctly but gave no speedup** → do not retry it. Branch or stop.
-- If an approach **failed due to an implementation bug** (compilation error, validation failure from wrong indexing) → use `retry` with `feedback` that identifies the specific bug to fix. Do not revert to a slower working kernel just because the faster approach had a fixable bug.
+{ANTI_REPETITION}
+Which action that maps to here:
+- A finished approach → `branch` or `stop`, never `retry`.
+- A fixable bug → `retry` with `feedback` that identifies the specific bug to fix.
 
 ## Iteration Summary
 
@@ -72,6 +74,10 @@ JSON object with:
         parts.append(f"## Previous Iteration's Request:\n{ctx['prev_feedback']}")
     if ctx.get("results_summary_text"):
         parts.append(ctx["results_summary_text"])
+    # format_results_summary's flat keys are the PRIMARY case's, so without this a run
+    # where a later case produced nothing reads as a clean success.
+    if ctx.get("cases_block"):
+        parts.append(ctx["cases_block"])
     if ctx.get("run_output_text"):
         parts.append(ctx["run_output_text"])
     if ctx.get("proposal"):

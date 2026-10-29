@@ -65,29 +65,32 @@ async def execute_llm_node(
         HumanMessage(content=user_message),
     ]
 
-    invoke_kwargs = {}
-    # Custom logit processor (KimiK26ThinkingBudgetLogitProcessor) disabled for now.
-    # if get_provider() == "cerit" and get_model() == "kimi-k2.6":
-    #     invoke_kwargs["extra_body"] = {
-    #         "custom_params": {"thinking_budget": CERIT_KIMI_THINKING_BUDGET},
-    #         "custom_logit_processor": "true",
-    #     }
-
+    # Only the provider call is an "LLM error". Post-processing and the disk writes are
+    # engine code, and reporting their failures as a bad generation sends decide off
+    # retrying the model for a fault it cannot fix.
     try:
         if llm_mode == "creative":
-            ai_message = await get_llm_creative().ainvoke(messages, **invoke_kwargs)
+            ai_message = await get_llm_creative().ainvoke(messages)
             result = ai_message.content
         elif llm_mode == "structured":
             result = (
                 await get_llm_precise()
                 .with_structured_output(structured_schema)
-                .ainvoke(messages, **invoke_kwargs)
+                .ainvoke(messages)
             )
             ai_message = None
         else:
-            ai_message = await get_llm_precise().ainvoke(messages, **invoke_kwargs)
+            ai_message = await get_llm_precise().ainvoke(messages)
             result = ai_message.content
+    except Exception as e:
+        log(f"LLM error in {node_name}: {e}", "ERROR")
+        if error_field:
+            setattr(state, error_field, f"{node_name.capitalize()} failed: {e}")
+        if error_status:
+            state.status = error_status
+        return state, None
 
+    try:
         # Save thinking/reasoning content for debugging (e.g. DeepSeek, GLM thinking models)
         if ai_message is not None and output_dir:
             reasoning = (getattr(ai_message, "additional_kwargs", None) or {}).get(
@@ -133,9 +136,10 @@ async def execute_llm_node(
         return state, result
 
     except Exception as e:
-        log(f"LLM error in {node_name}: {e}", "ERROR")
+        log(f"Post-processing failed in {node_name}: {e}", "ERROR")
         if error_field:
-            setattr(state, error_field, f"{node_name.capitalize()} failed: {e}")
+            msg = f"{node_name.capitalize()} post-processing failed: {e}"
+            setattr(state, error_field, msg)
         if error_status:
             state.status = error_status
         return state, None

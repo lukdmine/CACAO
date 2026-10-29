@@ -7,13 +7,12 @@ device attributes reported by the driver/hardware.
 
 import csv
 import io
-import os
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Dict, Any, Optional
 
-from utils.cuda_env import get_env, get_ncu_tmpdir
+from utils.cuda_env import get_env, get_subprocess_env
 from utils.log import log
 
 DUMMY_KERNEL_CODE = """
@@ -75,6 +74,24 @@ def _query_nvidia_smi_gpus() -> list[dict]:
         return []
 
 
+def _to_number(raw: str):
+    """An NCU numeric cell, tolerant of US (1,234.56) and EU (1 234,56) locales.
+
+    The same coercion as nodes/profile._to_number, except that a whole number stays an
+    int: the compute-capability cells are formatted straight into "<major>.<minor>".
+    Repeated commas can only be thousands groups, which the single-comma case cannot
+    tell apart from a decimal comma.
+    """
+    cleaned = raw.replace("\xa0", "").replace(" ", "")
+    if cleaned.count(",") > 1:
+        cleaned = cleaned.replace(",", "")
+    elif "," in cleaned and "." not in cleaned:
+        cleaned = cleaned.replace(",", ".")  # EU decimal comma
+    else:
+        cleaned = cleaned.replace(",", "")  # US thousands comma
+    return float(cleaned) if "." in cleaned else int(cleaned)
+
+
 def _parse_ncu_csv(csv_output: str) -> dict:
     """
     Parse NCU CSV output (--page raw wide format) into a flat dict of metrics.
@@ -112,9 +129,8 @@ def _parse_ncu_csv(csv_output: str) -> dict:
             if not col or not raw_value or raw_value in ("no data", ""):
                 continue
 
-            cleaned = raw_value.replace(",", "").replace(" ", "")
             try:
-                metrics[col] = float(cleaned) if "." in cleaned else int(cleaned)
+                metrics[col] = _to_number(raw_value)
             except ValueError:
                 metrics[col] = raw_value
 
@@ -164,11 +180,18 @@ def get_gpu_details(device_index: int = 0) -> Optional[Dict[str, Any]]:
                 check=True,
                 capture_output=True,
                 text=True, encoding="utf-8", errors="replace",
+                timeout=60,
             )
         except subprocess.CalledProcessError as e:
             log(
                 f"Failed to compile dummy kernel for GPU detection: {e.stderr}", "ERROR"
             )
+            return None
+        except subprocess.TimeoutExpired:
+            # engine/master calls this synchronously before Phase 1, so an nvcc that
+            # never returns (CUDA on a stalled mount, a wedged licence probe) would
+            # otherwise block the whole run with nothing in the log.
+            log("nvcc timed out compiling the GPU-detection kernel", "ERROR")
             return None
         except FileNotFoundError:
             log("nvcc not found. Cannot auto-detect GPU using dummy kernel.", "ERROR")
@@ -190,12 +213,11 @@ def get_gpu_details(device_index: int = 0) -> Optional[Dict[str, Any]]:
             str(exe_file),
         ]
 
-        # Make the executable run on the selected device
-        env = os.environ.copy()
+        # Make the executable run on the selected device. get_subprocess_env carries
+        # the LC_NUMERIC pin NCU's CSV needs, the PCI-bus device order that makes this
+        # ordinal agree with nvidia-smi's index, and the per-user NCU TMPDIR.
+        env = get_subprocess_env(cuda_env)
         env["CUDA_VISIBLE_DEVICES"] = str(device_index)
-        # Per-user TMPDIR so NCU's /tmp/nsight-compute-lock doesn't clash between
-        # users on a shared machine (see cuda_env.get_ncu_tmpdir).
-        env["TMPDIR"] = str(get_ncu_tmpdir())
 
         try:
             # Note: NCU might require sudo for tracing depending on system config,
@@ -292,14 +314,13 @@ def get_gpu_details(device_index: int = 0) -> Optional[Dict[str, Any]]:
 
 
 def detect_gpus() -> list[dict]:
+    """Every GPU nvidia-smi reports, merged with its NCU-derived specs.
+
+    One nvcc compile plus one NCU profile per GPU, so this costs seconds per device on
+    a multi-GPU node — it is not something to call per request without caching. Falls
+    back to profiling device 0 alone when nvidia-smi is unavailable, and returns [] when
+    that fails too.
     """
-    Detect all available GPUs and their basic specs.
-    Currently just returns the primary GPU (index 0) using get_gpu_details,
-    or empty list if detection fails.
-    """
-    # NCU dummy kernel approach is slow to do for EVERY possible device index.
-    # For now, we'll just query device 0, unless CUDA_VISIBLE_DEVICES is set.
-    # If the user needs another device, they explicitly pass --device N.
     smi_gpus = _query_nvidia_smi_gpus()
     if smi_gpus:
         devices = []

@@ -20,7 +20,7 @@ from typing import Optional
 
 import yaml
 
-from models.inputs import BufferSpec, InputsSpec, ScalarSpec
+from models.inputs import BufferSpec, InputsSpec
 
 # Repo root (parent of utils/) — baked into the generated python-reference command so
 # the driver can import utils from any working directory.
@@ -308,17 +308,14 @@ def generate_dump_inputs_cpp(spec: InputsSpec) -> str:
 def _defines(spec: InputsSpec) -> str:
     """-D macros for `define`-placement scalars, as one compiler-options fragment.
 
-    Carries its OWN leading space when non-empty, and is empty otherwise, so the skeleton
-    can concatenate it directly onto the include flag. If the separator lived in the
-    skeleton instead, a problem with no `define` scalars (e.g. mmul, whose scalars are
-    host+runtime) would leave a trailing space that NVRTC tokenizes into an empty option
-    and rejects — failing every configuration.
+    Carries its own leading space when non-empty, and is empty otherwise, so the
+    skeleton can concatenate it directly: a separator kept in the skeleton would leave a
+    trailing space for a problem with no `define` scalars, which NVRTC tokenizes into an
+    empty option and rejects — failing every configuration.
 
     Emitted into Inputs.defines rather than passed to SetCompilerOptions from here:
-    KTT's SetCompilerOptions REPLACES the option string (Tuner.h:908) and the engine
-    skeleton already calls it with the CUDA include path, so a call from inside
-    DefineInputs would wipe that include and break every NVRTC compile. The skeleton
-    concatenates this string instead.
+    SetCompilerOptions REPLACES the option string (Tuner.h:908), so a call from inside
+    DefineInputs would wipe the CUDA include path the skeleton already set.
     """
     parts = [
         f"-D{s.name}={_literal(s.value, s.dtype)}"

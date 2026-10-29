@@ -14,13 +14,10 @@ LEVEL_PREFIXES = {
 def _force_utf8_streams() -> None:
     """Make stdout/stderr able to carry the characters this pipeline actually emits.
 
-    Every level prefix above is non-ASCII, and timings are reported in µs, so under a
-    locale-derived ASCII stream the first log line raises UnicodeEncodeError and takes
-    the process with it. That is not hypothetical: a run launched without LANG hit the
-    same locale default on the file-reading side and lost all four branches.
-
-    ``errors="replace"`` rather than strict — a mangled character in a log line is a
-    cosmetic problem, a crashed run is not.
+    Every level prefix above is non-ASCII and timings are reported in µs, so a
+    locale-derived ASCII stream raises UnicodeEncodeError on the first log line and
+    takes the process with it. ``errors="replace"``: a mangled character beats a
+    crashed run.
     """
     for stream in (sys.stdout, sys.stderr):
         try:

@@ -64,11 +64,6 @@ def _resolve_ref_function(
     )
 
 
-def _load_ref_function(ref_path: Path, function_name: str | None = None) -> callable:
-    """Load the python reference file and return the requested callable."""
-    return _resolve_ref_function(load_ref_module(ref_path), ref_path, function_name)
-
-
 def eval_size(size_expr: str, scalars: dict) -> int:
     """Evaluate a size expression like 'kSizeM * kSizeK' using scalar values."""
     # Only allow simple arithmetic and known scalar names

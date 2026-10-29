@@ -131,17 +131,31 @@ def _is_transient_error(error) -> bool:
     return False
 
 
+# Ceiling on an honored Retry-After. The provider reports it as the next hourly-quota
+# reset (~3600s) even for a limit that clears in seconds; slept in full on each of the
+# five retries, that parks a branch for hours inside one ainvoke with nothing able to
+# observe or abort it.
+RETRY_AFTER_CAP_S = 300.0
+
+
+def _backoff_wait(retries: int, base_wait: float) -> float:
+    """Exponential backoff with jitter.
+
+    The jitter is not decoration: four branches share one event loop and one server-side
+    cap, so their failures correlate and an unjittered schedule retries them in lockstep.
+    """
+    return base_wait * (2 ** (retries - 1)) + random.uniform(0, 1)
+
+
 def _compute_retry_wait(error, retries: int, base_wait: float) -> float:
     """Exponential backoff with jitter, honoring Retry-After when present."""
     retry_after = _extract_retry_after(error)
-    backoff = base_wait * (2 ** (retries - 1))
-    jitter = random.uniform(0, 1)
-    wait_time = backoff + jitter
+    wait_time = _backoff_wait(retries, base_wait)
     if retry_after is not None:
         # Concurrency limits (e.g. CERIT's max_parallel_requests) clear as soon
         # as an in-flight request returns — but the provider reports Retry-After
         # as the next hourly-quota reset, which can be ~3600s. Ignore it for
         # parallel-slot errors and rely on exponential backoff instead.
         if "max_parallel_requests" not in str(error).lower():
-            wait_time = max(wait_time, retry_after)
+            wait_time = max(wait_time, min(retry_after, RETRY_AFTER_CAP_S))
     return wait_time

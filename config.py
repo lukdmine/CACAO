@@ -11,10 +11,8 @@ from typing import Optional
 from dotenv import load_dotenv
 
 from llm import (  # noqa: F401  (re-exported for existing call sites)
-    LLM_PROVIDER,
     MODELS,
     MODEL_CONFIGS,
-    PROVIDERS,
     TokenTracker,
     TrackedLLM,
     TrackedStructuredLLM,
@@ -28,11 +26,7 @@ from llm import (  # noqa: F401  (re-exported for existing call sites)
     global_tracker,
     set_model,
 )
-from llm.providers import (  # noqa: F401
-    _detect_provider,
-    _normalise_provider,
-    set_provider,
-)
+from llm.providers import set_provider
 
 load_dotenv()
 
@@ -66,9 +60,9 @@ def set_problem_dir(path: Path):
 
 
 # ===== Workflow Configuration =====
-MAX_ITERATIONS = 5  # Max iterations per branch (depth mode)
-MAX_BRANCH_DEPTH = 2  # Max depth of nested branches (depth mode)
-PATH_BUDGET = 0  # Total path iteration budget (path mode, 0 = use depth mode)
+MAX_ITERATIONS = 5  # Max iterations per branch; depth mode only (PATH_BUDGET = 0)
+MAX_BRANCH_DEPTH = 2  # Max depth of nested branches; bounds both modes
+PATH_BUDGET = 20  # Total iterations per root-to-leaf path; 0 = fall back to depth mode
 MAX_STRATEGIES = 4  # Max strategies per strategize call
 TUNER_TIMEOUT = (
     100  # System fallback when neither the user nor problem.yaml sets a budget
@@ -82,25 +76,16 @@ INCLUDE_BEST_SO_FAR = (
 )
 
 # ===== Agentic Steps =====
-# When True, implement+configure run as one tool loop (nodes/author.py) that can
-# compile-check and fix before the iteration is spent. False restores the two
-# single-shot calls. This is the only way back to them: a step that cannot author its
-# files fails the iteration and tells decide why, rather than silently re-running the
-# work down a quieter path.
+# One tool loop (nodes/author.py) for implement+configure; False is the only route back
+# to the two single-shot calls.
 AGENTIC_STEPS = True
 # Tool calls allowed in one authoring step — a runaway guard, not a working limit.
-# Recorded steps run a median of 12 calls; at 25 three of 72 were cut off mid-fix and
-# ten more came within five calls of it. A step stopped here still costs the iteration.
 STEP_TOOL_BUDGET = 50
-# How many times a reply cut off at the model's output token cap is corrected before
-# the step gives up. Thinking models spend the whole cap reasoning about a "write the
-# kernel" prompt and never reach the call; being told so is usually enough. The
-# correction escalates, so raising this past the number of distinct corrections
-# (agentic.loop._TRUNCATION_NUDGES) just repeats the last one.
+# Replies cut off at the model's output token cap that are corrected before the step
+# gives up. The correction escalates, so raising this past the number of distinct ones
+# (agentic.loop._TRUNCATION_NUDGES) just repeats the last.
 STEP_TRUNCATION_RETRIES = 3
-# How much of a sibling branch a step may read. Parallel branches are parallel *bets*;
-# a branch that can read the current leader's kernel converges on it and the run buys
-# one attempt instead of four. So no level exposes another branch's code.
+# How much of a sibling branch a step may read. No level exposes another branch's code.
 #   "errors" — index + iteration log + recorded failure analyses (default)
 #   "log"    — index + iteration log
 #   "index"  — the one-line-per-branch header only

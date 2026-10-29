@@ -83,7 +83,3 @@ def get_tracker_stats():
         "total_tokens": global_tracker.total_tokens,
     }
 
-
-# Appended to the conversation when a response dies with finish_reason=length and
-# empty content: the model reasoned past the token cap without answering. Changing
-# the prompt (not just re-rolling) is what makes the retry meaningfully different.

@@ -14,12 +14,11 @@ the raw file: putting it in a prompt is what these functions exist to avoid.
 
 from __future__ import annotations
 
-import json
 import statistics
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from utils.results import get_computation_duration
+from utils.results import get_computation_duration, load_results
 
 # A tool response that grows without bound defeats the purpose. Sweeps over a
 # parameter with a pathological number of distinct values get truncated with a note.
@@ -58,15 +57,12 @@ class Record:
 
 
 def load_records(results_path: Path) -> List[Record]:
-    """Parse results.json into Records. Returns [] for a missing or corrupt file."""
-    results_path = Path(results_path)
-    if not results_path.exists():
-        return []
-    try:
-        with results_path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
-        return []
+    """Parse results.json into Records. Returns [] for a missing or corrupt file.
+
+    The read is utils.results.load_results, which logs a corrupt file. A second reader
+    with its own silent error policy is how these two drifted apart in the first place.
+    """
+    data = load_results(Path(results_path)) or {}
     return [Record(r) for r in (data.get("Results") or [])]
 
 

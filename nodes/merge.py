@@ -15,15 +15,7 @@ from utils.log import log
 
 
 def find_branch_results(branches_dir: Path) -> List[dict]:
-    """
-    Recursively find all branch.json files in branches and summarize results.
-
-    Args:
-        branches_dir: Path to branches directory
-
-    Returns:
-        List of summarized result dicts
-    """
+    """Summarize every branch.json under ``branches_dir``, sub-branches included."""
     results = []
 
     if not branches_dir.exists():
@@ -110,15 +102,7 @@ def build_final_summary(branch_results: List[dict], best: dict) -> dict:
 
 
 def get_best_branch_result(results: List[dict]) -> Optional[dict]:
-    """
-    Find the best result across all branches.
-
-    Args:
-        results: List of branch results
-
-    Returns:
-        Best result dict or None
-    """
+    """The fastest branch, or None when no branch produced a time."""
     # Include success and branching (parent branched but has valid results)
     candidates = [
         r
@@ -203,11 +187,11 @@ def print_iteration_timeline(branches_dir: Path) -> None:
 
 
 def merge_node() -> dict:
-    """
-    Merge results from all branches.
+    """Print the end-of-run summary and write ``final_results.json``.
 
-    Returns:
-        Dict with final results
+    The one owner of the success predicate: cli.py's normal path and its ``--best``
+    bypass both come through here. They used to keep their own copy, which had drifted
+    to calling a ``branching`` winner a failure and exiting 1 on a successful run.
     """
     print("\n" + "=" * 60)
     print("  NODE: Merge Results")
@@ -222,17 +206,27 @@ def merge_node() -> dict:
 
     print_iteration_timeline(branches_dir)
 
-    # Print summary of each branch
+    # Print summary of each branch (including nested sub-branches)
     for result in branch_results:
         branch_name = result.get("branch_name", "unknown")
+        branch_path = result.get("branch_path", "")
         best_time = result.get("best_time_us")
         speedup = result.get("speedup")
+        iterations = result.get("iterations", 0)
+
+        # rglob returns the tree flat, so indent by nesting depth or a sub-branch reads
+        # as a sibling of the strategy it was spawned from.
+        depth = branch_path.count("/branches/") if branch_path else 0
+        indent = "  " * depth
 
         status_icon = "✓" if best_time is not None else "✗"
         time_str = f"{best_time:.2f} µs" if best_time else "N/A"
         speedup_str = f"{speedup:.2f}x" if speedup else "N/A"
 
-        log(f"  {status_icon} {branch_name}: {time_str} (speedup: {speedup_str})")
+        log(
+            f"{indent}{status_icon} {branch_name}: {time_str} "
+            f"(speedup: {speedup_str}, iters: {iterations})"
+        )
 
     # Find best overall result
     best = get_best_branch_result(branch_results)

@@ -5,18 +5,14 @@ dump tool has materialized the real ``cacao_in_<name>.bin`` from ``inputs.hpp``.
 Loads ref.py, calls ``prepare_input(scalars, buffers)`` (H2D — not timed), warms
 up, then times single calls of the reference function with CUDA events and
 prints ``CACAO_REF_TIME_US=<min µs>`` (the marker keeps the parse robust against
-any stray stdout from torch or ref.py).
+any stray stdout from torch or ref.py). Exits non-zero whenever it cannot time
+precisely — no ``prepare_input``, no torch, no CUDA — so the caller falls back to
+KTT's coarse wall-clock reference time. The ref.py contract itself is documented in
+docs/REFERENCE_IMPLEMENTATION_GUIDE.md.
 
-ref.py contract for precise timing:
-  - ``prepare_input(scalars, buffers) -> prepared``  (H2D + setup; not timed)
-  - ``<reference_function>(prepared) -> result``     (the GPU op; timed)
-
-The reference function should return a GPU tensor whose memory layout already
-matches the validated buffer's order (the runner converts via ``.cpu().numpy()``);
-D2H transfer is deliberately excluded from the timed region.
-
-If ref.py has no ``prepare_input``, or torch/CUDA is unavailable, the script
-exits non-zero so the caller falls back to KTT's coarse wall-clock reference time.
+The device comes from the caller's ``CUDA_VISIBLE_DEVICES`` (see utils/ref_timing.py):
+ref.py resolves its own device as ``"cuda"``, and the reference must be timed on the
+same GPU the driver benchmarks kernels on or every speedup is off by their ratio.
 
 Usage:
     python -m utils.torch_ref_timer --inputs inputs.yaml --ref ref.py \

@@ -43,6 +43,7 @@ async def _time_reference_for_case(problem_dir, output_dir, cfg, ref, case, case
     from utils.results import reference_time_recorded, save_reference_time
     from utils.cuda_env import get_subprocess_env
     from utils.gpu_lock import acquire_gpu_lock
+    from utils.problem import gpu_index
 
     if reference_time_recorded(output_dir, case_key):
         # A measured value, a committed seed, or an explicit null meaning "this shape has
@@ -132,11 +133,17 @@ async def _time_reference_for_case(problem_dir, output_dir, cfg, ref, case, case
             "--inputs-dir",
             str(timing_dir),
         ]
+        # Pin the timer to problem.yaml's gpu.index. Every shipped ref.py resolves its
+        # device as plain ``"cuda"``, i.e. ordinal 0, while the driver benchmarks on
+        # gpu.index — on a mixed pair of GPUs that makes the denominator and the
+        # numerator of every speedup come from different hardware.
+        timer_env = get_subprocess_env()
+        timer_env["CUDA_VISIBLE_DEVICES"] = str(gpu_index(cfg))
         try:
             timer_proc = await asyncio.create_subprocess_exec(
                 *timer_cmd,
                 cwd=str(problem_dir),
-                env=get_subprocess_env(),
+                env=timer_env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
