@@ -5,10 +5,30 @@ import { Separator } from '@/components/ui/separator';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { formatTime } from '@/utils/statusColors';
-import { runProblem, resumeProblem, stopProblem } from '@/api/client';
-import { refreshTree } from '@/api/hooks';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { runProblem, resumeProblem, stopProblem, finalizeProblem } from '@/api/client';
+import type { FinalizeState } from '@/api/client';
+import { refreshTree, useFinalize, useFinalizeData } from '@/api/hooks';
 import { toast } from 'sonner';
-import { Play, RotateCcw, PanelLeft, Cpu, Wifi, WifiOff, Square, Loader2, Coins, Archive } from 'lucide-react';
+import { Play, RotateCcw, PanelLeft, Cpu, Wifi, WifiOff, Square, Loader2, Coins, Archive, Sparkles, CircleCheck } from 'lucide-react';
+
+const FINALIZE_LABEL: Record<FinalizeState, string> = {
+    not_run: 'Finalize',
+    up_to_date: 'Finalize',
+    stale: 'Re-finalize',
+    stopped: 'Resume finalize',
+    failed: 'Resume finalize',
+    finalizing: 'Finalizing...',
+};
+
+// The status beside the token counter. A state missing here shows nothing: before a
+// finalize there is nothing to open, and a stopped or failed one already reads
+// "Resume finalize" on the button.
+const FINALIZE_STATUS: Partial<Record<FinalizeState, { label: string; tone: string; hint: string }>> = {
+    finalizing: { label: 'Finalizing', tone: 'text-amber-400', hint: 'Show the finalize panel' },
+    up_to_date: { label: 'Finalized', tone: 'text-emerald-400', hint: 'Show the finalize results' },
+    stale: { label: 'Finalized', tone: 'text-amber-400', hint: 'Branches changed since this finalize. Show its results' },
+};
 
 export function Toolbar() {
     const activeProblem = useAppStore((s) => s.activeProblem);
@@ -37,6 +57,23 @@ export function Toolbar() {
         (best, n) => (n.best_time_us != null && (best == null || n.best_time_us < best) ? n.best_time_us : best),
         null,
     );
+
+    useFinalize(activeProblem);
+    const finalizeData = useFinalizeData(activeProblem);
+    const startedFinalize = useAppStore((s) => s.startedFinalize);
+    const setStartedFinalize = useAppStore((s) => s.setStartedFinalize);
+    const selectNode = useAppStore((s) => s.selectNode);
+    const isFinalizing = finalizeData?.state === 'finalizing' || startedFinalize;
+    const finalizeState: FinalizeState = isFinalizing ? 'finalizing' : (finalizeData?.state ?? 'not_run');
+    // A finalize is a run as far as the tree flag goes, so "running" alone cannot
+    // tell the button whether to refuse.
+    const finalizeBlockedReason = isFinalizing
+        ? null
+        : runStatus === 'running'
+            ? 'Stop the run first'
+            : existingBest == null
+                ? 'No valid results yet'
+                : null;
 
     const runConfig = {
         ...(selectedProvider && { provider: selectedProvider }),
@@ -79,6 +116,22 @@ export function Toolbar() {
             await refreshTree();
         } catch (err) {
             toast.error('Failed to resume optimization');
+            console.error(err);
+        } finally {
+            setIsSubmitting(false);
+        }
+    }
+
+    async function handleFinalize() {
+        if (!activeProblem || isSubmitting) return;
+        setIsSubmitting(true);
+        try {
+            await finalizeProblem(activeProblem, runConfig);
+            setStartedFinalize(true);
+            setRunStatus('running');
+            await refreshTree();
+        } catch (err) {
+            toast.error(err instanceof Error ? err.message : 'Failed to start finalize');
             console.error(err);
         } finally {
             setIsSubmitting(false);
@@ -155,6 +208,29 @@ export function Toolbar() {
                     )}
                 </div>
             )}
+            {/* Finalize. Disabled rather than hidden so the reason can be read. */}
+            {activeProblem && (
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        {/* A disabled button swallows pointer events, so the span carries the tooltip. */}
+                        <span tabIndex={0}>
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                className="text-xs h-7"
+                                onClick={() => void handleFinalize()}
+                                disabled={isSubmitting || !connected || isFinalizing || finalizeBlockedReason !== null}
+                            >
+                                {isFinalizing
+                                    ? <Loader2 size={12} className="mr-1 animate-spin" />
+                                    : <Sparkles size={12} className="mr-1" />}
+                                {FINALIZE_LABEL[finalizeState]}
+                            </Button>
+                        </span>
+                    </TooltipTrigger>
+                    {finalizeBlockedReason && <TooltipContent>{finalizeBlockedReason}</TooltipContent>}
+                </Tooltip>
+            )}
             {runStatus === 'running' && (
                 <div className="flex items-center gap-1.5">
                     {(llmProvider || llmModel) && (
@@ -207,6 +283,23 @@ export function Toolbar() {
 
             {/* Stats */}
             <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                {/* Opens the root node, whose detail panel holds the finalize results. */}
+                {connected && FINALIZE_STATUS[finalizeState] && (
+                    <>
+                        <button
+                            type="button"
+                            onClick={() => selectNode('root')}
+                            className={`flex items-center gap-1 hover:underline ${FINALIZE_STATUS[finalizeState].tone}`}
+                            title={FINALIZE_STATUS[finalizeState].hint}
+                        >
+                            {finalizeState === 'finalizing'
+                                ? <Loader2 size={13} className="animate-spin" />
+                                : <CircleCheck size={13} />}
+                            <span>{FINALIZE_STATUS[finalizeState].label}</span>
+                        </button>
+                        <Separator orientation="vertical" className="h-4" />
+                    </>
+                )}
                 {connected && tokenUsage.total_tokens > 0 && (
                     <>
                         <div className="flex items-center gap-1 text-muted-foreground/70" title={`API calls: ${tokenUsage.api_calls.toLocaleString()}\nPrompt: ${tokenUsage.prompt_tokens.toLocaleString()}\nCompletion: ${tokenUsage.completion_tokens.toLocaleString()}`}>

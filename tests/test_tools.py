@@ -276,6 +276,41 @@ def test_passing_check_does_not_nag_about_editing(filled_workspace, tmp_path, mo
     assert "edit_file to fix them" not in out
 
 
+_CPU_META = {"grid": {"x": 1}, "reference": {"type": "cpu_c", "file": "ref_cpu.c"}}
+
+
+def _stub_passing_build(ws, monkeypatch):
+    from utils.build import BuildResult
+    from utils.nvrtc import NvrtcCheck
+
+    monkeypatch.setattr(
+        "utils.build.compile_framework",
+        lambda *a, **k: BuildResult(True, ws.staging / "driver", "", []),
+    )
+    monkeypatch.setattr(
+        "utils.nvrtc.check_kernel",
+        lambda *a, **k: [NvrtcCheck("minimum values", {}, True, "")],
+    )
+
+
+def test_the_check_names_parameters_narrowed_since_the_previous_iteration(
+    filled_workspace, tmp_path, monkeypatch
+):
+    _stub_passing_build(filled_workspace, monkeypatch)
+    box = make_toolbox(
+        filled_workspace, tmp_path, meta=_CPU_META,
+        previous_params_src='tuner.AddParameter(kernel, "TILE", std::vector<uint64_t>{8, 16, 32});\n',
+    )
+    out = box.check_compilation()
+    assert "TILE" in out and "narrowed" in out
+
+
+def test_no_report_without_a_previous_iteration(filled_workspace, tmp_path, monkeypatch):
+    _stub_passing_build(filled_workspace, monkeypatch)
+    out = make_toolbox(filled_workspace, tmp_path, meta=_CPU_META).check_compilation()
+    assert "previous iteration" not in out
+
+
 # -- rules and architecture -------------------------------------------------
 
 
@@ -314,3 +349,72 @@ def test_compute_capability_resolution(
 ):
     box = make_toolbox(filled_workspace, tmp_path, meta=meta, gpu_info=gpu_info)
     assert box._compute_capability() == expected
+
+
+# -- finalize tools -----------------------------------------------------------
+
+
+def _finalize_box(filled_workspace, tmp_path, **ctx):
+    from agentic.tools import FinalizeToolContext
+
+    src = tmp_path / "branch" / "iter1"
+    src.mkdir(parents=True, exist_ok=True)
+    return make_toolbox(
+        filled_workspace, tmp_path,
+        finalize=FinalizeToolContext(
+            source_iter_dir=src, budget_s=ctx.get("budget_s", 1000.0),
+            gpu_index=0, ref_file=tmp_path / "ref.cu"),
+    )
+
+
+def test_space_size_refuses_before_a_passing_check(filled_workspace, tmp_path):
+    box = _finalize_box(filled_workspace, tmp_path)
+    with pytest.raises(ToolError, match="Run check_compilation and get a PASS first"):
+        box.space_size()
+
+
+def test_space_size_names_the_searcher(filled_workspace, tmp_path, monkeypatch):
+    box = _finalize_box(filled_workspace, tmp_path)
+    box.check_passed = True
+    monkeypatch.setattr("utils.space.count_configurations", lambda *a, **k: 120)
+    monkeypatch.setattr("utils.space.per_config_cost_s", lambda *a, **k: 0.5)
+    out = box.space_size()
+    assert "120 configurations" in out and "exhaustive" in out and "60" in out
+
+
+def test_space_size_reports_an_unmeasurable_space(filled_workspace, tmp_path, monkeypatch):
+    box = _finalize_box(filled_workspace, tmp_path)
+    box.check_passed = True
+    monkeypatch.setattr("utils.space.count_configurations", lambda *a, **k: None)
+    with pytest.raises(ToolError):
+        box.space_size()
+
+
+def test_a_finalize_step_may_end_without_a_change(filled_workspace, tmp_path):
+    """A space already as wide as plausible has nothing to widen; the seeded source
+    files are then what gets retuned, and a forced edit would only add noise."""
+    box = _finalize_box(filled_workspace, tmp_path)
+    box.check_passed = True
+    assert box.end_step("already as wide as plausible") == "Step complete."
+    assert box.ended is True and box.mutations == 0
+
+
+def test_a_finalize_step_still_needs_a_passing_check(filled_workspace, tmp_path):
+    box = _finalize_box(filled_workspace, tmp_path)
+    with pytest.raises(ToolError, match="check_compilation"):
+        box.end_step("done")
+    assert box.ended is False
+
+
+def test_finalize_tools_refuse_outside_finalize(toolbox):
+    with pytest.raises(ToolError):
+        toolbox.parameter_history()
+    with pytest.raises(ToolError):
+        toolbox.space_size()
+
+
+def test_finalize_binding_has_its_tools_and_no_sibling_tools():
+    names = {s.__name__ for s in schemas_for("errors", finalize=True)}
+    assert {"parameter_history", "space_size", "tuning_landscape"} <= names
+    assert "branch_log" not in names and "branch_errors" not in names
+    assert "space_size" not in {s.__name__ for s in schemas_for("errors")}

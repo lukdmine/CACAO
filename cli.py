@@ -32,6 +32,8 @@ from utils.files import (
     archive_output_dir,
     clone_problem_dir,
     prune_archives,
+    remove_pid_file,
+    write_pid_file,
 )
 from utils.log import log, TeeWriter
 from utils.problem import reference_spec
@@ -143,6 +145,24 @@ def parse_args():
         help="Delete regenerable files (tuner input dumps, compiled drivers) from "
              "archive/output_* and exit. Kernels, results and decisions are kept.",
     )
+    parser.add_argument(
+        "--finalize",
+        action="store_true",
+        help="Run only the finalize step on the existing output/ (re-tunes the best "
+             "variants, widens toggles, checks GPU architectures) and exit. Needs an API key.",
+    )
+    parser.add_argument(
+        "--no-finalize",
+        action="store_true",
+        help="Skip the automatic finalize step at the end of the run",
+    )
+    parser.add_argument(
+        "--finalize-timeout",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Tuner wall-clock budget per finalist per case (default: config FINALIZE_TUNER_TIMEOUT)",
+    )
     return parser.parse_args()
 
 
@@ -210,6 +230,65 @@ def check_prerequisites(problem_dir: Path):
     return True
 
 
+def _run_pid_alive(output_dir: Path) -> bool:
+    """Whether output/run.pid names a live process. The API's runs and cli --finalize
+    write the file (utils/files.write_pid_file); a normal CLI run does not, so one in
+    another terminal is not detected."""
+    import os
+
+    try:
+        pid = int((output_dir / "run.pid").read_text(encoding="utf-8").strip())
+        os.kill(pid, 0)
+        return True
+    except (FileNotFoundError, ValueError, ProcessLookupError):
+        return False
+    except OSError:
+        return True  # PermissionError: the process exists, owned by someone else
+
+
+async def _finalize_only(problem_dir: Path) -> int:
+    """--finalize: run finalize on the existing output/ and re-aggregate, nothing else."""
+    import os
+
+    from engine.finalize import run_manual_finalize
+    from nodes.merge import merge_node
+    from utils.branch_bests import collect_branch_bests
+
+    output_dir = problem_dir / "output"
+    log_section("FINALIZE")
+    # Before check_prerequisites: it regenerates inputs.hpp, and a live run owns it.
+    if _run_pid_alive(output_dir):
+        log(f"A run is active (see {output_dir / 'run.pid'}); finalize would race it", "ERROR")
+        return 1
+    # Claimed for as long as this runs: the API refuses a run or a second finalize while
+    # run.pid names a live process, and finalize.json has one writer.
+    write_pid_file(problem_dir, os.getpid())
+    try:
+        # check_prerequisites runs ensure_inputs_hpp; widen and seed stage the driver
+        # beside problem_dir/inputs.hpp and raise when it is missing.
+        if not check_prerequisites(problem_dir):
+            return 1
+        if not collect_branch_bests(output_dir, problem_dir):
+            log("No branch has a result to finalize; run the optimizer first", "ERROR")
+            return 1
+
+        log_path = output_dir / "run.log"
+        with log_path.open("a", encoding="utf-8") as _log_file:
+            old_stdout, old_stderr = sys.stdout, sys.stderr
+            sys.stdout = TeeWriter(old_stdout, _log_file)
+            sys.stderr = TeeWriter(old_stderr, _log_file)
+            try:
+                await run_manual_finalize()
+            finally:
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
+
+        log_section("AGGREGATING RESULTS")
+        return _report_final(merge_node())
+    finally:
+        remove_pid_file(problem_dir)
+
+
 async def main():
     """Main entry point."""
     args = parse_args()
@@ -272,6 +351,8 @@ async def main():
         tuner_timeout=args.timeout,
         model=args.model,
         provider=args.provider,
+        finalize=False if args.no_finalize else None,
+        finalize_timeout=args.finalize_timeout,
     )
     # init_from_config and get_default_model both reach _detect_provider, which is what
     # raises "No LLM provider detected". They have to be inside the try, or the message
@@ -286,6 +367,9 @@ async def main():
     except ValueError as e:
         log(str(e), "ERROR")
         return 1
+
+    if args.finalize:
+        return await _finalize_only(problem_dir)
 
     # GPU Detection
     log_section("Available GPUs")

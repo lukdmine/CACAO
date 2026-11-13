@@ -12,7 +12,8 @@ import { CaseResults } from './CaseResults';
 import { BranchHistory } from './BranchHistory';
 import { branchCaseRange } from './caseScale';
 import { stopBranch, resumeBranch, messageBranch, changeDecision, configureBranch, deleteBranch } from '@/api/client';
-import { refreshTree, useAnalysis, useIterationDetail } from '@/api/hooks';
+import { refreshTree, useAnalysis, useFinalizeData, useIterationDetail } from '@/api/hooks';
+import { FinalizePanel } from './FinalizePanel';
 import { toast } from 'sonner';
 import { X, Square, Play, MessageSquare, Send, Settings2, CheckCircle2, XCircle, Trash2, RefreshCw, AlertTriangle, Loader2 } from 'lucide-react';
 
@@ -110,6 +111,8 @@ export function DetailPanel() {
 
     // Phase-1 work product, and the root node is the only place it belongs: it is
     // about the problem, not about any one branch's bet on it.
+    const finalizeData = useFinalizeData(activeProblem);
+    const startedFinalize = useAppStore((s) => s.startedFinalize);
     const { analysis, loading: analysisLoading } = useAnalysis(activeProblem, isRoot, isRunning);
 
     // Only the newest iteration of a running branch can still change; everything
@@ -363,6 +366,9 @@ export function DetailPanel() {
                         </div>
                     )}
                 </div>
+
+                {/* The finalize pass, above the analysis: it is the run's end product. */}
+                {isRoot && <FinalizePanel data={finalizeData} starting={startedFinalize} />}
 
                 {/* Phase 1's read of the problem and its reference kernel. Root only —
                     every branch inherits it, so repeating it per branch would say the

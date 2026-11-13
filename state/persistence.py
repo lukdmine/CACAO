@@ -8,7 +8,7 @@ from typing import Optional
 
 from pydantic import ValidationError
 
-from state.types import Context, BranchConfig, BranchManifest, IterState
+from state.types import Context, BranchConfig, BranchManifest, FinalizeManifest, IterState
 
 logger = logging.getLogger(__name__)
 
@@ -265,3 +265,27 @@ def create_initial_iter_state(
     )
 
 
+
+
+# --- Finalize manifest (output_dir/finalize/finalize.json) ---
+
+
+def finalize_dir(output_dir: Path) -> Path:
+    return Path(output_dir) / "finalize"
+
+
+def save_finalize_manifest(output_dir: Path, manifest: FinalizeManifest) -> None:
+    atomic_write_json(finalize_dir(output_dir) / "finalize.json", manifest.model_dump())
+
+
+def load_finalize_manifest(output_dir: Path) -> Optional[FinalizeManifest]:
+    """None when absent, and None plus a WARN when the file does not parse."""
+    path = finalize_dir(output_dir) / "finalize.json"
+    if not path.is_file():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return FinalizeManifest.model_validate(json.load(f))
+    except (OSError, ValueError, ValidationError) as e:
+        logger.warning("WARN: could not read %s: %s", path, e)
+        return None

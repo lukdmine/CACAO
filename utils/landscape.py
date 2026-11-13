@@ -28,7 +28,7 @@ _MAX_ROWS = 24
 class Record:
     """One configuration's outcome, flattened out of KTT's result shape."""
 
-    __slots__ = ("config", "status", "duration", "registers", "local_mem")
+    __slots__ = ("config", "status", "duration", "registers", "smem", "local_mem")
 
     def __init__(self, raw: dict):
         self.config: Dict[str, str] = {
@@ -41,14 +41,19 @@ class Record:
         if self.duration is not None and self.duration == float("inf"):
             self.duration = None
 
-        # Register count and local (spill) memory are per-kernel; the maximum across
-        # the composite is what bounds occupancy, so that is what gets reported.
-        regs, local = 0, 0
+        # Register count, shared memory and spill are per-kernel; the maximum across
+        # the composite is what bounds occupancy, so that is what gets reported. KTT's
+        # CUDA backend fills LocalMemorySize from CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES
+        # (KTT/Source/ComputeEngine/Cuda/CudaKernel.cpp:109), so that field is shared
+        # memory; register spill is PrivateMemorySize (local memory per thread).
+        regs, smem, local = 0, 0, 0
         for cr in raw.get("ComputationResults") or []:
             cd = cr.get("CompilationData") or {}
             regs = max(regs, int(cd.get("RegistersCount") or 0))
-            local = max(local, int(cd.get("LocalMemorySize") or 0))
+            smem = max(smem, int(cd.get("LocalMemorySize") or 0))
+            local = max(local, int(cd.get("PrivateMemorySize") or 0))
         self.registers: int = regs
+        self.smem: int = smem
         self.local_mem: int = local
 
     @property
@@ -64,6 +69,12 @@ def load_records(results_path: Path) -> List[Record]:
     """
     data = load_results(Path(results_path)) or {}
     return [Record(r) for r in (data.get("Results") or [])]
+
+
+def best_record(records: List[Record]) -> Optional[Record]:
+    """The fastest successful record, or None when nothing succeeded."""
+    ok = [r for r in records if r.ok]
+    return min(ok, key=lambda r: r.duration) if ok else None
 
 
 def parameter_names(records: List[Record]) -> List[str]:
@@ -83,7 +94,7 @@ def _fmt_us(v: Optional[float]) -> str:
 
 
 def top_configs(results_path: Path, n: int = 10) -> str:
-    """The n fastest configurations, with register pressure and spill memory.
+    """The n fastest configurations, with registers, spill and shared memory.
 
     The gap between rank 1 and rank n is the signal: a sharp optimum rewards more
     search, a flat one says the parameters are not what limits this kernel.
@@ -101,13 +112,13 @@ def top_configs(results_path: Path, n: int = 10) -> str:
 
     n = max(1, min(n, _MAX_ROWS))
     names = parameter_names(records)
-    head = ["| # | time µs | regs | spill B | " + " | ".join(names) + " |"]
-    head.append("|---" * (4 + len(names)) + "|")
+    head = ["| # | time µs | regs | spill B | smem B | " + " | ".join(names) + " |"]
+    head.append("|---" * (5 + len(names)) + "|")
     for i, r in enumerate(ok[:n], 1):
         cells = " | ".join(r.config.get(k, "—") for k in names)
         head.append(
             f"| {i} | {_fmt_us(r.duration)} | {r.registers or '—'} | "
-            f"{r.local_mem or 0} | {cells} |"
+            f"{r.local_mem or 0} | {r.smem or 0} | {cells} |"
         )
 
     best, worst = ok[0].duration, ok[-1].duration

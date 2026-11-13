@@ -93,6 +93,12 @@ def _bind(lib: ctypes.CDLL) -> None:
     lib.nvrtcDestroyProgram.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
     lib.nvrtcGetErrorString.restype = ctypes.c_char_p
     lib.nvrtcGetErrorString.argtypes = [ctypes.c_int]
+    # Added in CUDA 11.2; older libraries lack them and supported_archs() reports [].
+    if hasattr(lib, "nvrtcGetNumSupportedArchs") and hasattr(lib, "nvrtcGetSupportedArchs"):
+        lib.nvrtcGetNumSupportedArchs.restype = ctypes.c_int
+        lib.nvrtcGetNumSupportedArchs.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        lib.nvrtcGetSupportedArchs.restype = ctypes.c_int
+        lib.nvrtcGetSupportedArchs.argtypes = [ctypes.POINTER(ctypes.c_int)]
 
 
 def available() -> bool:
@@ -102,6 +108,30 @@ def available() -> bool:
 def unavailable_reason() -> str:
     _load()
     return _load_error or ""
+
+
+def supported_archs() -> List[int]:
+    """Architectures this NVRTC can target (``[75, 80, ...]``); ``[]`` when unknown."""
+    lib = _load()
+    if lib is None or not hasattr(lib, "nvrtcGetNumSupportedArchs"):
+        return []
+    n = ctypes.c_int()
+    if lib.nvrtcGetNumSupportedArchs(ctypes.byref(n)) != _NVRTC_SUCCESS or n.value <= 0:
+        return []
+    arr = (ctypes.c_int * n.value)()
+    if lib.nvrtcGetSupportedArchs(arr) != _NVRTC_SUCCESS:
+        return []
+    return list(arr)
+
+
+def real_arch_option(arch: int) -> str:
+    """``--gpu-architecture=sm_XY``: a real-architecture compile.
+
+    A ``compute_XY`` compile only produces PTX, so the assembler never sees inline PTX
+    for an instruction the architecture lacks (``cp.async`` below sm_80). ``sm_XY``
+    assembles it, which is what makes a lower-arch compile a meaningful check.
+    """
+    return f"--gpu-architecture=sm_{arch}"
 
 
 # -------------------------------------------------------------------------

@@ -7,6 +7,7 @@
 //   - state/types.py    (Pydantic: Context, BranchManifest, IterState, MainState, BranchResult, SubStrategyDict)
 //   - models/strategy.py (Pydantic: Strategy, StrategizeOutput)
 //   - models/decision.py (Pydantic: OptimizationDecision, ErrorAnalysis, SubStrategy)
+//   - models/finalize.py (Pydantic: KernelTags, ArchReport)
 //
 
 // All status values from the iteration FSM and branch lifecycle
@@ -137,6 +138,87 @@ export interface SubStrategyDict {
   description: string;
   hypothesis: string;
   key_parameters: string[];
+}
+
+// --- From models/finalize.py and state/types.py (finalize) ---
+
+export type FinalizeStatus =
+  | "selecting"
+  | "widening"
+  | "tuning"
+  | "verifying"
+  | "overview"
+  | "done"
+  | "failed";
+
+export interface KernelTags {
+  tensor_cores: boolean;
+  async_copy: boolean;
+  precision: string;
+  min_arch?: number | null;
+  smem_bytes?: number | null;
+  sm_scaled: boolean;
+  note: string;
+}
+
+export interface ArchReport {
+  archs: number[];
+  base_min_arch?: number | null;
+  winner_min_arch?: number | null;
+  per_toggle: Record<string, number | null>;
+  skipped: string;
+}
+
+export interface Variant {
+  dir: string;
+  summary?: Record<string, unknown> | null;
+  tags?: KernelTags | null;
+  arch?: ArchReport | null;
+  ncu_metrics?: Record<string, unknown> | null;
+  searcher: string;
+}
+
+export interface FinalistState {
+  name: string;
+  source_branch: string;
+  source_iter: number;
+  reason: string;
+  forced: boolean;
+  stages: Record<string, string>;
+  source: Variant;
+  finalized?: Variant | null;
+  reported: "source" | "finalized";
+  reported_dir: string;
+  kernel_diff_lines?: number | null;
+  error: string;
+}
+
+export interface OverviewFact {
+  label: string;
+  value: string;
+}
+
+export interface Overview {
+  headline: string;
+  findings: string[];
+  dead_ends: string[];
+  caveats: string[];
+  facts: OverviewFact[];
+  markdown: string;
+}
+
+export interface FinalizeManifest {
+  status: "selecting" | "widening" | "tuning" | "verifying" | "overview" | "done" | "failed";
+  attempt: number;
+  trigger: "auto" | "manual";
+  started_at: string;
+  finished_at: string;
+  error: string;
+  pid?: number | null;
+  source_fingerprint: string;
+  finalists: FinalistState[];
+  category_bests: Record<string, string>;
+  overview?: Overview | null;
 }
 
 // --- Frontend-specific types ---

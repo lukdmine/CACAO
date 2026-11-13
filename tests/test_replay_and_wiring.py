@@ -128,7 +128,10 @@ def test_regions_survive_an_assemble_extract_round_trip(cov_branch):
     )
     include = re.search(r'SetCompilerOptions\("-I([^"]+)"', original).group(1)
     rebuilt = assemble_framework_cpp(meta, extract_regions(original), cuda_include=include)
-    assert rebuilt == original
+    # The regions are what must survive. The engine-owned skeleton around them is
+    # allowed to move on after a run was recorded (Task 4 added the searcher modes), so
+    # comparing the whole file would fail on every skeleton change.
+    assert extract_regions(rebuilt) == extract_regions(original)
 
 
 def test_empty_region_extracts_as_empty():

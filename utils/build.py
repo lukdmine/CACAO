@@ -238,12 +238,20 @@ def driver_command(
     output_base: str,
     kernel_file,
     ref_file,
+    *,
+    profile_results: str = "",
+    mode: str = "random",
+    seed_results: str = "",
 ) -> list[str]:
     """argv for a compiled framework driver.
 
-    KTT writes ``<output_base>.json``.
+    KTT writes ``<output_base>.json``. The keywords map onto argv[8..10]: with all
+    defaults the list is the original 8 elements, ``profile_results`` alone appends
+    argv[8], and a non-default ``mode`` appends ``[profile_results, mode,
+    seed_results]`` so the mode lands in argv[9] (profile mode, if set, still wins in
+    the driver). ``seed_results`` is a results base name, as for ``profile_results``.
     """
-    return [
+    cmd = [
         str(binary),
         str(platform),
         str(device),
@@ -253,3 +261,8 @@ def driver_command(
         str(kernel_file),
         str(ref_file),
     ]
+    if mode != "random":
+        cmd += [str(profile_results), mode, str(seed_results)]
+    elif profile_results:
+        cmd.append(str(profile_results))
+    return cmd

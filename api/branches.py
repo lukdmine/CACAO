@@ -11,6 +11,7 @@ from api.helpers import (
     is_branch_live,
     get_branch_lock,
     is_problem_running,
+    reject_while_finalizing,
 )
 from api.schemas import BranchMessageRequest, ChangeDecisionRequest, BranchConfigRequest
 
@@ -20,6 +21,7 @@ router = APIRouter()
 @router.post("/api/problems/{name}/branches/{branch_id:path}/stop")
 def stop_branch(name: str, branch_id: str):
     """Stop a specific branch (cooperative -- takes effect between nodes)."""
+    reject_while_finalizing(name)
     from state import write_control_signal
 
     branch_path = resolve_branch_path(name, branch_id)
@@ -30,6 +32,7 @@ def stop_branch(name: str, branch_id: str):
 @router.post("/api/problems/{name}/branches/{branch_id:path}/resume")
 def resume_branch(name: str, branch_id: str):
     """Resume a stopped branch."""
+    reject_while_finalizing(name)
     from state import write_control_signal
 
     branch_path = resolve_branch_path(name, branch_id)
@@ -40,6 +43,7 @@ def resume_branch(name: str, branch_id: str):
 @router.post("/api/problems/{name}/branches/{branch_id:path}/message")
 def message_branch(name: str, branch_id: str, req: BranchMessageRequest):
     """Send a message to a branch (resumes if stopped)."""
+    reject_while_finalizing(name)
     from state import write_control_signal
 
     branch_path = resolve_branch_path(name, branch_id)
@@ -55,6 +59,7 @@ def change_decision(name: str, branch_id: str, req: ChangeDecisionRequest):
     Handles live workers (signal), dead branches with running optimizer (disk surgery + requeue),
     and dead branches with stopped optimizer (disk surgery + auto-resume).
     """
+    reject_while_finalizing(name)
     from state import (
         write_control_signal,
         clear_control_signals,
@@ -160,6 +165,7 @@ def configure_branch(name: str, branch_id: str, req: BranchConfigRequest):
     in memory for the duration of a node and rewrites it wholesale afterwards,
     so a setting written there was reverted a few minutes later, every time.
     """
+    reject_while_finalizing(name)
     from state import load_branch_config, save_branch_config
 
     branch_path = resolve_branch_path(name, branch_id)
@@ -205,6 +211,7 @@ def get_iteration(
 @router.delete("/api/problems/{name}/branches/{branch_id:path}")
 def delete_branch(name: str, branch_id: str):
     """Delete a leaf branch (no children allowed). Only when optimizer is stopped."""
+    reject_while_finalizing(name)
     if is_problem_running(name):
         raise HTTPException(
             status_code=409, detail="Stop the optimizer before deleting a branch."

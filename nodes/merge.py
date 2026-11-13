@@ -78,10 +78,94 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
     return results
 
 
-def build_final_summary(branch_results: List[dict], best: dict) -> dict:
-    """The contents of ``output/final_results.json``. One builder; there were two,
-    with different shapes, and ``--best`` overwrote the richer with the poorer."""
+def _best_finalist(finalize, branch_results: List[dict]) -> Optional[dict]:
+    """The finalist whose reported variant scores best, as a branch-result-shaped dict.
+
+    ``best_branch`` is the finalist's source branch name: the strategy name of the
+    branch result whose path ends with the finalist's ``source_branch`` (a path relative
+    to output/), else the last component of that path when the branch is not on disk.
+    None when no finalist has a reported variant with a time.
+    """
+    from utils.branch_bests import summary_rank_key
+
+    best = None
+    for f in finalize.finalists:
+        variant = f.finalized if f.reported == "finalized" else f.source
+        summary = variant.summary if variant else None
+        if not summary or summary.get("best_time_us") is None:
+            continue
+        if best is None or summary_rank_key(summary) < summary_rank_key(best["summary"]):
+            best = {"finalist": f, "summary": summary}
+    if best is None:
+        return None
+    f = best["finalist"]
+    suffix = "/" + f.source_branch.strip("/")
+    name = next(
+        (
+            r.get("branch_name")
+            for r in branch_results
+            if str(r.get("branch_path", "")).endswith(suffix)
+        ),
+        None,
+    ) or f.source_branch.rstrip("/").rsplit("/", 1)[-1]
     return {
+        "branch_name": name,
+        "best_config": best["summary"].get("best_config"),
+        "best_time_us": best["summary"].get("best_time_us"),
+        "speedup": best["summary"].get("speedup"),
+    }
+
+
+def _finalize_section(finalize) -> dict:
+    def speedup(variant):
+        return ((variant.summary or {}).get("speedup")) if variant else None
+
+    finalists = []
+    for f in finalize.finalists:
+        reported = f.finalized if f.reported == "finalized" else f.source
+        finalists.append(
+            {
+                "name": f.name,
+                "source_branch": f.source_branch,
+                "source_iter": f.source_iter,
+                "reported": f.reported,
+                "reported_dir": f.reported_dir,
+                "tags": reported.tags.model_dump() if reported and reported.tags else None,
+                "source_speedup": speedup(f.source),
+                "finalized_speedup": speedup(f.finalized),
+            }
+        )
+    return {
+        "status": finalize.status,
+        "attempt": finalize.attempt,
+        "finalists": finalists,
+        "category_bests": finalize.category_bests,
+        "overview": finalize.overview.markdown if finalize.overview else None,
+    }
+
+
+def build_final_summary(
+    branch_results: List[dict], best: Optional[dict], finalize=None
+) -> dict:
+    """The contents of ``output/final_results.json``. One builder; there were two,
+    with different shapes, and ``--best`` overwrote the richer with the poorer.
+
+    With a finalize manifest the top-level best is the better of the best branch and the
+    best finalist's reported variant (a tie keeps the branch), and the file gains
+    ``best_source`` and a ``finalize`` section. Without one the shape is unchanged."""
+    best_source = "branch"
+    finalist = None
+    if finalize is not None:
+        from utils.branch_bests import summary_rank_key
+
+        finalist = _best_finalist(finalize, branch_results)
+        if finalist is not None and (
+            best is None or summary_rank_key(finalist) < summary_rank_key(best)
+        ):
+            best, best_source = finalist, "finalize"
+    best = best or {}
+
+    summary = {
         "best_branch": best.get("branch_name"),
         "best_config": best.get("best_config"),
         "best_time_us": best.get("best_time_us"),
@@ -99,6 +183,10 @@ def build_final_summary(branch_results: List[dict], best: dict) -> dict:
             for r in branch_results
         ],
     }
+    if finalize is not None:
+        summary["best_source"] = best_source
+        summary["finalize"] = _finalize_section(finalize)
+    return summary
 
 
 def get_best_branch_result(results: List[dict]) -> Optional[dict]:
@@ -197,6 +285,8 @@ def merge_node() -> dict:
     print("  NODE: Merge Results")
     print("=" * 60)
 
+    from state import load_finalize_manifest
+
     branches_dir = get_output_dir() / "branches"
 
     # Find all branch results
@@ -230,25 +320,34 @@ def merge_node() -> dict:
 
     # Find best overall result
     best = get_best_branch_result(branch_results)
+    finalize = load_finalize_manifest(get_output_dir())
 
-    if best:
-        log(f"\nBest branch: {best.get('branch_name')}", "SUCCESS")
-        best_time = best.get("best_time_us")
+    if finalize and finalize.overview and finalize.overview.markdown:
+        print("\n" + finalize.overview.markdown)
+
+    summary = build_final_summary(branch_results, best, finalize)
+
+    if best or summary["best_time_us"] is not None:
+        shown = best or {
+            "branch_name": summary["best_branch"],
+            "best_time_us": summary["best_time_us"],
+            "speedup": summary["speedup"],
+            "status": "success",
+        }
+        log(f"\nBest branch: {summary['best_branch']}", "SUCCESS")
+        best_time = summary["best_time_us"]
         if best_time is not None:
             log(f"Best time: {best_time:.2f} µs")
         else:
             log("Best time: N/A (no successful runs)")
-        if best.get("speedup"):
-            log(f"Speedup: {best.get('speedup'):.2f}x")
+        if summary["speedup"]:
+            log(f"Speedup: {summary['speedup']:.2f}x")
 
-        save_json(
-            get_output_dir() / "final_results.json",
-            build_final_summary(branch_results, best),
-        )
+        save_json(get_output_dir() / "final_results.json", summary)
 
         return {
             "status": "success"
-            if best.get("status") in ("success", "branching")
+            if shown.get("status") in ("success", "branching")
             else "failed"
         }
     else:

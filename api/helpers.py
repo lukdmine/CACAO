@@ -7,10 +7,12 @@ import signal
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 import yaml
 from fastapi import HTTPException
 
+from utils.files import remove_pid_file, write_pid_file  # noqa: F401  (re-exported)
 from utils.problem import gpu_index as problem_gpu_index, reference_spec
 
 from dataclasses import dataclass
@@ -41,18 +43,8 @@ _branch_locks_guard = threading.Lock()
 
 
 # ── PID file helpers (survive server reload) ──────────────────────────────────
-
-
-def write_pid_file(problem_dir: Path, pid: int):
-    """Write optimizer PID to output/run.pid."""
-    pid_file = problem_dir / "output" / "run.pid"
-    pid_file.parent.mkdir(parents=True, exist_ok=True)
-    pid_file.write_text(str(pid), encoding="utf-8")
-
-
-def remove_pid_file(problem_dir: Path):
-    """Remove the PID file (called on stop or normal exit)."""
-    (problem_dir / "output" / "run.pid").unlink(missing_ok=True)
+# write_pid_file and remove_pid_file live in utils/files (imported above), so that
+# cli --finalize can claim run.pid without importing FastAPI.
 
 
 def _pid_file_alive(problem_dir: Path) -> bool:
@@ -108,6 +100,35 @@ def is_problem_running(name: str) -> bool:
     """Check if a problem has a running optimizer (in-memory dict + PID file fallback)."""
     with _running_lock:
         return _is_running_unlocked(name)
+
+
+def finalize_phase(problem_dir: Path, running: bool) -> Optional[str]:
+    """"finalizing" while the finalize pass is the live process, else None.
+
+    The manifest names the process that writes it: a non-terminal status whose pid is
+    alive is finalize. A killed pass leaves the same status behind, and a normal run
+    resumed on top of it is a live process that is not finalizing.
+    """
+    from state import load_finalize_manifest
+
+    if not running:
+        return None
+    manifest = load_finalize_manifest(problem_dir / "output")
+    if manifest is None or manifest.status in ("done", "failed"):
+        return None
+    if manifest.pid is None:
+        return None
+    try:
+        os.kill(manifest.pid, 0)
+    except (ProcessLookupError, PermissionError, OSError):
+        return None
+    return "finalizing"
+
+
+def reject_while_finalizing(name: str) -> None:
+    """409 for the branch-editing endpoints: finalize reads the branch tree it ranks."""
+    if finalize_phase(get_problem_dir(name), is_problem_running(name)) == "finalizing":
+        raise HTTPException(status_code=409, detail="Finalizing; stop it first.")
 
 
 def _check_gpu_orphans(gpu_index: int, skip_name: str | None = None):

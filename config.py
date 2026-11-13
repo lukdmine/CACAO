@@ -92,6 +92,18 @@ STEP_TRUNCATION_RETRIES = 3
 #   "off"    — nothing about other branches
 CROSS_BRANCH_ACCESS = "errors"
 
+# ===== Finalize =====
+# The post-run pass (engine/finalize.py): re-tunes the best variants, widens toggles and
+# checks other GPU architectures. Writes only under output/finalize/.
+# On: the merge step reports its output in final_results.json. --no-finalize skips it.
+FINALIZE_AUTO = True
+# Tuner wall-clock budget per finalist per case (seconds).
+FINALIZE_TUNER_TIMEOUT = 1000
+# Architectures (sm_XX) the portability check compiles for.
+FINALIZE_ARCHS = (75, 80, 86, 89, 90)
+# Finalists taken from the branch ranking.
+FINALIZE_MAX_FINALISTS = 4
+
 
 @dataclass(frozen=True)
 class OptimizerConfig:
@@ -107,6 +119,9 @@ class OptimizerConfig:
     )
     model: Optional[str] = None
     provider: Optional[str] = None
+    # None = leave the module defaults (FINALIZE_AUTO / FINALIZE_TUNER_TIMEOUT) alone.
+    finalize: Optional[bool] = None
+    finalize_timeout: Optional[int] = None
 
 
 def init_from_config(cfg: OptimizerConfig):
@@ -117,13 +132,19 @@ def init_from_config(cfg: OptimizerConfig):
         MAX_ITERATIONS, \
         MAX_BRANCH_DEPTH, \
         PATH_BUDGET, \
-        TUNER_TIMEOUT_OVERRIDE
+        TUNER_TIMEOUT_OVERRIDE, \
+        FINALIZE_AUTO, \
+        FINALIZE_TUNER_TIMEOUT
     _base_output_dir = cfg.output_dir
     _problem_dir = cfg.problem_dir
     MAX_ITERATIONS = cfg.max_iterations
     MAX_BRANCH_DEPTH = cfg.max_branch_depth
     PATH_BUDGET = cfg.path_budget
     TUNER_TIMEOUT_OVERRIDE = cfg.tuner_timeout
+    if cfg.finalize is not None:
+        FINALIZE_AUTO = cfg.finalize
+    if cfg.finalize_timeout is not None:
+        FINALIZE_TUNER_TIMEOUT = cfg.finalize_timeout
     set_provider(cfg.provider)
     if cfg.model:
         set_model(cfg.model)

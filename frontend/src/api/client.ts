@@ -109,7 +109,20 @@ export async function uploadProblemInput(
 
 // --- Tree endpoint ---
 
-import type { TreeNode, TokenUsage, IterationDetail } from '@/api/types.generated';
+import type { TreeNode, TokenUsage, IterationDetail, FinalizeManifest } from '@/api/types.generated';
+
+// The light view of output/finalize/finalize.json that the tree payload carries
+// (api/tree.py:_finalize_summary). The full manifest comes from fetchFinalize.
+export interface FinalizeSummary {
+    status: FinalizeManifest['status'];
+    attempt: number;
+    finalists: Array<{
+        name: string;
+        source_branch: string;
+        reported: 'source' | 'finalized';
+        stages: Record<string, string>;
+    }>;
+}
 
 export interface TreeResponse {
     nodes: TreeNode[];
@@ -117,6 +130,7 @@ export interface TreeResponse {
     llm_model?: string;
     llm_provider?: string;
     token_usage?: TokenUsage | null;
+    finalize?: FinalizeSummary | null;
 }
 
 /**
@@ -360,6 +374,26 @@ export async function resumeProblem(name: string, config?: RunConfig) {
         method: 'POST',
         body: JSON.stringify(config ?? {}),
     });
+}
+
+export type FinalizeState =
+    | 'not_run' | 'finalizing' | 'up_to_date' | 'stale' | 'failed' | 'stopped';
+
+export interface FinalizeResponse {
+    state: FinalizeState;
+    manifest: FinalizeManifest | null;
+    overview_markdown: string | null;
+}
+
+export async function finalizeProblem(name: string, config?: RunConfig) {
+    return apiFetch(`/api/problems/${name}/finalize`, {
+        method: 'POST',
+        body: JSON.stringify(config ?? {}),
+    });
+}
+
+export async function fetchFinalize(name: string): Promise<FinalizeResponse> {
+    return apiFetch<FinalizeResponse>(`/api/problems/${name}/finalize`);
 }
 
 // --- Models ---

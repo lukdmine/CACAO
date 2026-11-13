@@ -15,8 +15,10 @@ Also retained:
 - SubStrategyDict: sub-strategy descriptor for recursive branching
 """
 
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional, get_args
 from pydantic import BaseModel, Field
+
+from models.finalize import ArchReport, KernelTags
 
 # Pydantic models for core state
 
@@ -231,3 +233,75 @@ def validate_transition(old_status: str, new_status: str):
             f"Invalid status transition: '{old_status}' -> '{new_status}'. "
             f"Allowed: {allowed}"
         )
+
+
+# --- Finalize (output/finalize/finalize.json) ---
+
+FinalizeStatus = Literal[
+    "selecting", "widening", "tuning", "verifying", "overview", "done", "failed"
+]
+FINALIZE_STATUSES = get_args(FinalizeStatus)
+STAGE_STATUSES = ("pending", "done", "failed", "skipped")
+
+
+class Variant(BaseModel):
+    """One kernel version of a finalist: the branch's own best, or its finalized rework."""
+
+    dir: str  # relative to output/
+    summary: Optional[dict] = None  # aggregate_case_summaries shape
+    tags: Optional[KernelTags] = None
+    arch: Optional[ArchReport] = None
+    ncu_metrics: Optional[dict] = None
+    # The searcher a finalized variant was tuned with: "exhaustive", "mcmc (seeded)",
+    # "mcmc (unseeded)" or, when only some cases had a seed, the cases that did. Empty
+    # on a source variant, which its branch tuned with the random searcher.
+    searcher: str = ""
+
+
+class FinalistState(BaseModel):
+    name: str
+    source_branch: str  # relative to output/
+    source_iter: int
+    reason: str = ""
+    forced: bool = False
+    stages: Dict[str, str] = Field(
+        default_factory=lambda: {"widen": "pending", "tune": "pending", "verify": "pending"}
+    )
+    source: Variant
+    finalized: Optional[Variant] = None
+    reported: Literal["source", "finalized"] = "source"
+    reported_dir: str = ""  # == source.dir or finalized.dir
+    kernel_diff_lines: Optional[int] = None
+    error: str = ""
+
+
+class OverviewFact(BaseModel):
+    label: str
+    value: str
+
+
+class Overview(BaseModel):
+    headline: str
+    findings: List[str] = Field(default_factory=list)
+    dead_ends: List[str] = Field(default_factory=list)
+    caveats: List[str] = Field(default_factory=list)
+    facts: List[OverviewFact] = Field(default_factory=list)
+    markdown: str = ""
+
+
+class FinalizeManifest(BaseModel):
+    """Written only by the finalize process; the API reads it."""
+
+    status: FinalizeStatus = "selecting"
+    attempt: int = 1
+    trigger: Literal["auto", "manual"] = "auto"
+    started_at: str = ""
+    finished_at: str = ""
+    error: str = ""
+    # The finalize process, so the API can tell a live pass from the leftovers of a killed
+    # one (auto-finalize runs inside the normal run, so the registry cannot say).
+    pid: Optional[int] = None
+    source_fingerprint: str = ""
+    finalists: List[FinalistState] = Field(default_factory=list)
+    category_bests: Dict[str, str] = Field(default_factory=dict)  # "tensor_cores=true" -> finalist name
+    overview: Optional[Overview] = None

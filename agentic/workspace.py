@@ -42,6 +42,46 @@ REGION_KEYS = {
 _STAGING_DIRNAME = ".staging"
 
 
+def _read_owned_files(directory: Path) -> Dict[str, str]:
+    """Whichever of the four LLM-owned files are present in one directory."""
+    contents = {}
+    for name in ALL_FILES:
+        candidate = directory / name
+        if candidate.exists():
+            contents[name] = candidate.read_text(encoding="utf-8")
+    return contents
+
+
+def owned_files_from_dir(directory: Path) -> Dict[str, str]:
+    """The four LLM-owned files of one iteration directory, wherever they ended up.
+
+    The committed files; else what an aborted step left in staging (it never reached
+    commit()); else the regions spliced into framework.cpp, because region files did not
+    exist before the authoring node and an older iteration has only the assembled driver.
+    """
+    directory = Path(directory)
+    contents = _read_owned_files(directory)
+
+    if not contents:
+        contents = _read_owned_files(Workspace(directory).staging)
+
+    if len(contents) <= 1:
+        framework = directory / "framework.cpp"
+        if framework.exists():
+            # utils.framework imports this module for REGION_KEYS.
+            from utils.framework import extract_regions
+
+            try:
+                regions = extract_regions(framework.read_text(encoding="utf-8"))
+            except Exception:
+                regions = {}
+            for name, key in REGION_KEYS.items():
+                if regions.get(key):
+                    contents[name] = regions[key]
+
+    return contents
+
+
 class Workspace:
     """The four LLM-owned files, staged until the step commits."""
 
@@ -167,3 +207,25 @@ class Workspace:
         (self.staging / name).write_text(content.replace(old, new), encoding="utf-8")
         delta = len(new) - len(old)
         return f"Edited {name} ({delta:+,} bytes)."
+
+
+_LANGUAGE = {KERNEL_FILE: "cuda"}
+
+
+def format_workspace(ws: Workspace, intro: str) -> str:
+    """The files a step starts from, ready to edit, as a prompt section.
+
+    ``intro`` says how they may be changed, which is the caller's to decide: an authoring
+    step may rewrite any of them, a finalize widening step may only edit the kernel.
+    """
+    parts = []
+    for name in ALL_FILES:
+        if not ws.exists(name):
+            continue
+        body = ws.read(name)
+        parts.append(f"### {name}\n```{_LANGUAGE.get(name, 'cpp')}\n{body}\n```")
+    if not parts:
+        return ""
+    return (
+        "## Current files (already in your workspace)\n\n" + intro + "\n\n" + "\n\n".join(parts)
+    )

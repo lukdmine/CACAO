@@ -13,6 +13,12 @@ from pathlib import Path
 import yaml
 
 _ORDER: list = []
+_COMMANDS: list = []
+
+
+def commands() -> list:
+    """Every driver argv the last run_two_case_node call launched, in launch order."""
+    return list(_COMMANDS)
 
 
 def order_log() -> list:
@@ -62,12 +68,14 @@ def run_two_case_node(
     compile_framework=None,
     fail_tuning_for: str | None = None,
     cases: list | None = None,
+    run_kwargs: dict | None = None,
 ):
     """Build a problem + iteration under tmp_path and run run_node against it."""
     import config
     from utils.build import BuildResult
 
     _ORDER.clear()
+    _COMMANDS.clear()
 
     meta = dict(PROBLEM_YAML)
     if cases is not None:
@@ -101,6 +109,7 @@ def run_two_case_node(
     async def _drive(cmd, cwd, budget_s, watchdog_s, tracker, branch_name="default"):
         name = Path(cwd).name
         _ORDER.append(f"tune:{name}")
+        _COMMANDS.append(list(cmd))
         ok = fail_tuning_for is None or fail_tuning_for not in name
         (Path(cwd) / "results.json").write_text(
             json.dumps(_results_json(100.0, ok)), encoding="utf-8"
@@ -125,7 +134,7 @@ def run_two_case_node(
             analysis="", iter_num=1, status="running", max_iter=1,
             branch_path=str(branch),
         )
-        return asyncio.run(run_mod.run_node(state))
+        return asyncio.run(run_mod.run_node(state, **(run_kwargs or {})))
     finally:
         for m, n, v in saved:
             setattr(m, n, v)

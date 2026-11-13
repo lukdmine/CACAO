@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Problem, TokenUsage, TreeNode } from '@/api/types.generated';
-import type { ModelsResponse } from '@/api/client';
+import type { ModelsResponse, FinalizeSummary, FinalizeResponse } from '@/api/client';
 
 // localStorage helpers
 const LS_PROVIDER = 'cacao-selected-provider';
@@ -25,6 +25,13 @@ interface AppState {
 
     // Tree
     treeNodes: TreeNode[];
+    finalize: FinalizeSummary | null;
+    // The full finalize response, fetched once by useFinalize and tagged with its
+    // problem so a switch never shows another problem's results.
+    finalizeData: { problem: string; data: FinalizeResponse } | null;
+    // Set when a finalize POST is accepted. The state read back from the server stays
+    // not_run/up_to_date/stale until the child writes its manifest, seconds later.
+    startedFinalize: boolean;
     selectedNodeId: string | null;
 
     // Run state
@@ -50,8 +57,10 @@ interface AppActions {
     selectNode: (id: string | null) => void;
     toggleSidebar: () => void;
     setProblems: (problems: Problem[], llmModel?: string, llmProvider?: string) => void;
-    setTreeFromAPI: (nodes: TreeNode[], llmModel?: string, llmProvider?: string, tokenUsage?: TokenUsage | null) => void;
+    setTreeFromAPI: (nodes: TreeNode[], llmModel?: string, llmProvider?: string, tokenUsage?: TokenUsage | null, finalize?: FinalizeSummary | null) => void;
     setRunStatus: (status: AppState['runStatus']) => void;
+    setFinalizeData: (problem: string, data: FinalizeResponse) => void;
+    setStartedFinalize: (started: boolean) => void;
     setConnected: (connected: boolean) => void;
     setAvailableModels: (models: ModelsResponse) => void;
     setSelectedProvider: (provider: string) => void;
@@ -65,6 +74,9 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
     problems: [],
     activeProblem: null,
     treeNodes: [],
+    finalize: null,
+    finalizeData: null,
+    startedFinalize: false,
     selectedNodeId: null,
     runStatus: 'idle',
     tokenUsage: { api_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
@@ -77,7 +89,7 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
     connected: false,
 
     // Actions
-    setActiveProblem: (name) => set({ activeProblem: name, selectedNodeId: null, treeNodes: [], tokenUsage: { api_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }),
+    setActiveProblem: (name) => set({ activeProblem: name, selectedNodeId: null, treeNodes: [], finalize: null, finalizeData: null, startedFinalize: false, tokenUsage: { api_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } }),
     selectNode: (id) => set({ selectedNodeId: id }),
     toggleSidebar: () => set((state) => ({ sidebarOpen: !state.sidebarOpen })),
 
@@ -88,14 +100,17 @@ export const useAppStore = create<AppState & AppActions>((set, get) => ({
         ...(llmModel != null && { llmModel }),
         ...(llmProvider != null && { llmProvider }),
     }),
-    setTreeFromAPI: (nodes, llmModel, llmProvider, tokenUsage) => set({
+    setTreeFromAPI: (nodes, llmModel, llmProvider, tokenUsage, finalize) => set({
         treeNodes: nodes,
+        finalize: finalize ?? null,
         connected: true,
         ...(llmModel != null && { llmModel }),
         ...(llmProvider != null && { llmProvider }),
         tokenUsage: tokenUsage ?? { api_calls: 0, prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
     }),
     setRunStatus: (status) => set({ runStatus: status }),
+    setFinalizeData: (problem, data) => set({ finalizeData: { problem, data } }),
+    setStartedFinalize: (started) => set({ startedFinalize: started }),
     // A successful response sets it true as a side effect; only the poll loops'
     // catch blocks set it false, so a backend that dies mid-session is visible.
     setConnected: (connected) => set({ connected }),

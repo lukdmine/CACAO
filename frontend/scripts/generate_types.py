@@ -6,6 +6,7 @@ Reads:
   - state/types.py     → Pydantic models (Context, BranchManifest, IterState, MainState, BranchResult, SubStrategyDict)
   - models/strategy.py  → Pydantic models (Strategy, StrategizeOutput)
   - models/decision.py  → Pydantic models (OptimizationDecision, ErrorAnalysis, SubStrategy)
+  - models/finalize.py  → Pydantic models (KernelTags, ArchReport); state/types.py also holds the finalize manifest
 
 Writes:
   - frontend/src/api/types.generated.ts
@@ -133,7 +134,9 @@ def main():
     print(f"  Output file: {OUTPUT_FILE}")
 
     # Import backend models
-    from state.types import BRANCH_STATUSES, Context, BranchConfig, BranchManifest, IterState, MainState, BranchResult, SubStrategyDict, StrategyInfo
+    from state.types import BRANCH_STATUSES, FINALIZE_STATUSES, Context, BranchConfig, BranchManifest, IterState, MainState, BranchResult, SubStrategyDict, StrategyInfo
+    from state.types import FinalistState, FinalizeManifest, Overview, OverviewFact, Variant
+    from models.finalize import ArchReport, KernelTags
     from models.strategy import Strategy, StrategizeOutput
     from models.decision import OptimizationDecision, ErrorAnalysis, SubStrategy as SubStrategyPydantic
 
@@ -149,6 +152,7 @@ def main():
     sections.append("//   - state/types.py    (Pydantic: Context, BranchManifest, IterState, MainState, BranchResult, SubStrategyDict)")
     sections.append("//   - models/strategy.py (Pydantic: Strategy, StrategizeOutput)")
     sections.append("//   - models/decision.py (Pydantic: OptimizationDecision, ErrorAnalysis, SubStrategy)")
+    sections.append("//   - models/finalize.py (Pydantic: KernelTags, ArchReport)")
     sections.append("//")
     sections.append("")
 
@@ -197,6 +201,19 @@ def main():
     sections.append("")
     sections.append(pydantic_to_ts(SubStrategyDict))
     sections.append("")
+
+    # Finalize manifest. The two leaf models come from models/finalize.py (utils/ code
+    # returns them, and utils/ does not import state).
+    sections.append("// --- From models/finalize.py and state/types.py (finalize) ---")
+    sections.append("")
+    sections.append("export type FinalizeStatus =")
+    for i, status in enumerate(FINALIZE_STATUSES):
+        end = ";" if i == len(FINALIZE_STATUSES) - 1 else ""
+        sections.append(f'  | "{status}"{end}')
+    sections.append("")
+    for model in (KernelTags, ArchReport, Variant, FinalistState, OverviewFact, Overview, FinalizeManifest):
+        sections.append(pydantic_to_ts(model))
+        sections.append("")
 
     # Frontend-specific types (not from backend, but needed by components)
     sections.append("// --- Frontend-specific types ---")

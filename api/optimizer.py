@@ -22,6 +22,7 @@ from api.helpers import (
     remove_pid_file,
     _last_exit_codes,
     _reap_unlocked,
+    load_json,
 )
 from api.schemas import RunConfig
 from utils.log import TeeWriter
@@ -64,8 +65,14 @@ def _optimizer_target(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     resume: bool = False,
+    finalize_only: bool = False,
+    finalize: Optional[bool] = None,
+    finalize_timeout: Optional[int] = None,
 ):
     """Process target for a run, or for resuming an interrupted one.
+
+    ``finalize_only`` runs just the finalize pass over the existing output/: no archive,
+    no run_meta.json rewrite (the recorded one still describes the run), run.log appended.
 
     The preflight runs *inside* the log redirect: a missing API key (ValueError from
     check_api_key) and a missing inputs.yaml (FileNotFoundError from load_problem_inputs)
@@ -100,9 +107,11 @@ def _optimizer_target(
                     tuner_timeout=timeout,
                     model=model,
                     provider=provider,
+                    finalize=finalize,
+                    finalize_timeout=finalize_timeout,
                 )
             )
-            if not resume:
+            if not resume and not finalize_only:
                 from utils.files import archive_output_dir
 
                 archive_output_dir()
@@ -116,7 +125,8 @@ def _optimizer_target(
         log_path = problem_dir / "output" / "run.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with log_path.open("a" if resume else "w", encoding="utf-8") as log_file:
+        log_mode = "a" if resume or finalize_only else "w"
+        with log_path.open(log_mode, encoding="utf-8") as log_file:
             old_stdout, old_stderr = sys.stdout, sys.stderr
             sys.stdout = TeeWriter(old_stdout, log_file)
             sys.stderr = TeeWriter(old_stderr, log_file)
@@ -129,12 +139,29 @@ def _optimizer_target(
 
                 cfg.check_api_key()
 
-                # Run metadata, so the server can report the correct model/provider
+                if finalize_only:
+                    from engine.finalize import run_manual_finalize
+                    from engine.master import _write_final_results
+                    from utils.inputs import ensure_inputs_hpp
+
+                    # Finalize's staging raises without inputs.hpp and would reuse a
+                    # stale one after an inputs.yaml edit.
+                    ensure_inputs_hpp(problem_dir)
+                    _asyncio.run(run_manual_finalize())
+                    _write_final_results()
+                    return
+
+                # Run metadata: the server reports the model/provider from it, and a
+                # resume repeats all of it (_as_recorded).
                 (problem_dir / "output" / "run_meta.json").write_text(
                     _json.dumps(
                         {
                             "model": cfg.get_model(),
                             "provider": cfg.get_provider(),
+                            "max_iter": max_iter,
+                            "max_depth": max_depth,
+                            "path_budget": path_budget,
+                            "timeout": timeout,
                         }
                     ),
                     encoding="utf-8",
@@ -185,7 +212,11 @@ def _check_gpu_unlocked(gpu_index: int):
 
 
 def _spawn_optimizer(
-    problem_dir: Path, config: RunConfig, label: str, resume: bool
+    problem_dir: Path,
+    config: RunConfig,
+    label: str,
+    resume: bool,
+    finalize_only: bool = False,
 ) -> multiprocessing.Process:
     proc = multiprocessing.Process(
         target=_optimizer_target,
@@ -198,6 +229,9 @@ def _spawn_optimizer(
             config.model,
             config.provider,
             resume,
+            finalize_only,
+            config.finalize,
+            config.finalize_timeout,
         ),
         daemon=True,
         name=label,
@@ -213,6 +247,7 @@ def _reserve_and_spawn(
     gpu_index: int,
     label: str,
     resume: bool,
+    finalize_only: bool = False,
 ):
     """Atomically verify name/GPU are free, spawn the process, and record the entry.
 
@@ -226,7 +261,9 @@ def _reserve_and_spawn(
                 status_code=409, detail=f"Optimization already running for '{name}'"
             )
         _check_gpu_unlocked(gpu_index)
-        proc = _spawn_optimizer(problem_dir, config, label, resume)
+        # finalize_only is passed only when set, so a spawn without it keeps its old call.
+        extra = {"finalize_only": True} if finalize_only else {}
+        proc = _spawn_optimizer(problem_dir, config, label, resume, **extra)
         _running_problems[name] = RunEntry(process=proc, gpu_index=gpu_index)
         # The new run's outcome is the only one worth reporting.
         _last_exit_codes.pop(name, None)
@@ -239,15 +276,47 @@ def start_run(name: str, problem_dir: Path, config: RunConfig, gpu_index: int):
     )
 
 
+_RECORDED_BUDGET = ("max_iter", "max_depth", "path_budget", "timeout")
+
+
+def _as_recorded(problem_dir: Path, config: RunConfig) -> RunConfig:
+    """``config`` with every setting it leaves unset taken from the run being resumed.
+
+    A resume handed no model auto-detects one, and with several API keys set that can
+    be another provider: change-decision resumed a Claude run on cerit's default model.
+    Model and provider are taken as a pair, and only when the request names neither, so
+    an explicit provider never gets the other provider's model.
+    """
+    meta = load_json(problem_dir / "output" / "run_meta.json")
+    given = config.model_fields_set
+    recorded = {k: meta[k] for k in _RECORDED_BUDGET if k in meta and k not in given}
+    if not given & {"model", "provider"}:
+        recorded.update({k: meta[k] for k in ("model", "provider") if meta.get(k)})
+    return config.model_copy(update=recorded)
+
+
 def start_resume(name: str, problem_dir: Path, config: RunConfig, gpu_index: int):
     """Resume an interrupted optimization. Callers must NOT pre-check under _running_lock."""
     _reserve_and_spawn(
         name,
         problem_dir,
-        config,
+        _as_recorded(problem_dir, config),
         gpu_index,
         f"optimizer-resume-{name}",
         resume=True,
+    )
+
+
+def start_finalize(name: str, problem_dir: Path, config: RunConfig, gpu_index: int):
+    """Run only the finalize pass over an existing output/. Callers must NOT pre-check."""
+    _reserve_and_spawn(
+        name,
+        problem_dir,
+        _as_recorded(problem_dir, config),
+        gpu_index,
+        f"optimizer-finalize-{name}",
+        resume=True,
+        finalize_only=True,
     )
 
 

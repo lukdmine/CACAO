@@ -19,6 +19,8 @@ from pathlib import Path
 
 import yaml
 
+from agentic.workspace import REGION_KEYS
+
 # Last-resort include dir, used only when detection turns up nothing. Prefer the
 # path resolved by utils.cuda_env — a system CUDA install (nvcc in /usr/bin) keeps
 # its headers in /usr/include, and NVRTC cannot find <mma.h> without the real dir.
@@ -77,6 +79,12 @@ int main(int argc, char** argv)
     const std::string  refFile    = (argc > 7) ? argv[7] : "{ref_file}";
     // argv[8] (optional): profile mode — path to a results.json to run the best config from.
     const std::string  profileResults = (argc > 8) ? argv[8] : "";
+    // argv[9] (optional): searcher mode. random (default), exhaustive, mcmc, or count
+    // (print the size of the search space and exit). Profile mode wins over this.
+    const std::string  mode = (argc > 9) ? argv[9] : "random";
+    // argv[10] (optional, mcmc only): results base name whose fastest valid
+    // configuration is the chain's starting point. Empty starts unseeded.
+    const std::string  seedResults = (argc > 10) ? argv[10] : "";
 
     // ---- tuner ----
     ktt::Tuner tuner(platform, device, ktt::ComputeApi::CUDA);
@@ -127,10 +135,42 @@ int main(int argc, char** argv)
         return 0;
     }}
 
+    // ---- count mode: size of the search space, then stop (no validation, no Tune) ----
+    if (mode == "count")
+    {{
+        tuner.InitializeConfigurationData(kernel);
+        std::cout << "CACAO_CONFIG_COUNT " << tuner.GetConfigurationsCount(kernel) << "\\n";
+        return 0;
+    }}
+
     // ---- validation + search + tune (engine-owned) ----
     tuner.SetValidationMethod(ktt::ValidationMethod::SideBySideComparison, tolerance);
 {reference_bind}
-    tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
+    if (mode == "exhaustive")
+    {{
+        tuner.SetSearcher(kernel, std::make_unique<ktt::DeterministicSearcher>());
+    }}
+    else if (mode == "mcmc")
+    {{
+        ktt::KernelConfiguration start;
+        if (!seedResults.empty())
+        {{
+            const auto seeded = tuner.LoadResults(seedResults, ktt::OutputFormat::JSON);
+            const ktt::KernelResult* best = nullptr;
+            for (const auto& r : seeded)
+                if (r.IsValid() && (best == nullptr || r.GetKernelDuration() < best->GetKernelDuration()))
+                    best = &r;
+            if (best == nullptr)
+                std::cerr << "No valid configuration in " << seedResults << ", starting MCMC unseeded\\n";
+            else
+                start = best->GetConfiguration();
+        }}
+        tuner.SetSearcher(kernel, std::make_unique<ktt::McmcSearcher>(start));
+    }}
+    else
+    {{
+        tuner.SetSearcher(kernel, std::make_unique<ktt::RandomSearcher>());
+    }}
     const auto results = tuner.Tune(kernel, std::make_unique<ktt::TuningDuration>(duration));
     tuner.SaveResults(results, output, ktt::OutputFormat::JSON);
 
@@ -206,6 +246,36 @@ def extract_regions(framework_cpp: str) -> dict:
         if stripped.startswith("//") and "\n" not in stripped:
             body = ""  # the placeholder emitted for an empty region
         regions[key] = body
+    return regions
+
+
+def load_regions(iter_dir: Path) -> dict:
+    """The three driver regions of this iteration, keyed as assemble_framework_cpp wants.
+
+    Only the agentic path writes ``region_*.cpp``. An iteration authored by
+    configure_node, or by any run that predates those files, carries the same bodies
+    spliced into its framework.cpp (so recover them from there rather than
+    re-assembling a skeleton whose KERNELS region never declares ``kernel``).
+    """
+    regions = {
+        key: (iter_dir / name).read_text(encoding="utf-8")
+        for name, key in REGION_KEYS.items()
+        if (iter_dir / name).exists()
+    }
+    if len(regions) == len(REGION_KEYS):
+        return regions
+
+    framework = iter_dir / "framework.cpp"
+    if framework.exists():
+        try:
+            recovered = extract_regions(framework.read_text(encoding="utf-8"))
+        except Exception as e:
+            from utils.log import log
+
+            log(f"Could not recover driver regions from framework.cpp: {e}", "WARN")
+            recovered = {}
+        for key, body in recovered.items():
+            regions.setdefault(key, body)  # a region file present wins over the splice
     return regions
 
 

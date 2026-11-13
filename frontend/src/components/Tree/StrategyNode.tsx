@@ -5,6 +5,8 @@ import type { TreeNode } from '@/api/types.generated';
 import { Facts } from '@/components/Facts';
 import { getStatusStyle, formatTime, formatSpeedup } from '@/utils/statusColors';
 import { useAppStore } from '@/store/appStore';
+import { Badge } from '@/components/ui/badge';
+import { isFinalist } from '@/utils/finalize';
 
 function StrategyNodeComponent({ data, id }: NodeProps) {
     const node = data as unknown as TreeNode;
@@ -12,6 +14,7 @@ function StrategyNodeComponent({ data, id }: NodeProps) {
     const selectNode = useAppStore((s) => s.selectNode);
     const style = getStatusStyle(node.status);
     const isSelected = selectedNodeId === id;
+    const finalist = useAppStore((s) => isFinalist(s.finalize, id));
 
     return (
         <div
@@ -24,7 +27,12 @@ function StrategyNodeComponent({ data, id }: NodeProps) {
 
             <div className="space-y-1.5 p-3">
                 <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm font-medium">{node.strategy.name}</span>
+                    <span className="flex min-w-0 items-center gap-1.5">
+                        <span className="truncate text-sm font-medium">{node.strategy.name}</span>
+                        {finalist && (
+                            <Badge variant="outline" className="px-1.5 py-0 text-[10px]">finalist</Badge>
+                        )}
+                    </span>
                     <span className={`flex shrink-0 items-center gap-1 text-[10px] ${style.text}`}>
                         <span
                             className={`inline-block size-1.5 rounded-full ${style.color} ${

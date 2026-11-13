@@ -4,6 +4,8 @@ Single-sourced so the shape tables don't drift. Grep for the importers rather th
 trusting a list here — the last hand-kept one named three of the four.
 """
 
+from prompts._portability import TENSOR_CORE_FALLBACK
+
 TENSOR_CORE_REFERENCE = """## Tensor Cores (Ampere sm_80 / sm_86)
 
 **`nvcuda::wmma` fragment API (`<mma.h>`) — only these shapes are specialized.** Any other `(M, N, K)`/dtype combo is a **hard NVRTC compile error**: `error: incomplete type is not allowed` on the `wmma::fragment<>` declaration, usually followed by `no instance of function template "nvcuda::wmma::fill_fragment"`. Seeing that = pick a row from this table or drop to inline-PTX `mma.sync`. (The tuner-log pair `kernel duration was 0us` + `Results differ` is a DIFFERENT failure: the kernel launched but wrote nothing — dead bounds guard, zero-sized grid, or wrong argument binding.)
@@ -49,3 +51,5 @@ For any shape NOT in this table (e.g. fp16 `m16n8k8`, tf32 `m16n8k4`), use inlin
 
 Unavailable: Hopper `wgmma`/`tcgen05`/TMA (sm_90+); grid-wide sync — `cg::this_grid().sync()` COMPILES but KTT launches via `cuLaunchKernel` (not the cooperative API), so it is invalid at runtime. `<cooperative_groups.h>` itself works at block/warp scope (`cg::tiled_partition<32>`, `cg::reduce`, `cg::memcpy_async`).
 """
+
+TENSOR_CORE_REFERENCE += "\n" + TENSOR_CORE_FALLBACK

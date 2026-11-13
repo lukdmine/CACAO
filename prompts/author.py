@@ -13,6 +13,7 @@ prompts/_system_overview.py documents what per-prompt paraphrases cost last time
 
 from prompts._format import format_reference, format_strategy, inputs_hpp_block
 from prompts._launcher_reference import LAUNCHER_RULES
+from prompts._portability import DEVICE_RULES, TOGGLE_RULES
 from prompts._regions_reference import BASE_BLOCK_SIZE, PARAMETER_GROUPS
 from prompts._system_overview import SYSTEM_OVERVIEW, NVRTC_RULES
 
@@ -89,6 +90,10 @@ def build(ctx: dict) -> tuple[str, str]:
         + SYSTEM_OVERVIEW
         + NVRTC_RULES
         + LAUNCHER_RULES
+        + "\n"
+        + TOGGLE_RULES
+        + "\n"
+        + DEVICE_RULES
     )
 
     parts = []

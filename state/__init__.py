@@ -19,6 +19,7 @@ from state.types import (
     SubStrategyDict,
     StrategyInfo,
     WorkingState,
+    FinalizeManifest,
     validate_transition,
 )
 
@@ -36,6 +37,9 @@ from state.persistence import (
     load_iter_state,
     load_iter_state_if_exists,
     create_initial_iter_state,
+    finalize_dir,
+    save_finalize_manifest,
+    load_finalize_manifest,
 )
 
 # --- Control ---
@@ -70,6 +74,7 @@ __all__ = [
     "SubStrategyDict",
     "StrategyInfo",
     "WorkingState",
+    "FinalizeManifest",
     "validate_transition",
     # Persistence
     "atomic_write_json",
@@ -84,6 +89,9 @@ __all__ = [
     "load_iter_state",
     "load_iter_state_if_exists",
     "create_initial_iter_state",
+    "finalize_dir",
+    "save_finalize_manifest",
+    "load_finalize_manifest",
     # Control
     "read_control_signal",
     "write_control_signal",

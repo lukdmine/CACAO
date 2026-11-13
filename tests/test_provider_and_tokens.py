@@ -1,5 +1,7 @@
 """Provider resolution and token accounting — both silent-failure surfaces."""
 
+import asyncio
+
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel
@@ -229,3 +231,51 @@ def test_newer_claude_structured_output_parses_past_a_thinking_block():
     )
 
     assert chain.last.invoke(reply) == _Verdict(action="continue", reason="faster")
+
+
+def _reply_from_the_api(monkeypatch, message):
+    """Stand in for the network: every ChatClaude call returns ``message``."""
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from llm.claude import ChatClaude
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    monkeypatch.setattr(ChatClaude, "_agenerate", _agenerate)
+
+
+def test_newer_claude_structured_output_works_through_the_tracked_wrapper(monkeypatch):
+    """TrackedLLM asks for include_raw=True so it can count the reply's tokens. The tests
+    above call ChatClaude directly and never pass it, so a signature without it shipped
+    and every analyze, strategize and decide call on these models raised TypeError."""
+    from llm import tracked
+
+    counted = config.TokenTracker()
+    monkeypatch.setattr(tracked, "global_tracker", counted)
+    _reply_from_the_api(
+        monkeypatch,
+        AIMessage(
+            content='{"action": "continue", "reason": "faster"}',
+            usage_metadata={"input_tokens": 100, "output_tokens": 20, "total_tokens": 120},
+        ),
+    )
+
+    llm = providers._create_llm("anthropic", "claude-opus-5-5", 0.3)
+    verdict = asyncio.run(llm.with_structured_output(_Verdict).ainvoke("x"))
+
+    assert verdict == _Verdict(action="continue", reason="faster")
+    assert counted.total_tokens == 120
+
+
+def test_newer_claude_include_raw_reports_a_parse_failure_instead_of_raising(monkeypatch):
+    """langchain's include_raw contract, which TrackedStructuredLLM._unwrap relies on to
+    reach its raw-JSON fallback."""
+    _reply_from_the_api(monkeypatch, AIMessage(content="not json"))
+    chain = _claude("claude-opus-5-5").with_structured_output(_Verdict, include_raw=True)
+
+    out = asyncio.run(chain.ainvoke("x"))
+
+    assert out["parsed"] is None
+    assert out["parsing_error"] is not None
+    assert out["raw"].content == "not json"

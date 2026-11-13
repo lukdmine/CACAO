@@ -2,6 +2,7 @@
 
 from config import MAX_STRATEGIES
 from prompts._format import format_reference
+from prompts._portability import TOGGLE_RULES
 from prompts._policy import ANTI_REPETITION, LAST_CHANCE_RULE, PLATEAU_RULE
 from prompts._system_overview import SYSTEM_OVERVIEW
 from prompts._tensor_core_reference import TENSOR_CORE_REFERENCE
@@ -18,10 +19,12 @@ Keep your analysis concise and technical. Focus strictly on:
 1. Identifying the primary performance bottleneck (Memory bandwidth, compute bounds, register pressure, occupancy, etc.).
 2. Highlighting specific flaws or inefficiencies in the current approach.
 3. Assessing the performance ceiling — how close is the kernel to the hardware limit?
-4. Proposing 1-3 specific code-level changes to try in the next iteration.
+4. Proposing 1-3 specific code-level changes to try in the next iteration, following the switchable-change rules below.
 
 """
         + SYSTEM_OVERVIEW
+        + "\n"
+        + TOGGLE_RULES
         + f"""
 ## Performance Ceiling Assessment
 

@@ -10,6 +10,7 @@ TuningDuration; a watchdog covers subprocess hangs.
 import asyncio
 import os
 import re
+from typing import Dict, Optional
 import signal
 import time
 import yaml
@@ -17,10 +18,9 @@ from pathlib import Path
 
 import config as _cfg
 from config import get_problem_dir
-from agentic.workspace import REGION_KEYS
 from utils.build import compile_framework, driver_command, reference_build_extras
 from utils.files import get_iter_dir, save_output
-from utils.framework import extract_regions
+from utils.framework import load_regions
 from utils.gpu_lock import acquire_gpu_lock
 from utils.log import log
 from utils.problem import gpu_index as problem_gpu_index
@@ -41,16 +41,22 @@ _WATCHDOG_MARGIN_S = 30.0
 _WATCHDOG_MARGIN_FRAC = 0.2
 
 
-def _resolve_tuning_budget(meta: dict, case) -> tuple[float, str]:
+def _resolve_tuning_budget(
+    meta: dict, case, override_s: Optional[float] = None
+) -> tuple[float, str]:
     """Effective tuning budget for one case, as (seconds, source_label).
 
-    Precedence: the user's runtime override, then the case's own ``duration_s``, then
+    Precedence: the finalize budget (``override_s``), then the user's runtime override, then the case's own ``duration_s``, then
     the problem's ``tuning.duration_s``, then the engine default. A tail case exists to
     catch a correctness bug rather than to find an optimum, so giving it a shorter
     budget than the primary is the normal configuration, not a degraded one.
     """
     from utils.cases import case_duration
 
+    # Finalize passes its own per-finalist budget; a UI timeout meant for the branch
+    # loop must not shrink the one run whose point is to out-tune it.
+    if override_s is not None:
+        return float(override_s), "finalize"
     if _cfg.TUNER_TIMEOUT_OVERRIDE is not None:
         return float(_cfg.TUNER_TIMEOUT_OVERRIDE), "user override"
     if case is not None and case.duration_s is not None:
@@ -238,37 +244,19 @@ async def _execute_driver(
     return "".join(output_lines)
 
 
-def _load_regions(iter_dir: Path) -> dict:
-    """The three driver regions of this iteration, keyed as assemble_framework_cpp wants.
-
-    Only the agentic path writes ``region_*.cpp``. An iteration authored by
-    configure_node, or by any run that predates those files, carries the same bodies
-    spliced into its framework.cpp — so recover them from there rather than
-    re-assembling a skeleton whose KERNELS region never declares ``kernel``.
-    """
-    regions = {
-        key: (iter_dir / name).read_text(encoding="utf-8")
-        for name, key in REGION_KEYS.items()
-        if (iter_dir / name).exists()
-    }
-    if len(regions) == len(REGION_KEYS):
-        return regions
-
-    framework = iter_dir / "framework.cpp"
-    if framework.exists():
-        try:
-            recovered = extract_regions(framework.read_text(encoding="utf-8"))
-        except Exception as e:
-            log(f"Could not recover driver regions from framework.cpp: {e}", "WARN")
-            recovered = {}
-        for key, body in recovered.items():
-            regions.setdefault(key, body)  # a region file present wins over the splice
-    return regions
-
-
-async def run_node(state: WorkingState) -> WorkingState:
+async def run_node(
+    state: WorkingState,
+    *,
+    budget_override_s: Optional[float] = None,
+    mode: str = "random",
+    seed_results_by_case: Optional[Dict[str, str]] = None,
+) -> WorkingState:
     """
     Run the KTT tuner as a subprocess.
+
+    The keywords are finalize's: a tuning budget, a searcher mode and, per case, the
+    results base name that seeds the MCMC searcher. The branch worker passes none, and
+    with the defaults the driver command is exactly the original.
 
     KTT's TuningDuration stop condition enforces the wall-clock budget inside
     the tuner itself. This function logs progress for visibility and provides
@@ -314,7 +302,7 @@ async def run_node(state: WorkingState) -> WorkingState:
     cases = case_list(config_yaml)
     primary = cases[0].name
     spec = load_inputs_spec(problem_dir / "inputs.yaml")
-    regions = _load_regions(iter_dir)
+    regions = load_regions(iter_dir)
     if len(cases) > 1:
         log(f"{len(cases)} input cases: {', '.join(c.name for c in cases)}")
 
@@ -352,7 +340,9 @@ async def run_node(state: WorkingState) -> WorkingState:
     combined_output = []
     for case, cdir, binary in built:
         case_key = None if case.name == primary else case.name
-        budget_s, budget_source = _resolve_tuning_budget(config_yaml, case)
+        budget_s, budget_source = _resolve_tuning_budget(
+            config_yaml, case, budget_override_s
+        )
         watchdog_s = budget_s + max(_WATCHDOG_MARGIN_S, budget_s * _WATCHDOG_MARGIN_FRAC)
         label = "" if len(cases) == 1 else f" [case {case.name}]"
         log(
@@ -369,6 +359,8 @@ async def run_node(state: WorkingState) -> WorkingState:
             output_base="results",
             kernel_file=cdir / "kernels.cu",
             ref_file=problem_dir / ref_file,
+            mode=mode,
+            seed_results=(seed_results_by_case or {}).get(case.name, ""),
         )
         tracker = TunerProgressTracker()
         output = await _execute_driver(

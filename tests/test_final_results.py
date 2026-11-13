@@ -209,3 +209,127 @@ def test_an_unreadable_problem_yaml_falls_back_to_the_root(output_dir, tmp_path,
     results = find_branch_results(output_dir / "branches")
 
     assert results[0]["best_config"] == {"TILE": 16}
+
+
+# -- finalize section -------------------------------------------------------
+
+
+def _manifest(output_dir, finalists, **kw):
+    """Write output/finalize/finalize.json with the given finalists."""
+    from state.types import FinalizeManifest, Overview
+    from state import save_finalize_manifest
+
+    m = FinalizeManifest(
+        status="done",
+        finalists=finalists,
+        category_bests={"tensor_cores=true": finalists[0].name},
+        overview=Overview(headline="h", markdown="## Finalize overview\nbody"),
+        **kw,
+    )
+    save_finalize_manifest(output_dir, m)
+    return m
+
+
+def _finalist(name, source_branch, *, source, finalized=None):
+    from state.types import FinalistState, Variant
+
+    reported = "finalized" if finalized else "source"
+    sv = Variant(dir=f"{source_branch}/iter1", summary=source)
+    fv = Variant(dir=f"finalize/{name}", summary=finalized) if finalized else None
+    return FinalistState(
+        name=name,
+        source_branch=source_branch,
+        source_iter=1,
+        source=sv,
+        finalized=fv,
+        reported=reported,
+        reported_dir=fv.dir if fv else sv.dir,
+    )
+
+
+def _sum(speedup, time_us, config=None):
+    return {"has_success": True, "best_time_us": time_us, "speedup": speedup,
+            "best_config": config or {}}
+
+
+def test_without_a_manifest_the_shape_is_unchanged(output_dir):
+    branch = _branch(output_dir, "tiled", best_time=305.0, speedup=2.0)
+    _results_json(branch, 1, 305.0, {"TILE": 16})
+    results = find_branch_results(output_dir / "branches")
+
+    summary = build_final_summary(results, results[0], None)
+
+    assert set(summary) == {
+        "best_branch", "best_config", "best_time_us", "speedup",
+        "total_branches", "all_branches",
+    }
+
+
+def test_a_better_finalist_becomes_the_top_level_best(output_dir):
+    branch = _branch(output_dir, "tiled", best_time=305.0, speedup=2.0)
+    _results_json(branch, 1, 305.0, {"TILE": 16})
+    fin = _finalist("f1", "branches/tiled", source=_sum(2.0, 305.0),
+                    finalized=_sum(3.0, 200.0, {"TILE": 32}))
+    manifest = _manifest(output_dir, [fin], attempt=2)
+    results = find_branch_results(output_dir / "branches")
+
+    summary = build_final_summary(results, results[0], manifest)
+
+    assert summary["best_source"] == "finalize"
+    assert summary["best_branch"] == "tiled"
+    assert summary["best_config"] == {"TILE": 32}
+    assert summary["best_time_us"] == 200.0
+    assert summary["speedup"] == 3.0
+    section = summary["finalize"]
+    assert section["status"] == "done" and section["attempt"] == 2
+    assert section["overview"].startswith("## Finalize overview")
+    assert section["category_bests"] == {"tensor_cores=true": "f1"}
+    f = section["finalists"][0]
+    assert (f["name"], f["source_speedup"], f["finalized_speedup"]) == ("f1", 2.0, 3.0)
+    assert f["reported"] == "finalized" and f["reported_dir"] == "finalize/f1"
+
+
+def test_a_worse_finalist_leaves_the_branch_best(output_dir):
+    branch = _branch(output_dir, "tiled", best_time=305.0, speedup=2.0)
+    _results_json(branch, 1, 305.0, {"TILE": 16})
+    fin = _finalist("f1", "branches/tiled", source=_sum(1.5, 400.0))
+    manifest = _manifest(output_dir, [fin])
+    results = find_branch_results(output_dir / "branches")
+
+    summary = build_final_summary(results, results[0], manifest)
+
+    assert summary["best_source"] == "branch"
+    assert summary["best_config"] == {"TILE": 16}
+    assert summary["speedup"] == 2.0
+    assert "finalize" in summary
+
+
+def test_a_finalist_from_a_failed_branch_still_produces_the_file(output_dir, monkeypatch):
+    import engine.master as master
+
+    monkeypatch.setattr(master, "get_output_dir", lambda: output_dir)
+    _branch(output_dir, "broken", status="failed")
+    fin = _finalist("f1", "branches/broken", source=_sum(1.2, 500.0, {"T": 4}))
+    _manifest(output_dir, [fin])
+
+    master._write_final_results()
+
+    written = json.loads((output_dir / "final_results.json").read_text(encoding="utf-8"))
+    assert written["best_source"] == "finalize"
+    assert written["best_branch"] == "broken"
+    assert written["best_config"] == {"T": 4}
+
+
+def test_best_after_finalize_keeps_the_finalize_section(output_dir):
+    """--best runs merge_node; it used to overwrite the file without the section."""
+    from nodes.merge import merge_node
+
+    branch = _branch(output_dir, "tiled", best_time=305.0, speedup=2.0)
+    _results_json(branch, 1, 305.0, {"TILE": 16})
+    fin = _finalist("f1", "branches/tiled", source=_sum(2.0, 305.0))
+    _manifest(output_dir, [fin])
+
+    merge_node()
+
+    written = json.loads((output_dir / "final_results.json").read_text(encoding="utf-8"))
+    assert "finalize" in written and written["best_source"] == "branch"

@@ -22,19 +22,9 @@ from utils.rules import parse_rules
 from state.types import WorkingState
 from agentic.loop import StepResult, run_agentic_step
 from agentic.tools import Toolbox, schemas_for
-from agentic.workspace import ALL_FILES, REGION_KEYS, Workspace
+from agentic.workspace import REGION_KEYS, Workspace, format_workspace, owned_files_from_dir
 from nodes._llm_helper import build_prompt_context
 import prompts.author
-
-
-def _read_owned_files(directory: Path) -> dict:
-    """Whichever of the four LLM-owned files are present in one directory."""
-    contents = {}
-    for name in ALL_FILES:
-        candidate = directory / name
-        if candidate.exists():
-            contents[name] = candidate.read_text(encoding="utf-8")
-    return contents
 
 
 def _seed_from_previous(ws: Workspace, branch_path: Optional[Path], iteration: int) -> list:
@@ -48,48 +38,14 @@ def _seed_from_previous(ws: Workspace, branch_path: Optional[Path], iteration: i
     prev = Path(branch_path) / f"iter{iteration - 1}"
     if not prev.is_dir():
         return []
-
-    contents = _read_owned_files(prev)
-
-    if not contents:
-        # An aborted step never reached ws.commit(), so its work is only in staging.
-        contents = _read_owned_files(Workspace(prev).staging)
-
-    if len(contents) <= 1:
-        framework = prev / "framework.cpp"
-        if framework.exists():
-            from utils.framework import extract_regions
-
-            try:
-                regions = extract_regions(framework.read_text(encoding="utf-8"))
-            except Exception:
-                regions = {}
-            for name, key in REGION_KEYS.items():
-                if regions.get(key):
-                    contents[name] = regions[key]
-
-    return ws.seed(contents)
+    return ws.seed(owned_files_from_dir(prev))
 
 
-_LANGUAGE = {"kernels.cu": "cuda"}
-
-
-def _format_workspace(ws: Workspace) -> str:
-    """The files the step starts from, ready to edit, as a prompt section."""
-    parts = []
-    for name in ALL_FILES:
-        if not ws.exists(name):
-            continue
-        body = ws.read(name)
-        parts.append(f"### {name}\n```{_LANGUAGE.get(name, 'cpp')}\n{body}\n```")
-    if not parts:
-        return ""
-    return (
-        "## Current files (already in your workspace)\n\n"
-        "Change them with edit_file or write_file, whichever fits: edit_file for a "
-        "localised change to a large file, write_file when the change is structural "
-        "or the file is small.\n\n" + "\n\n".join(parts)
-    )
+_EDIT_INTRO = (
+    "Change them with edit_file or write_file, whichever fits: edit_file for a "
+    "localised change to a large file, write_file when the change is structural "
+    "or the file is small."
+)
 
 
 def _task_text(state: WorkingState, seeded: list) -> str:
@@ -208,6 +164,7 @@ async def author_node(state: WorkingState) -> WorkingState:
     seeded = _seed_from_previous(ws, branch_path, iteration)
     if seeded:
         log(f"Seeded from iter{iteration - 1}: {', '.join(seeded)}", "INFO")
+    previous_params_src = ws.read("region_params.cpp") if "region_params.cpp" in seeded else None
 
     # --- prompt ---
     # propose and decide exist to tell this step what to change; an empty history
@@ -231,7 +188,7 @@ async def author_node(state: WorkingState) -> WorkingState:
     ctx["task"] = _task_text(state, seeded)
     # Inlined rather than read back: the model read all four on turn one every time,
     # so the tokens are paid regardless and the read-back only costs a round trip.
-    ctx["current_files"] = _format_workspace(ws) if seeded else ""
+    ctx["current_files"] = format_workspace(ws, _EDIT_INTRO) if seeded else ""
     # The reference is orientation for a first implementation; afterwards the branch's
     # own kernel is what is being changed and the reference is a read_file away.
     if iteration > 1:
@@ -273,6 +230,7 @@ async def author_node(state: WorkingState) -> WorkingState:
         problem_dir=get_problem_dir(),
         meta=meta,
         gpu_info=getattr(state, "gpu_info", None),
+        previous_params_src=previous_params_src,
     )
     schemas = schemas_for(access, has_history=has_history, has_siblings=has_siblings)
     result = await run_agentic_step(

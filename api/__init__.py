@@ -27,11 +27,13 @@ def create_app() -> FastAPI:
     from api.tree import router as tree_router
     from api.optimizer import router as optimizer_router
     from api.branches import router as branches_router
+    from api.finalize import router as finalize_router
 
     app.include_router(problems_router)
     app.include_router(tree_router)
     app.include_router(optimizer_router)
     app.include_router(branches_router)
+    app.include_router(finalize_router)
 
     @app.on_event("shutdown")
     def _shutdown():

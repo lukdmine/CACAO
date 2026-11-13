@@ -109,19 +109,21 @@ def _write_final_results() -> None:
     succeeded and its per-branch results are on disk.
     """
     from nodes.merge import build_final_summary, find_branch_results, get_best_branch_result
+    from state import load_finalize_manifest
     from utils.files import save_json
 
     try:
         output_dir = get_output_dir()
         branch_results = find_branch_results(output_dir / "branches")
         best = get_best_branch_result(branch_results)
-        if not best:
+        finalize = load_finalize_manifest(output_dir)
+        summary = build_final_summary(branch_results, best, finalize)
+        # A finalist can carry a valid result when no branch did (its source branch failed
+        # after producing a best iteration), so only skip when neither has a time.
+        if not best and summary["best_time_us"] is None:
             log("No branch results to summarise; skipping final_results.json", "WARN")
             return
-        save_json(
-            output_dir / "final_results.json",
-            build_final_summary(branch_results, best),
-        )
+        save_json(output_dir / "final_results.json", summary)
         log(f"Wrote {output_dir / 'final_results.json'}", "SUCCESS")
     except Exception as e:
         log(f"Could not write final_results.json: {e}", "WARN")
@@ -298,6 +300,9 @@ async def run_optimization_engine(
     # No lock guards `busy` or the exit check: every read/write below sits
     # between awaits, which is atomic under asyncio's cooperative scheduler.
     busy = 0
+    # Set when the monitor gives up on queued work. Finalize reads it: a run that
+    # stopped because its workers died is not one that finished.
+    abandoned_work = False
     shutdown_event = asyncio.Event()
 
     async def worker():
@@ -354,6 +359,7 @@ async def run_optimization_engine(
                     busy -= 1
 
     async def monitor():
+        nonlocal abandoned_work
         while not shutdown_event.is_set():
             try:
                 await asyncio.wait_for(shutdown_event.wait(), timeout=1.0)
@@ -373,6 +379,7 @@ async def run_optimization_engine(
             elif all(task.done() for task in worker_tasks):
                 # Every worker died with work still queued; nothing will ever drain it.
                 log("All branch workers exited with work still queued.", "ERROR")
+                abandoned_work = True
                 shutdown_event.set()
 
     max_workers = 4
@@ -388,6 +395,17 @@ async def run_optimization_engine(
             log(f"Engine task ended with an exception: {outcome!r}", "ERROR")
 
     log("All branches and sub-branches have completed!", "SUCCESS")
+
+    if _cfg.FINALIZE_AUTO:
+        try:
+            # Imported here: engine.finalize pulls in the run/profile nodes, which a
+            # run with finalize off has no reason to load.
+            from engine.finalize import run_finalize, should_auto_finalize
+
+            if should_auto_finalize(outcomes, abandoned_work):
+                await run_finalize(trigger="auto")
+        except Exception as e:  # run_finalize never raises; this guards the import
+            log(f"Finalize failed: {e}", "ERROR")
 
     _write_final_results()
 

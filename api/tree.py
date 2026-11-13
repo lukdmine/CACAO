@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import APIRouter, Header, HTTPException, Response
 
 from api.helpers import (
+    finalize_phase,
     get_problem_dir,
     load_yaml,
     load_json,
@@ -96,7 +97,7 @@ def _fingerprint(problem_dir: Path, name: str) -> str:
     """
     output_dir = problem_dir / "output"
     h = hashlib.blake2b(digest_size=16)
-    h.update(b"1|")  # bump when the response shape changes
+    h.update(b"2|")  # bump when the response shape changes
     h.update(b"running" if is_problem_running(name) else b"idle")
 
     paths = [
@@ -104,6 +105,7 @@ def _fingerprint(problem_dir: Path, name: str) -> str:
         output_dir / "run_meta.json",
         output_dir / "token_usage.json",
         output_dir / "strategies.json",
+        output_dir / "finalize" / "finalize.json",
     ]
     branches_dir = output_dir / "branches"
     if branches_dir.is_dir():
@@ -121,6 +123,28 @@ def _fingerprint(problem_dir: Path, name: str) -> str:
             continue
         h.update(f"|{p}|{st.st_mtime_ns}|{st.st_size}".encode())
     return f'W/"{h.hexdigest()}"'
+
+
+def _finalize_summary(output_dir: Path) -> dict | None:
+    """The light view of output/finalize/finalize.json the tree carries."""
+    from state import load_finalize_manifest
+
+    manifest = load_finalize_manifest(output_dir)
+    if manifest is None:
+        return None
+    return {
+        "status": manifest.status,
+        "attempt": manifest.attempt,
+        "finalists": [
+            {
+                "name": f.name,
+                "source_branch": f.source_branch,
+                "reported": f.reported,
+                "stages": f.stages,
+            }
+            for f in manifest.finalists
+        ],
+    }
 
 
 def _scan_branches(branches_dir: Path, name: str, seen: set[str]) -> list[dict]:
@@ -384,6 +408,7 @@ def get_tree(
         # Non-zero means the last optimizer died rather than finished. Nothing else
         # distinguishes the two once its registry entry is gone.
         "last_exit_code": last_exit_code(name),
+        "finalize": _finalize_summary(output_dir),
     }
 
 
@@ -440,12 +465,18 @@ def get_status():
     with _running_lock:
         for n in [n for n, e in _running_problems.items() if not e.process.is_alive()]:
             _reap_unlocked(n)
-        running = {
-            name: {"gpu_index": e.gpu_index} for name, e in _running_problems.items()
-        }
+        live = {name: e.gpu_index for name, e in _running_problems.items()}
         # How the runs that are no longer here ended — a startup crash and a finished
         # run look identical without it.
         exit_codes = dict(_last_exit_codes)
+    # Phases read a file each, so they are computed outside the lock.
+    running = {}
+    for name, gpu in live.items():
+        try:
+            phase = finalize_phase(get_problem_dir(name), True)
+        except HTTPException:
+            phase = None
+        running[name] = {"gpu_index": gpu, "phase": phase or "branches"}
     return {
         "running_problems": running,
         "active_count": len(running),

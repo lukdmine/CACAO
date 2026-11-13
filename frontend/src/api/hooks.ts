@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '@/store/appStore';
-import { fetchProblems, fetchTreeConditional, fetchIteration, fetchAnalysis, fetchModels } from './client';
-import type { TreeResponse } from './client';
+import { fetchProblems, fetchTreeConditional, fetchIteration, fetchAnalysis, fetchModels, fetchFinalize } from './client';
+import type { TreeResponse, FinalizeResponse } from './client';
 import type { IterationDetail } from './types.generated';
 
 export const POLL_INTERVAL_MS = 3000;
@@ -47,7 +47,7 @@ export async function refreshTree() {
         const store = useAppStore.getState();
         if (!data || store.activeProblem !== startedFor) return;
         treeEtag = etag;
-        store.setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage);
+        store.setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage, data.finalize);
         store.setRunStatus(runStatusFrom(data));
     } catch {
         // silent — next poll will pick it up
@@ -174,6 +174,42 @@ export function useAnalysis(problem: string | null, enabled: boolean, running: b
 }
 
 /**
+ * Fetch the finalize state and manifest for the active problem into the store.
+ * Call it once (Toolbar); every other reader takes `useFinalizeData`.
+ *
+ * No polling of its own: the tree poll already carries a light `finalize` summary and
+ * the `running` flag, and the tree ETag folds in finalize.json, so a change in either
+ * is the signal to refetch. `stale` and `stopped` are not in the summary at all (they
+ * are judged against branch files and a live process), which is why a refetch on
+ * `running` matters: a run ending is when "finalizing" becomes "stopped".
+ */
+export function useFinalize(problem: string | null) {
+    const summary = useAppStore((s) => s.finalize);
+    const running = useAppStore((s) => s.runStatus === 'running');
+    const key = JSON.stringify(summary);
+
+    useEffect(() => {
+        if (!problem) return;
+        let cancelled = false;
+        fetchFinalize(problem)
+            .then((d) => { if (!cancelled) useAppStore.getState().setFinalizeData(problem, d); })
+            .catch((err) => console.debug('[useFinalize] Error:', err));
+        return () => { cancelled = true; };
+    }, [problem, key, running]);
+
+    // The optimistic "started" flag only bridges the gap until the server reports the
+    // run itself; once nothing is running it has nothing left to bridge.
+    useEffect(() => {
+        if (!running) useAppStore.getState().setStartedFinalize(false);
+    }, [running]);
+}
+
+/** The fetched finalize response for `problem`, or null if it is not the loaded one. */
+export function useFinalizeData(problem: string | null): FinalizeResponse | null {
+    return useAppStore((s) => (s.finalizeData && s.finalizeData.problem === problem ? s.finalizeData.data : null));
+}
+
+/**
  * Fetch the full work products for one expanded iteration.
  *
  * The tree only carries presence flags, so the panel asks for a body when the
@@ -257,7 +293,7 @@ export function usePollTree() {
                 if (!cancelled && data) {
                     treeEtag = etag;
                     const { setTreeFromAPI, setRunStatus } = useAppStore.getState();
-                    setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage);
+                    setTreeFromAPI(data.nodes, data.llm_model, data.llm_provider, data.token_usage, data.finalize);
                     setRunStatus(runStatusFrom(data));
                 }
             } catch (err) {

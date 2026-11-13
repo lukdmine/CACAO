@@ -15,14 +15,6 @@ MIXED = (
 
 
 @pytest.fixture
-def all_ok(cov_branch):
-    path = cov_branch / "iter8" / "results.json"
-    if not path.exists():
-        pytest.skip("recorded results not present")
-    return path
-
-
-@pytest.fixture
 def mixed(cov_output):
     from tests.conftest import REPO_ROOT
 
@@ -38,13 +30,54 @@ def test_loads_every_configuration_not_just_the_best(all_ok):
     assert all(r.ok for r in records)
 
 
-def test_top_reports_register_pressure_and_spill(all_ok):
+def test_top_reports_registers_spill_and_shared_memory(all_ok):
     out = landscape.top_configs(all_ok, n=5)
-    assert "regs" in out and "spill B" in out
-    # The fastest configuration of this iteration spills; that is the signal the
-    # single-best summary throws away.
-    assert "4672" in out
+    header = next(l for l in out.splitlines() if l.startswith("| #"))
+    cols = [c.strip() for c in header.strip("|").split("|")]
+    row = next(l for l in out.splitlines() if l.startswith("| 1 "))
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    # iter8's fastest kernel declares __shared__ arrays and spills nothing.
+    assert cells[cols.index("smem B")] == "4672"
+    assert cells[cols.index("spill B")] == "0"
     assert "103/103 configurations succeeded" in out
+
+
+def _write_results(tmp_path, configs):
+    """A results.json in KTT's shape; configs is [(duration_us, local, private)]."""
+    results = [
+        {
+            "Status": "Ok",
+            "Configuration": [{"Name": "T", "Value": 16 * (i + 1)}],
+            "ComputationResults": [
+                {
+                    "Duration": dur,
+                    "CompilationData": {
+                        "RegistersCount": 32,
+                        "LocalMemorySize": local,
+                        "PrivateMemorySize": private,
+                    },
+                }
+            ],
+        }
+        for i, (dur, local, private) in enumerate(configs)
+    ]
+    path = tmp_path / "results.json"
+    path.write_text(json.dumps({"Results": results}), encoding="utf-8")
+    return path
+
+
+def test_spill_reads_private_memory(tmp_path):
+    rec = landscape.load_records(_write_results(tmp_path, [(10.0, 4096, 64)]))[0]
+    assert rec.smem == 4096 and rec.local_mem == 64
+
+
+def test_best_record_is_the_fastest_ok_record(tmp_path):
+    records = landscape.load_records(
+        _write_results(tmp_path, [(30.0, 0, 0), (10.0, 512, 0), (20.0, 0, 0)])
+    )
+    best = landscape.best_record(records)
+    assert best.duration == 10.0 and best.smem == 512
+    assert landscape.best_record([]) is None
 
 
 def test_top_reports_the_spread(all_ok):

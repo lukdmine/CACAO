@@ -12,6 +12,7 @@ model reads the message and corrects on its next turn; it never sees a tool vani
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -109,6 +110,14 @@ class branch_errors(BaseModel):
     branch: str = Field(description="Branch name from the index in the prompt.")
 
 
+class parameter_history(BaseModel):
+    """Every value each parameter has had in this kernel's history, and the parameters that were dropped."""
+
+
+class space_size(BaseModel):
+    """Size of the current tuning space, its estimated exhaustive tuning time, and the searcher that time selects."""
+
+
 # Tools available at each CROSS_BRANCH_ACCESS level. No level exposes another branch's
 # kernel or framework regions; see state.crossbranch.branch_errors for why.
 _CROSS_BRANCH_TOOLS = {
@@ -134,12 +143,26 @@ _HISTORY_SCHEMAS = [
     list_iterations,
 ]
 
+# Bound only for the finalize step, which tunes a settled kernel against a budget.
+FINALIZE_SCHEMAS = [parameter_history, space_size]
+
+
+@dataclass
+class FinalizeToolContext:
+    """What the finalize-only tools need beyond the workspace."""
+
+    source_iter_dir: Path  # the iteration being finalized; its results.json prices a config
+    budget_s: float  # FINALIZE_TUNER_TIMEOUT
+    gpu_index: int
+    ref_file: Path  # absolute, as run_node passes it
+
 
 def schemas_for(
     cross_branch_access: str = "errors",
     *,
     has_history: bool = True,
     has_siblings: bool = True,
+    finalize: bool = False,
 ) -> List[type]:
     """Tool schemas to bind for one step.
 
@@ -151,6 +174,9 @@ def schemas_for(
     schemas = list(_CORE_SCHEMAS)
     if has_history:
         schemas += _HISTORY_SCHEMAS
+    if finalize:
+        # Finalize works on one kernel; siblings' logs have nothing to add.
+        return schemas + FINALIZE_SCHEMAS
     if has_siblings:
         schemas += _CROSS_BRANCH_TOOLS.get(cross_branch_access, [])
     return schemas
@@ -183,6 +209,8 @@ class Toolbox:
         meta: dict,
         gpu_info: Optional[dict] = None,
         rules=None,
+        previous_params_src: Optional[str] = None,
+        finalize: Optional[FinalizeToolContext] = None,
     ):
         self.ws = workspace
         self.branch_path = Path(branch_path)
@@ -190,6 +218,9 @@ class Toolbox:
         self.problem_dir = Path(problem_dir)
         self.meta = meta or {}
         self.gpu_info = gpu_info or {}
+        # The PARAMS region of the iteration this step edits; None on a first iteration.
+        self.previous_params_src = previous_params_src
+        self.finalize = finalize
 
         if rules is None:
             from utils.rules import parse_rules
@@ -238,6 +269,8 @@ class Toolbox:
             "list_iterations": self.list_iterations,
             "branch_log": self.branch_log,
             "branch_errors": self.branch_errors,
+            "parameter_history": self.parameter_history,
+            "space_size": self.space_size,
         }
 
     def dispatch(self, name: str, args: dict) -> str:
@@ -404,6 +437,14 @@ class Toolbox:
         kernel_ok = all(c.ok for c in checks)
         parts.append(nvrtc.format_checks(checks, constrained=nvrtc.has_constraints(params_src)))
 
+        # A rewrite can quietly shrink the search space and still pass every check above.
+        if self.previous_params_src is not None:
+            from utils.param_history import diff_parameters
+
+            narrowing = diff_parameters(self.previous_params_src, params_src).render()
+            if narrowing:
+                parts.append("Parameters vs. the previous iteration:\n" + narrowing)
+
         self.check_passed = host_ok and kernel_ok
         verdict = "PASS" if self.check_passed else "FAIL"
         self.last_check = f"Compilation check: {verdict}\n\n" + "\n\n".join(parts)
@@ -417,15 +458,63 @@ class Toolbox:
             )
         return self.last_check
 
+    def parameter_history(self) -> str:
+        from utils.param_history import parameter_history
+
+        if self.finalize is None:
+            raise ToolError("parameter_history is only available in the finalize step.")
+        params = self.ws.regions().get("params")
+        if params is None:
+            raise ToolError("region_params.cpp is not written yet.")
+        return parameter_history(self.branch_path, params, self.problem_dir, self.meta)
+
+    def space_size(self) -> str:
+        from utils import space
+        from utils.cases import primary_case_dir
+
+        if self.finalize is None:
+            raise ToolError("space_size is only available in the finalize step.")
+        if not self.check_passed:
+            raise ToolError(
+                "Run check_compilation and get a PASS first; space_size runs the driver it builds."
+            )
+        ctx = self.finalize
+        count = space.count_configurations(
+            self.ws.staging / "driver",
+            self.ws.staging,
+            gpu_index=ctx.gpu_index,
+            kernel_file=self.ws.staging / "kernels.cu",
+            ref_file=ctx.ref_file,
+        )
+        if count is None:
+            raise ToolError("The driver could not count the space (it failed or timed out).")
+        results = primary_case_dir(self.problem_dir, ctx.source_iter_dir) / "results.json"
+        cost = space.per_config_cost_s(results)
+        estimate = space.estimate_exhaustive_s(count, results)
+        searcher = space.choose_searcher(estimate, ctx.budget_s)
+        if cost is None or estimate is None:
+            return (
+                f"{count} configurations; no per-configuration cost in the source run, so "
+                f"the searcher will be {searcher}."
+            )
+        return (
+            f"{count} configurations; ~{cost:.2f} s each (measured in the source run); "
+            f"exhaustive estimate {estimate:.0f} s against a budget of {ctx.budget_s:.0f} s, "
+            f"so the searcher will be {searcher}."
+        )
+
     def end_step(self, summary: str = "") -> str:
         if not self.ws.complete():
             raise ToolError(
                 f"Cannot end the step — not written: {', '.join(self.ws.missing())}."
             )
-        if self.mutations == 0:
+        if self.mutations == 0 and self.finalize is None:
             # The workspace is seeded with the previous iteration's files so the step
             # can edit rather than rewrite. Ending without touching them would spend an
-            # iteration re-running work that has already been measured.
+            # iteration re-running work that has already been measured. A finalize step
+            # is the exception: a space already as wide as plausible has nothing to
+            # widen, its source files are then the ones to retune, and a forced edit
+            # would only be noise in the recorded kernel diff.
             raise ToolError(
                 "Cannot end the step — nothing was changed. This iteration exists to "
                 "make a change; edit or write at least one file."

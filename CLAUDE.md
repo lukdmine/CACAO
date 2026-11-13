@@ -32,6 +32,8 @@ python cli.py --dir problems/mmul --path-budget 30   # a root-to-leaf path share
 python cli.py --dir problems/mmul --path-budget 0 --max-iter 3 --max-depth 1  # depth mode
 python cli.py --dir problems/mmul --timeout 300      # tuner wall-clock budget override (seconds)
 python cli.py --dir problems/mmul --no-clean         # fresh run without archiving output/
+python cli.py --dir problems/mmul --finalize --finalize-timeout 300   # finalize an existing run's output
+python cli.py --dir problems/mmul --no-finalize     # skip the automatic finalize at the end of a run
 python cli.py --dir problems/mmul --clone mmul_v2    # clone the problem and exit
 python cli.py --dir problems/mmul --best             # show results (needs no API key)
 python cli.py --dir problems/mmul --prune-archives   # shrink archive/output_* on disk
@@ -79,10 +81,11 @@ The TypeScript API types are auto-generated from Python Pydantic models:
 python frontend/scripts/generate_types.py
 ```
 
-Run this whenever `state/types.py`, `models/strategy.py` or `models/decision.py`
-change — those are the only three the generator reads. `models/inputs.py` and
-`models/cases.py` are not covered; their TypeScript counterparts are hand-written in
-`frontend/src/api/client.ts`. `models/regions.py` never crosses HTTP and has none.
+Run this whenever `state/types.py`, `models/strategy.py`, `models/decision.py` or
+`models/finalize.py` change; those are the only four the generator reads.
+`models/inputs.py` and `models/cases.py` are not covered; their TypeScript counterparts
+are hand-written in `frontend/src/api/client.ts`. `models/regions.py` never crosses HTTP
+and has none.
 
 ---
 
@@ -114,7 +117,8 @@ See `docs/PROBLEM_YAML_GUIDE.md`, `docs/INPUTS_YAML_GUIDE.md` and
 
 ```
 cli.py
-  └─ engine/master.py          # Phase 1: analyze → strategize → dispatch
+  └─ engine/master.py          # Phase 1: analyze → strategize → dispatch; Phase 3 hook at the end
+       ├─ engine/finalize.py   # Phase 3: re-tune the best variants, widen toggles, check archs (nodes/finalize_*)
        ├─ nodes/analyze.py     # LLM: analyze problem + reference kernel
        ├─ nodes/strategize.py  # LLM: generate N parallel optimization strategies
        └─ engine/worker.py     # Phase 2: per-branch loop (4 parallel async coroutines)
@@ -269,6 +273,33 @@ fails the iteration like any other aborted step.
 returns early on `response.tool_calls` — without that, its empty-content retry path
 fires five times with backoff on every single tool call.
 
+### Finalize Step
+
+After the branches drain, `engine/master.run_optimization_engine` calls
+`engine.finalize.run_finalize(trigger="auto")` when `config.FINALIZE_AUTO` is on and
+`should_auto_finalize` agrees: no engine task raised and the monitor did not shut down
+with work still queued. A run that ended because its workers died is not a finished
+run, so it is not finalized.
+
+`FINALIZE_AUTO` is on by default, so every run that ends by itself finalizes. That
+costs up to `FINALIZE_MAX_FINALISTS` x `FINALIZE_TUNER_TIMEOUT` of GPU time per case
+(4 x 1000 s as shipped), plus the LLM calls: the selection, one widen step per
+finalist and the overview. `--no-finalize`, or `finalize: false` in a UI `RunConfig`,
+turns it off for one run. `--finalize-timeout` overrides `FINALIZE_TUNER_TIMEOUT` (per
+finalist per case); the other knobs are `FINALIZE_ARCHS` and `FINALIZE_MAX_FINALISTS`.
+
+`--finalize` runs the step alone on an existing `output/`. It refuses while
+`output/run.pid` names a live process, and holds that file itself while it runs, so
+the API will not start a run or a second finalize over the same manifest. A normal CLI
+run still writes no `run.pid` (only the API's runs do), so one in another terminal is
+not detected.
+
+**One writer, and never `branches/`.** `output/finalize/finalize.json` is written only
+by the finalize process; the API reads it. Everything finalize produces lives under
+`output/finalize/`, so a finished run's branches stay byte-for-byte as the workers left
+them. `run_finalize` never raises: a failure is recorded as `status="failed"`, and the
+next call resumes each finalist from the stage it reached.
+
 ### Kernel Rules
 
 `problem.yaml` takes a `rules:` block constraining what a kernel may do — the mechanism
@@ -354,6 +385,7 @@ the only copy of that attempt. Nothing prunes automatically.
 problems/<name>/output/
 ├── context.json                   # shared problem context
 ├── final_results.json             # best result summary
+├── finalize/                      # finalize.json (FinalizeManifest) plus one directory per finalist
 └── branches/
     └── <strategy_name>/
         ├── branch.json            # BranchManifest (worker-owned)
@@ -395,9 +427,10 @@ is every problem with no `cases:` block — keeps the layout above exactly.
 | `api/schemas.py` | Pydantic request/response models |
 | `api/helpers.py` | Shared state (`_running_problems`, `RunEntry`), utilities |
 | `api/problems.py` | Problem CRUD (list, create, update, delete, detail, logs) |
-| `api/tree.py` | Tree scanning, status, and GPU endpoints |
+| `api/tree.py` | Tree scanning (with a light `finalize` summary), status (with a per-run `phase`), and GPU endpoints |
 | `api/optimizer.py` | `/run`, `/stop`, `/resume` with per-GPU locking |
-| `api/branches.py` | Branch control (stop, resume, message, change-decision, config, iterations, delete) |
+| `api/branches.py` | Branch control (stop, resume, message, change-decision, config, iterations, delete); all but iterations answer 409 while finalize runs |
+| `api/finalize.py` | `POST`/`GET /api/problems/{name}/finalize`: start a finalize-only process, report its state (`not_run`, `finalizing`, `stopped`, `failed`, `stale`, `up_to_date`) |
 
 Multiple problems can run concurrently on different GPUs (per-GPU `RunEntry` registry).
 

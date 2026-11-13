@@ -370,6 +370,27 @@ async def test_second_iteration_is_seeded_for_editing(env, monkeypatch):
     assert "int a;" in state.kernel_code
 
 
+async def test_second_iteration_hands_the_previous_params_to_the_toolbox(env, monkeypatch):
+    _passing_check(monkeypatch)
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(HAPPY_TURNS))
+    await author_mod.author_node(make_state(env))
+    previous = (env["branch"] / "iter1" / "region_params.cpp").read_text(encoding="utf-8")
+
+    seen = {}
+
+    class Recording(author_mod.Toolbox):
+        def __init__(self, *args, **kwargs):
+            seen.update(kwargs)
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(author_mod, "Toolbox", Recording)
+    edit_turns = [[call("check_compilation")], [call("end_step", summary="same")]]
+    monkeypatch.setattr(author_mod, "get_llm_precise", lambda: script(edit_turns))
+    await author_mod.author_node(make_state(env, iter_num=2, current_iter=2))
+
+    assert seen["previous_params_src"] == previous
+
+
 async def test_seeding_recovers_regions_from_a_legacy_framework_cpp(env, monkeypatch):
     """An output directory written before this node only has framework.cpp."""
     import yaml

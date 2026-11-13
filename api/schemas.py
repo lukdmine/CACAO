@@ -96,6 +96,9 @@ class RunConfig(BaseModel):
     timeout: Optional[int] = None
     model: Optional[str] = None
     provider: Optional[str] = None
+    # None = the config default (FINALIZE_AUTO, FINALIZE_TUNER_TIMEOUT).
+    finalize: Optional[bool] = None
+    finalize_timeout: Optional[int] = None
 
 
 class BranchMessageRequest(BaseModel):

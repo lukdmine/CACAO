@@ -305,7 +305,8 @@ async def profile_node(state: WorkingState) -> WorkingState:
         output_base="results_profile",
         kernel_file=iter_dir / "kernels.cu",
         ref_file=problem_dir / ref_file,
-    ) + ["results"]
+        profile_results="results",
+    )
 
     ncu_cmd = [
         str(get_env().ncu),

@@ -57,6 +57,23 @@ def get_parent_branch_dir(branch_path: Union[str, Path, None]) -> Optional[Path]
     return None
 
 
+def write_pid_file(problem_dir: Path, pid: int):
+    """Write the optimizer's PID to output/run.pid.
+
+    Here rather than in api/helpers, which imports FastAPI, so cli --finalize can claim
+    the file too: the API refuses to start a run or a finalize while it names a live
+    process.
+    """
+    pid_file = Path(problem_dir) / "output" / "run.pid"
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(pid), encoding="utf-8")
+
+
+def remove_pid_file(problem_dir: Path):
+    """Remove the PID file (called on stop or normal exit)."""
+    (Path(problem_dir) / "output" / "run.pid").unlink(missing_ok=True)
+
+
 def save_output(path: Path, content: str, filename: Optional[str] = None) -> Path:
     """
     Save content to a file.

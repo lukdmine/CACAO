@@ -13,6 +13,7 @@ points at the cause.
 """
 
 from prompts._launcher_reference import LAUNCHER_RULES
+from prompts._portability import DEVICE_RULES
 from prompts._regions_reference import BASE_BLOCK_SIZE, PARAMETER_GROUPS
 from prompts._system_overview import SYSTEM_OVERVIEW
 
@@ -116,6 +117,8 @@ SYSTEM = (
     + "\n"
     + _REGION_LAUNCHER_HEADING
     + LAUNCHER_RULES
+    + "\n"
+    + DEVICE_RULES
     + "\n"
     + _REQUIREMENTS
 )

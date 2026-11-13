@@ -70,6 +70,7 @@ Write your plan as a markdown document:
 
 - [CONSTRAINT 1]: e.g., TILE_SIZE must be divisible by BLOCK_X
 - [CONSTRAINT 2]: Shared memory usage must be <= 48KB
+- [CONSTRAINT 3]: Device-dependent sizes (e.g. a persistent grid of `GetMaxComputeUnits() * BLOCKS_PER_SM`) are computed in the launcher; the parameter holds only the literal multiplier
 
 ## Critical Implementation Notes
 

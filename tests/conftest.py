@@ -130,3 +130,11 @@ def passing_toolbox(filled_workspace, tmp_path, monkeypatch):
     """A toolbox whose compile check passes."""
     pass_check(monkeypatch)
     return make_toolbox(filled_workspace, tmp_path)
+
+
+@pytest.fixture
+def all_ok(cov_branch):
+    path = cov_branch / "iter8" / "results.json"
+    if not path.exists():
+        pytest.skip("recorded results not present")
+    return path
