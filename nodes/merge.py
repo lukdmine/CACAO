@@ -78,6 +78,34 @@ def find_branch_results(branches_dir: Path) -> List[dict]:
     return results
 
 
+def find_precise_result(best: Optional[dict]) -> tuple:
+    """The re-measured time of a branch's winning iteration, as
+    (precise_best_time_us | None, speedup_precise | None).
+
+    A branch result knows only its best single-shot time, so this finds the iteration
+    whose summary produced it and reads the precise fields from that state.json. None
+    when that iteration predates the re-measure or the re-measure failed there: no
+    other iteration's number stands in.
+    """
+    import json
+
+    best = best or {}
+    best_time, branch_path = best.get("best_time_us"), best.get("branch_path")
+    if best_time is None or not branch_path:
+        return None, None
+    for state_file in sorted(Path(branch_path).glob("iter*/state.json")):
+        try:
+            rs = json.loads(state_file.read_text(encoding="utf-8")).get("results_summary")
+        except (json.JSONDecodeError, OSError):
+            continue
+        rs = rs or {}
+        if rs.get("best_time_us") is None or abs(rs["best_time_us"] - best_time) > 1e-6:
+            continue
+        if rs.get("precise_best_time_us") is not None:
+            return rs["precise_best_time_us"], rs.get("speedup_precise")
+    return None, None
+
+
 def _best_finalist(finalize, branch_results: List[dict]) -> Optional[dict]:
     """The finalist whose reported variant scores best, as a branch-result-shaped dict.
 
@@ -113,6 +141,8 @@ def _best_finalist(finalize, branch_results: List[dict]) -> Optional[dict]:
         "best_config": best["summary"].get("best_config"),
         "best_time_us": best["summary"].get("best_time_us"),
         "speedup": best["summary"].get("speedup"),
+        "precise_best_time_us": best["summary"].get("precise_best_time_us"),
+        "speedup_precise": best["summary"].get("speedup_precise"),
     }
 
 
@@ -164,12 +194,21 @@ def build_final_summary(
         ):
             best, best_source = finalist, "finalize"
     best = best or {}
+    if best_source == "finalize":
+        precise_us, speedup_precise = (
+            best.get("precise_best_time_us"), best.get("speedup_precise")
+        )
+    else:
+        precise_us, speedup_precise = find_precise_result(best)
 
     summary = {
         "best_branch": best.get("branch_name"),
         "best_config": best.get("best_config"),
         "best_time_us": best.get("best_time_us"),
         "speedup": best.get("speedup"),
+        # Min-of-N re-measure of the same config; None when it was never taken.
+        "precise_best_time_us": precise_us,
+        "speedup_precise": speedup_precise,
         "total_branches": len(branch_results),
         "all_branches": [
             {
@@ -338,6 +377,8 @@ def merge_node() -> dict:
         best_time = summary["best_time_us"]
         if best_time is not None:
             log(f"Best time: {best_time:.2f} µs")
+            if summary.get("precise_best_time_us") is not None:
+                log(f"Best time (precise, min of N): {summary['precise_best_time_us']:.2f} µs")
         else:
             log("Best time: N/A (no successful runs)")
         if summary["speedup"]:

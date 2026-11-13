@@ -37,6 +37,17 @@ def parse_reference_time_from_output(tuner_output: str) -> Optional[float]:
     return None
 
 
+def parse_precise_best_time_from_output(driver_output: str) -> Optional[float]:
+    """The driver's re-measure marker, in microseconds, or None.
+
+    In remeasure mode the driver replays the best configuration N times and prints the
+    minimum of KTT's per-Run CUDA-event kernel durations as
+    ``CACAO_PRECISE_BEST_US=<us>``.
+    """
+    match = re.search(r"CACAO_PRECISE_BEST_US=([\d.]+)", driver_output)
+    return float(match.group(1)) if match else None
+
+
 # Heading prefix of the text summarize_failures() produces. Public because state.history
 # keys the head-vs-tail excerpt off it — if these two drift apart, the summary is silently
 # tailed and loses its header and most widespread diagnostic. Only the prefix is fixed; the
@@ -374,9 +385,16 @@ def calculate_speedup(best_time: float, ref_time: float) -> float:
 
 
 def get_results_summary(
-    results_path: Path, reference_time_us: Optional[float] = None
+    results_path: Path,
+    reference_time_us: Optional[float] = None,
+    precise_best_time_us: Optional[float] = None,
 ) -> dict:
-    """Summarise one results.json: counts, best config and time, speedup."""
+    """Summarise one results.json: counts, best config and time, speedup.
+
+    ``precise_best_time_us`` is the post-tune re-measure of the best config (min of N
+    replays). It gets its own fields: ``best_time_us`` and ``speedup`` keep carrying the
+    single-shot search values, so the two precisions never mix.
+    """
     has_success, num_ok, num_total = check_results(results_path)
 
     summary = {
@@ -387,6 +405,8 @@ def get_results_summary(
         "best_time_us": None,
         "reference_time_us": reference_time_us,
         "speedup": None,
+        "precise_best_time_us": precise_best_time_us,
+        "speedup_precise": None,
     }
 
     if has_success:
@@ -401,6 +421,11 @@ def get_results_summary(
         summary["speedup"] = calculate_speedup(
             summary["best_time_us"],
             reference_time_us,
+        )
+
+    if reference_time_us and precise_best_time_us:
+        summary["speedup_precise"] = calculate_speedup(
+            precise_best_time_us, reference_time_us
         )
 
     return summary
@@ -480,6 +505,14 @@ def aggregate_case_summaries(per_case: dict, primary: str) -> dict:
         # the problem score better by being unmeasured.
         out["geomean_speedup"] = None
     out["speedup"] = out["geomean_speedup"]
+
+    # Same rule for the re-measured score: every case or none.
+    precise = [(s or {}).get("speedup_precise") for s in per_case.values()]
+    out["speedup_precise"] = (
+        math.exp(sum(math.log(s) for s in precise) / len(precise))
+        if precise and all(s for s in precise)
+        else None
+    )
 
     ranked = [(n, (s or {}).get("speedup")) for n, s in per_case.items()]
     ranked = [(n, s) for n, s in ranked if s]

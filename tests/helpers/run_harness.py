@@ -68,6 +68,7 @@ def run_two_case_node(
     compile_framework=None,
     fail_tuning_for: str | None = None,
     cases: list | None = None,
+    precise_us: float | None = None,
     run_kwargs: dict | None = None,
 ):
     """Build a problem + iteration under tmp_path and run run_node against it."""
@@ -116,9 +117,17 @@ def run_two_case_node(
         )
         return "Tuning done: 1 configurations -> results\n"
 
+    async def _remeasure(cmd, cdir):
+        if precise_us is None:
+            return None, ""
+        _ORDER.append(f"remeasure:{Path(cdir).name}")
+        _COMMANDS.append(list(cmd))
+        return precise_us, "\n[RE-MEASURE]\n"
+
     patches = [
         (run_mod, "compile_framework", compile_framework or _compile),
         (run_mod, "_execute_driver", _drive),
+        (run_mod, "_remeasure_best", _remeasure),
     ]
     saved = [(m, n, getattr(m, n)) for m, n, _ in patches]
     for m, n, v in patches:

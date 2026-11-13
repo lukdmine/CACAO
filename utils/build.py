@@ -242,6 +242,7 @@ def driver_command(
     profile_results: str = "",
     mode: str = "random",
     seed_results: str = "",
+    precise_runs: int = 0,
 ) -> list[str]:
     """argv for a compiled framework driver.
 
@@ -250,6 +251,7 @@ def driver_command(
     argv[8], and a non-default ``mode`` appends ``[profile_results, mode,
     seed_results]`` so the mode lands in argv[9] (profile mode, if set, still wins in
     the driver). ``seed_results`` is a results base name, as for ``profile_results``.
+    ``precise_runs`` with ``mode="remeasure"`` appends the replay count as argv[11].
     """
     cmd = [
         str(binary),
@@ -263,6 +265,8 @@ def driver_command(
     ]
     if mode != "random":
         cmd += [str(profile_results), mode, str(seed_results)]
+        if precise_runs:
+            cmd.append(str(precise_runs))
     elif profile_results:
         cmd.append(str(profile_results))
     return cmd

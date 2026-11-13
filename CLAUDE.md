@@ -434,6 +434,24 @@ provenance sidecar (`--check` flags a stale one). See
 `tools/library_bench/README.md`. Comparison problems using it:
 `problems/spmm_cusparse/`, `problems/conv2d_cudnn/`.
 
+The search stays single-shot per config: timing every config precisely would multiply
+the tuning cost, and ranking does not need it. After each case's successful tune,
+`nodes/run.py` replays that case's **best** config through the driver's `remeasure`
+mode (`argv[9]`, with the results base name in `argv[8]` and the replay count in
+`argv[11]`) and records the min of N CUDA-event times as `precise_best_time_us` and
+`speedup_precise` in the case's summary. `best_time_us` and `speedup` keep their
+single-shot meaning and the two never mix. A multi-case summary carries the geometric
+mean of the precise speedups, or `None` unless every case has one.
+`config.PRECISE_RUNS` is N (25; 0 turns it off) and the `CACAO_PRECISE_RUNS` env var
+overrides it. A failed re-measure is a warning, never a failed iteration.
+
+Two readers use it. `final_results.json` carries both fields for the winner
+(`nodes/merge.find_precise_result` reads them from the winning iteration's
+`state.json`). Finalize's source-versus-finalized choice goes through
+`utils.branch_bests.outranks`, which compares precise scores only when **both**
+variants have one; a source iteration tuned before the re-measure existed has none, and
+that comparison stays single-shot.
+
 ### Server + Frontend
 
 `server.py` is a thin entry point that creates the FastAPI app via `api.create_app()`. The server is split into an `api/` package:

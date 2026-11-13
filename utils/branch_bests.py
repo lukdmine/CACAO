@@ -77,6 +77,22 @@ def summary_rank_key(summary: Optional[dict]) -> tuple:
     )
 
 
+def outranks(a: Optional[dict], b: Optional[dict]) -> bool:
+    """Whether summary ``a`` beats ``b``.
+
+    When both carry a re-measured score the comparison uses it: two single-shot times
+    a few percent apart are ordered by noise. With one side missing it, both fall back
+    to their single-shot numbers, since a precise time against a single-shot one is not
+    a like-for-like comparison.
+    """
+    a, b = a or {}, b or {}
+    for key, better in (("speedup_precise", max), ("precise_best_time_us", min)):
+        x, y = a.get(key), b.get(key)
+        if x and y:
+            return x != y and better(x, y) == x
+    return summary_rank_key(a) < summary_rank_key(b)
+
+
 def rank_key(b: BranchBest) -> tuple:
     return summary_rank_key(b.summary)
 

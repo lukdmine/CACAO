@@ -92,6 +92,14 @@ STEP_TRUNCATION_RETRIES = 3
 #   "off"    — nothing about other branches
 CROSS_BRANCH_ACCESS = "errors"
 
+# ===== Precise re-measure =====
+# After a successful tune the run node replays the best config this many times through
+# the driver's remeasure mode and records the min as precise_best_time_us. The search
+# itself stays single-shot. 0 turns it off; the CACAO_PRECISE_RUNS env var overrides.
+PRECISE_RUNS = 25
+# Wall-clock cap on one re-measure (seconds). Past it the single-shot numbers stand.
+PRECISE_TIMEOUT_S = 300
+
 # ===== Finalize =====
 # The post-run pass (engine/finalize.py): re-tunes the best variants, widens toggles and
 # checks other GPU architectures. Writes only under output/finalize/.

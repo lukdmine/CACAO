@@ -87,3 +87,14 @@ def test_mcmc_mode_runs_seeded_and_unseeded(built):
         proc = _run(built, 10, "", "mcmc", seed)
         assert proc.returncode == 0, proc.stdout[-2000:]
         assert load_records(built / "results.json")
+
+
+def test_remeasure_mode_replays_the_best_config_and_leaves_results_alone(built):
+    """The post-tune re-measure: argv[8] names the results, argv[11] the replay count."""
+    assert _run(built, 10).returncode == 0
+    before = (built / "results.json").read_bytes()
+    proc = _run(built, 10, "results", "remeasure", "", "5")
+    assert proc.returncode == 0, proc.stdout[-2000:]
+    m = re.search(r"^CACAO_PRECISE_BEST_US=([\d.]+)$", proc.stdout, re.MULTILINE)
+    assert m and float(m.group(1)) > 0, proc.stdout[-2000:]
+    assert (built / "results.json").read_bytes() == before

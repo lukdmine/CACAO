@@ -49,6 +49,7 @@ from utils.branch_bests import (
     BranchBest,
     collect_branch_bests,
     is_valid_summary,
+    outranks,
     source_fingerprint,
     summary_rank_key,
 )
@@ -482,7 +483,7 @@ class _Finalize:
         )
         if is_valid_summary(summary):
             f.stages["tune"] = "done"
-            if summary_rank_key(summary) < summary_rank_key(f.source.summary):
+            if outranks(summary, f.source.summary):
                 f.reported, f.reported_dir = "finalized", f.finalized.dir
         else:
             # Failed rather than done, so a later re-finalize tries again (D9 reuses only

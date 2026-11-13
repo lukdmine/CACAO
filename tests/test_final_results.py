@@ -261,6 +261,7 @@ def test_without_a_manifest_the_shape_is_unchanged(output_dir):
 
     assert set(summary) == {
         "best_branch", "best_config", "best_time_us", "speedup",
+        "precise_best_time_us", "speedup_precise",
         "total_branches", "all_branches",
     }
 
