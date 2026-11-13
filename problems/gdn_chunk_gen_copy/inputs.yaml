@@ -1,0 +1,108 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: kT
+  dtype: int
+  value: 512
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kHk
+  dtype: int
+  value: 16
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kHv
+  dtype: int
+  value: 48
+  placements:
+  - host
+  - runtime
+- kind: scalar
+  name: kD
+  dtype: int
+  value: 128
+  placements:
+  - host
+  - runtime
+- kind: buffer
+  name: q
+  dtype: float
+  size: kT * kHk * kD
+  access: read
+  init: random
+  min: -1
+  max: 1
+  validate: false
+- kind: buffer
+  name: k
+  dtype: float
+  size: kT * kHk * kD
+  access: read
+  init: random
+  min: -1
+  max: 1
+  validate: false
+- kind: buffer
+  name: v
+  dtype: float
+  size: kT * kHv * kD
+  access: read
+  init: random
+  min: -0.3
+  max: 5.0
+  validate: false
+- kind: buffer
+  name: g
+  dtype: float
+  size: kT * kHv
+  access: read
+  init: custom
+  validate: false
+  body: "std::vector<float> v(static_cast<size_t>(kT) * static_cast<size_t>(kHv));\nstd::mt19937 rng(30677878u);\n\
+    // Per-head decay regimes. One uniform range cannot do both jobs: a wide range\n// stresses any exp(+G)/exp(-G)\
+    \ factorisation (which overflows fp16 above |G|=11\n// and fp32 above 88) but annihilates the carried\
+    \ state, so the recurrence stops\n// being tested; a narrow range does the opposite. Real models have\
+    \ a spread of\n// decay rates across heads, so the benchmark has one too:\n//   h%3==0  slow  (|G_cum|\
+    \ ~ 0.3 over a 64-token chunk) -- state must persist\n//   h%3==1  medium(|G_cum| ~ 48: e^48 overflows fp16, fits fp32)\n//   h%3==2\
+    \  fast  (|G_cum| ~ 640, llama.cpp's test range) -- exp(-G)\n// overflows fp32; decay must be applied\n//                    \
+    \                as the bounded difference exp(G_i - G_j)\nfor (int h = 0; h < kHv; ++h) {\n    const\
+    \ float lo = (h % 3 == 0) ? -0.05f : ((h % 3 == 1) ? -1.5f : -20.0f);\n    std::uniform_real_distribution<float>\
+    \ d(lo, 0.0f);\n    for (int t = 0; t < kT; ++t) {\n        v[static_cast<size_t>(t) * static_cast<size_t>(kHv)\
+    \ + h] = d(rng);\n    }\n}\nreturn v;"
+- kind: buffer
+  name: beta
+  dtype: float
+  size: kT * kHv
+  access: read
+  init: random
+  min: 0
+  max: 1
+  validate: false
+- kind: buffer
+  name: o
+  dtype: float
+  size: kT * kHv * kD
+  access: write
+  init: zeros
+  validate: true
+- kind: buffer
+  name: s0
+  dtype: float
+  size: kHv * kD * kD
+  access: read
+  init: random
+  min: -1
+  max: 1
+  validate: false
+- kind: buffer
+  name: state
+  dtype: float
+  size: kHv * kD * kD
+  access: write
+  init: zeros
+  validate: true

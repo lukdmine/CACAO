@@ -16,4 +16,4 @@ reference:
 validation:
   tolerance: 0.001
 tuning:
-  duration_s: 100
+  duration_s: 300

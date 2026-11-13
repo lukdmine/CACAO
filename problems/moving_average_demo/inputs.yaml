@@ -1,0 +1,33 @@
+headers: []
+shared_setup: ''
+args:
+- kind: scalar
+  name: N
+  dtype: int
+  value: 33554432
+  placements:
+  - host
+  - define
+- kind: scalar
+  name: R
+  dtype: int
+  value: 256
+  placements:
+  - host
+  - define
+- kind: buffer
+  name: input
+  dtype: float
+  size: N
+  access: read
+  init: random
+  min: -2
+  max: 2
+  validate: false
+- kind: buffer
+  name: average
+  dtype: float
+  size: N
+  access: write
+  init: zeros
+  validate: true
